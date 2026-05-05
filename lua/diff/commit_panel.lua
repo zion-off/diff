@@ -161,10 +161,12 @@ local function render(buf, commits)
         local badge = STATUS_BADGE[f.status] or "·"
         local fname = f.path
         local available = panel_w - 6 - 4 -- "    " indent + " [X]"
-        local display_name = #fname > available
+        local fname_w = vim.fn.strdisplaywidth(fname)
+        local display_name = fname_w > available
           and ("…" .. fname:sub(-(available - 1)))
           or fname
-        local fpad = math.max(1, panel_w - 4 - #display_name - 4)
+        local display_w = vim.fn.strdisplaywidth(display_name)
+        local fpad = math.max(1, panel_w - 4 - display_w - 4)
         local fline = "    " .. display_name .. string.rep(" ", fpad) .. " [" .. badge .. "]"
 
         table.insert(lines, fline)

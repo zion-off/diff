@@ -388,12 +388,12 @@ local function setup_keymaps(left_buf, right_buf, opts)
 
     -- Expand context (zo) — expand by N more lines at the separator under cursor
     map(buf, "n", km.expand_context or "zo", function()
-      M._expand_context()
+      M.expand_context()
     end)
 
     -- Expand all (zR) — show all context (set context_lines to nil and re-render)
     map(buf, "n", km.expand_all or "zR", function()
-      M._expand_all()
+      M.expand_all()
     end)
 
     -- Close diff view (return to sidebar)
@@ -408,22 +408,22 @@ local function setup_keymaps(left_buf, right_buf, opts)
 end
 
 --- Expand context by doubling the context_lines setting and re-rendering.
-function M._expand_context()
+function M.expand_context()
   if not M._current_hunks then return end
   local current = M._current_ctx or 3
   M._current_ctx = current + 10 -- expand by 10 more lines
-  M._rerender()
+  M.rerender()
 end
 
 --- Show all context (no collapsing).
-function M._expand_all()
+function M.expand_all()
   if not M._current_hunks then return end
   M._current_ctx = nil -- nil means show all
-  M._rerender()
+  M.rerender()
 end
 
 --- Re-render the diff with current state (used after context expansion).
-function M._rerender()
+function M.rerender()
   if not M._current_hunks or not M._current_old or not M._current_new then return end
   if not M._left_buf or not vim.api.nvim_buf_is_valid(M._left_buf) then return end
   if not M._right_buf or not vim.api.nvim_buf_is_valid(M._right_buf) then return end
