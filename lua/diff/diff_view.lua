@@ -606,14 +606,17 @@ local function get_new_content(root, file, callback)
       callback(code == 0 and lines or {})
     end)
   else
+    -- Use vim.fn.readfile (C-optimized) and defer callback for async consistency
     local full = root .. "/" .. file.path
-    local lines = {}
-    local f = io.open(full, "r")
-    if f then
-      for line in f:lines() do table.insert(lines, line) end
-      f:close()
-    end
-    callback(lines)
+    vim.schedule(function()
+      local ok, lines = pcall(vim.fn.readfile, full)
+      if not ok or not lines then
+        vim.notify("diff.nvim: cannot read " .. file.path, vim.log.levels.WARN)
+        callback({})
+      else
+        callback(lines)
+      end
+    end)
   end
 end
 

@@ -42,13 +42,21 @@ end
 -- Render
 -- ---------------------------------------------------------------------------
 
---- Truncate a string to max_len, appending "…" if truncated.
+--- Truncate a string to max_len display columns, appending "…" if truncated.
+--- Handles multibyte characters correctly.
 --- @param s       string
 --- @param max_len integer
 --- @return string
 local function trunc(s, max_len)
-  if #s <= max_len then return s end
-  return s:sub(1, max_len - 1) .. "…"
+  local display_w = vim.fn.strdisplaywidth(s)
+  if display_w <= max_len then return s end
+  -- Use strcharpart to safely truncate without splitting codepoints
+  local result = vim.fn.strcharpart(s, 0, max_len - 1)
+  -- If still too wide (wide chars), trim further
+  while vim.fn.strdisplaywidth(result) >= max_len and #result > 0 do
+    result = vim.fn.strcharpart(result, 0, vim.fn.strchars(result) - 1)
+  end
+  return result .. "…"
 end
 
 local STATUS_BADGE = {
@@ -202,13 +210,20 @@ function M.setup(buf, win, repo_root)
   _win = win
   _repo_root = repo_root
 
+  -- Reset state on each setup (prevents leaks between open/close cycles)
+  expanded = {}
+  file_cache = {}
+  line_map = {}
+  _commits = nil
+
   local cfg  = config.get()
   local km   = cfg.keymaps or {}
   local opts = { buffer = buf, nowait = true, silent = true }
 
   -- <CR>: toggle commit expansion or open file diff
   vim.keymap.set("n", km.open_diff or "<CR>", function()
-    local lnr  = vim.api.nvim_win_get_cursor(win)[1]
+    if not _win or not vim.api.nvim_win_is_valid(_win) then return end
+    local lnr  = vim.api.nvim_win_get_cursor(_win)[1]
     local meta = line_map[lnr]
     if not meta then return end
 
@@ -229,6 +244,7 @@ function M.setup(buf, win, repo_root)
               vim.notify("diff.nvim: " .. err, vim.log.levels.WARN)
               return
             end
+            if not vim.api.nvim_buf_is_valid(buf) then return end
             file_cache[hash] = files or {}
             expanded[hash] = true
             render(buf, _commits or {})

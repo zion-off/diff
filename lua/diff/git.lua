@@ -14,7 +14,7 @@ function M.run(args, cwd, callback)
 
   local cmd = vim.list_extend({ "git" }, args)
 
-  vim.fn.jobstart(cmd, {
+  local job_id = vim.fn.jobstart(cmd, {
     cwd = cwd,
     stdout_buffered = true,
     stderr_buffered = true,
@@ -43,6 +43,13 @@ function M.run(args, cwd, callback)
       end)
     end,
   })
+
+  -- jobstart returns <= 0 on failure (command not found, invalid args, etc.)
+  if job_id <= 0 then
+    vim.schedule(function()
+      callback({}, "failed to start git process (is git installed?)", -1)
+    end)
+  end
 end
 
 -- ---------------------------------------------------------------------------

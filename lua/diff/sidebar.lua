@@ -108,7 +108,15 @@ end
 --- and main editing area on the right.
 --- @param repo_root string
 function M.open(repo_root)
-  if M.is_open() then return end
+  -- Clean up any partial state from a previous session
+  if M._file_win or M._commit_win or M._main_win then
+    if not M.is_open() then
+      -- Partial state — clean it up first
+      M.close()
+    else
+      return -- already fully open
+    end
+  end
 
   M._repo_root = repo_root
   local cfg    = config.get()
@@ -178,10 +186,9 @@ end
 
 --- Close the diff.nvim interface, restore previous layout.
 function M.close()
-  if M._aug then
-    pcall(vim.api.nvim_del_augroup_by_id, M._aug)
-    M._aug = nil
-  end
+  -- Note: We intentionally do NOT delete M._aug (auto-refresh augroup) here.
+  -- The callback checks M.is_open() so it's harmless when closed,
+  -- and it needs to survive close/reopen cycles.
 
   -- Close the diff.nvim tab (all windows in it will be closed)
   -- First, check if the current tab is the diff.nvim tab

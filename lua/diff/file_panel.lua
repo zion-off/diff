@@ -171,6 +171,10 @@ end
 --- @param win       integer
 --- @param repo_root string
 function M.setup(buf, win, repo_root)
+  -- Reset state on each setup (prevents leaks between open/close cycles)
+  line_map = {}
+  collapsed = { staged = false, unstaged = false }
+
   local cfg = config.get()
   local km  = cfg.keymaps or {}
 
