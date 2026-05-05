@@ -93,9 +93,9 @@ local function render(buf, commits)
     local seg_hash    = "  " .. hash_str .. " "
     local seg_refs    = refs_plain
     local seg_subject = subject_str
-    -- Right-side padding to align author/time
-    local used = #seg_hash + #seg_refs + #seg_subject
-    local pad  = math.max(1, panel_w - used - #author_str - 2 - #time_str - 2)
+    -- Right-side padding to align author/time; ensure non-negative.
+    local fixed_w = #seg_hash + #seg_refs + #seg_subject + #author_str + 2 + #time_str
+    local pad     = math.max(1, panel_w - fixed_w)
     local line = seg_hash .. seg_refs .. seg_subject
                  .. string.rep(" ", pad)
                  .. author_str .. "  " .. time_str

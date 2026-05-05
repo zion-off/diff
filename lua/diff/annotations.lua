@@ -247,7 +247,7 @@ function M._delete_note_at_cursor(buf, path, repo_root)
   local new_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local f = io.open(path, "w")
   if f then
-    f:write(table.concat(new_lines, "\n"))
+    f:write(table.concat(new_lines, "\n") .. "\n")
     f:close()
     vim.notify("diff.nvim: note deleted", vim.log.levels.INFO)
   end

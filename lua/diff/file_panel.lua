@@ -96,9 +96,12 @@ local function render(buf, status)
     for _, f in ipairs(status.staged) do
       local badge    = STATUS_BADGE[f.status] or "·"
       local name     = f.path
-      -- Right-align the badge: pad name to (panel_w - 4), then " [X]"
-      local pad      = math.max(1, panel_w - 4 - #name - 2)
-      local line     = "  " .. name .. string.rep(" ", pad) .. "[" .. badge .. "]"
+      -- Right-align the badge with at least one space separator.
+      -- panel_w - 2 (indent) - 1 (space) - 3 ("[X]") = available for name
+      local available = panel_w - 2 - 1 - 3
+      local display_name = #name > available and ("…" .. name:sub(-(available - 1))) or name
+      local pad      = math.max(1, panel_w - 2 - #display_name - 3)
+      local line     = "  " .. display_name .. string.rep(" ", pad) .. "[" .. badge .. "]"
       local fhl      = file_hl(f, "staged")
       local badge_hl = STATUS_HL[f.status] or "DiffNvimStatusUntracked"
 
@@ -106,8 +109,8 @@ local function render(buf, status)
       local lnr = #lines
       line_map[lnr] = { type = "file", section = "staged", file = f }
 
-      -- filename highlight (cols 2 .. 2+#name)
-      table.insert(hl_queue, { lnr - 1, fhl, 2, 2 + #name })
+      -- filename highlight (cols 2 .. 2+#display_name)
+      table.insert(hl_queue, { lnr - 1, fhl, 2, 2 + #display_name })
       -- badge highlight: last 3 chars "[X]"
       local badge_col = #line - 3
       table.insert(hl_queue, { lnr - 1, badge_hl, badge_col, badge_col + 3 })
@@ -127,8 +130,10 @@ local function render(buf, status)
     for _, f in ipairs(status.unstaged) do
       local badge    = STATUS_BADGE[f.status] or "·"
       local name     = f.path
-      local pad      = math.max(1, panel_w - 4 - #name - 2)
-      local line     = "  " .. name .. string.rep(" ", pad) .. "[" .. badge .. "]"
+      local available = panel_w - 2 - 1 - 3
+      local display_name = #name > available and ("…" .. name:sub(-(available - 1))) or name
+      local pad      = math.max(1, panel_w - 2 - #display_name - 3)
+      local line     = "  " .. display_name .. string.rep(" ", pad) .. "[" .. badge .. "]"
       local fhl      = file_hl(f, "unstaged")
       local badge_hl = STATUS_HL[f.status] or "DiffNvimStatusUntracked"
 
@@ -136,7 +141,7 @@ local function render(buf, status)
       local lnr = #lines
       line_map[lnr] = { type = "file", section = "unstaged", file = f }
 
-      table.insert(hl_queue, { lnr - 1, fhl, 2, 2 + #name })
+      table.insert(hl_queue, { lnr - 1, fhl, 2, 2 + #display_name })
       local badge_col = #line - 3
       table.insert(hl_queue, { lnr - 1, badge_hl, badge_col, badge_col + 3 })
     end
