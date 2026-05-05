@@ -1,8 +1,8 @@
 local M = {}
 
 -- ---------------------------------------------------------------------------
--- Colour palettes — chosen to be muted enough that tree-sitter foreground
--- colours are clearly legible on top of the diff background tints.
+-- Color palettes — chosen to be muted enough that tree-sitter foreground
+-- colors are clearly legible on top of the diff background tints.
 -- Priorities: PRIORITY_LINE_BG (50) < TS (~100) < PRIORITY_WORD_HL (150)
 -- ---------------------------------------------------------------------------
 
@@ -132,11 +132,14 @@ local function apply_highlights()
   end
 
   for group, opts in pairs(applied) do
-    if opts.link and not opts.bg and not opts.fg then
-      vim.api.nvim_set_hl(0, group, { link = opts.link, default = false })
+    if opts.link then
+      -- Neovim 0.9+ supports link + extra attributes (bold, italic, etc.) together.
+      -- Build the full opts table so groups like DiffNvimSectionHeader (link=Title,
+      -- bold=true) correctly apply both the link and the bold attribute.
+      local hl_opts = vim.deepcopy(opts)
+      vim.api.nvim_set_hl(0, group, hl_opts)
     else
       local hl_opts = vim.deepcopy(opts)
-      hl_opts.link = nil
       vim.api.nvim_set_hl(0, group, hl_opts)
     end
   end

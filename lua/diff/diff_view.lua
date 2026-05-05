@@ -458,8 +458,9 @@ local function setup_keymaps(left_buf, right_buf, opts)
         end
         if not line_end then line_end = line_start end
       else
-        -- Aligned table not available: cannot determine original file line number.
-        -- Bail rather than record a raw buffer row (which is meaningless as a file annotation).
+        -- Aligned table not available (e.g. when the diff view was closed between
+        -- the key press and the callback). Cannot map buffer row → original file line,
+        -- so bail rather than record a meaningless buffer row as an annotation.
         vim.notify("diff.nvim: cannot determine file line mapping for annotation", vim.log.levels.WARN)
         return
       end

@@ -255,7 +255,7 @@ local function show_commit_tooltip(repo_root, hash)
       for _, l in ipairs(lines) do
         width = math.max(width, vim.fn.strdisplaywidth(l))
       end
-      width  = math.max(1, math.min(width + 2, max_width))
+      width = math.max(1, math.min(width + 2, max_width))
       local height = math.max(1, math.min(#lines, max_height))
 
       -- Clamp to viewport bounds
@@ -268,8 +268,9 @@ local function show_commit_tooltip(repo_root, hash)
       vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
       vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 
-      -- Guard: request ID already checked at top of xpcall body;
-      -- no need for the old M._tooltip_buf validity check here.
+      -- The request ID check at the top of the xpcall body already guarantees
+      -- this callback belongs to the current tooltip request; no additional
+      -- per-buffer validity guard is needed here.
 
       local ok_win, win = pcall(vim.api.nvim_open_win, buf, true, {
         relative  = "editor",
