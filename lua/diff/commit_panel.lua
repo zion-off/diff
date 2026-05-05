@@ -49,7 +49,7 @@ end
 --- @param buf     integer
 --- @param commits table[]
 local function render(buf, commits)
-  vim.api.nvim_buf_set_option(buf, "modifiable", true)
+  vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
   vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
   line_map = {}
 
@@ -148,7 +148,7 @@ local function render(buf, commits)
     end
   end
 
-  vim.api.nvim_buf_set_option(buf, "modifiable", false)
+  vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 end
 
 -- ---------------------------------------------------------------------------

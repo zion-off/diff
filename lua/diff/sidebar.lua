@@ -40,10 +40,10 @@ local function make_panel_buf(name)
 
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_name(buf, name)
-  vim.api.nvim_buf_set_option(buf, "buftype",    "nofile")
-  vim.api.nvim_buf_set_option(buf, "bufhidden",  "wipe")
-  vim.api.nvim_buf_set_option(buf, "swapfile",   false)
-  vim.api.nvim_buf_set_option(buf, "modifiable", false)
+  vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
+  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
+  vim.api.nvim_set_option_value("swapfile", false, { buf = buf })
+  vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
   return buf
 end
 
@@ -62,7 +62,7 @@ local function set_panel_win_opts(win)
     list           = false,
   }
   for k, v in pairs(opts) do
-    pcall(vim.api.nvim_win_set_option, win, k, v)
+    pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
 end
 

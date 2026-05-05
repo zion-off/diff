@@ -76,8 +76,8 @@ end
 function M.prompt_note(opts)
   -- Create a scratch buffer for the prompt
   local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
-  vim.api.nvim_buf_set_option(buf, "buftype", "prompt")
+  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
+  vim.api.nvim_set_option_value("buftype", "prompt", { buf = buf })
   vim.fn.prompt_setprompt(buf, "Note: ")
 
   local width  = math.min(70, vim.o.columns - 4)
@@ -144,10 +144,10 @@ function M.toggle_notes(repo_root)
   end
 
   local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_option(buf, "buftype",   "nofile")
-  vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
-  vim.api.nvim_buf_set_option(buf, "filetype",  "markdown")
-  vim.api.nvim_buf_set_option(buf, "modifiable", false)
+  vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
+  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
+  vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
+  vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
 
   local width  = math.min(80, vim.o.columns - 4)
@@ -167,8 +167,8 @@ function M.toggle_notes(repo_root)
     title_pos = "center",
   })
 
-  vim.api.nvim_win_set_option(win, "wrap",   false)
-  vim.api.nvim_win_set_option(win, "number", false)
+  vim.api.nvim_set_option_value("wrap", false, { win = win })
+  vim.api.nvim_set_option_value("number", false, { win = win })
 
   M._win = win
   M._buf = buf
@@ -241,9 +241,9 @@ function M._delete_note_at_cursor(buf, path, repo_root)
   end
 
   -- Remove lines from buffer
-  vim.api.nvim_buf_set_option(buf, "modifiable", true)
+  vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
   vim.api.nvim_buf_set_lines(buf, block_start - 1, block_end, false, {})
-  vim.api.nvim_buf_set_option(buf, "modifiable", false)
+  vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 
   -- Persist the change to disk
   local new_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)

@@ -99,14 +99,14 @@ end
 
 --- Open the diff view for a file programmatically.
 --- @param file_path string  Path relative to the repo root.
---- @param staged    boolean
+--- @param staged    boolean  true to diff against the staged (index) version.
 function M.open_diff(file_path, staged)
   M._with_root(function(root)
     local dv = require("diff.diff_view")
     dv.open_file_diff(root, {
       path   = file_path,
-      status = staged and "modified" or "modified",
-      staged = staged,
+      status = "modified",
+      staged = staged or false,
     })
   end)
 end

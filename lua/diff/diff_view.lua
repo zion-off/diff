@@ -67,11 +67,11 @@ local function make_buf(name)
 
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_name(buf, name)
-  vim.api.nvim_buf_set_option(buf, "buftype",   "nofile")
-  vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
-  vim.api.nvim_buf_set_option(buf, "swapfile",  false)
-  vim.api.nvim_buf_set_option(buf, "modifiable", false)
-  vim.api.nvim_buf_set_option(buf, "readonly",   true)
+  vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
+  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
+  vim.api.nvim_set_option_value("swapfile", false, { buf = buf })
+  vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+  vim.api.nvim_set_option_value("readonly", true, { buf = buf })
   return buf
 end
 
@@ -91,12 +91,14 @@ local function set_win_opts(win)
     numberwidth    = 5,
   }
   for k, v in pairs(base_opts) do
-    pcall(vim.api.nvim_win_set_option, win, k, v)
+    pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
   -- statuscolumn: suppress line numbers on filler rows (NeoVim 0.9+)
   pcall(
-    vim.api.nvim_win_set_option, win, "statuscolumn",
-    "%!v:lua.require('diff.diff_view')._statuscolumn()"
+    vim.api.nvim_set_option_value,
+    "statuscolumn",
+    "%!v:lua.require('diff.diff_view')._statuscolumn()",
+    { win = win }
   )
 end
 
@@ -422,9 +424,9 @@ function M.open(opts)
     for _, entry in ipairs(aligned) do
       table.insert(content, entry.content)
     end
-    vim.api.nvim_buf_set_option(buf, "modifiable", true)
+    vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, content)
-    vim.api.nvim_buf_set_option(buf, "modifiable", false)
+    vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
   end
 
   fill_buf(left_buf,  left_aln)
@@ -436,8 +438,8 @@ function M.open(opts)
     ft = vim.filetype.match({ filename = opts.file_path }) or ""
   end
   if ft ~= "" then
-    pcall(vim.api.nvim_buf_set_option, left_buf,  "filetype", ft)
-    pcall(vim.api.nvim_buf_set_option, right_buf, "filetype", ft)
+    pcall(vim.api.nvim_set_option_value, "filetype", ft, { buf = left_buf })
+    pcall(vim.api.nvim_set_option_value, "filetype", ft, { buf = right_buf })
   end
 
   -- ── Create windows ───────────────────────────────────────────────────────
