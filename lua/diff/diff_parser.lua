@@ -19,16 +19,28 @@ function M.parse(diff_text)
   local new_line = 0
 
   for _, raw in ipairs(vim.split(diff_text, "\n", { plain = true })) do
-    -- Hunk header: @@ -a[,b] +c[,d] @@
-    local os, oc, ns, nc =
-      raw:match("^@@ %-(%d+),(%d+) %+(%d+),(%d+) @@")
+    -- Hunk header: @@ -a[,b] +c[,d] @@  (counts are each optional → default 1)
+    local os, oc, ns, nc
+
+    -- Try all four combinations of present/omitted counts
+    os, oc, ns, nc = raw:match("^@@ %-(%d+),(%d+) %+(%d+),(%d+) @@")
 
     if not os then
-      -- Handle omitted counts (@@ -a +c @@ means count=1)
-      local os2, ns2 = raw:match("^@@ %-(%d+) %+(%d+) @@")
-      if os2 then
-        os, oc, ns, nc = os2, "1", ns2, "1"
-      end
+      -- old count present, new count omitted
+      local a, b, c = raw:match("^@@ %-(%d+),(%d+) %+(%d+) @@")
+      if a then os, oc, ns, nc = a, b, c, "1" end
+    end
+
+    if not os then
+      -- old count omitted, new count present
+      local a, b, c = raw:match("^@@ %-(%d+) %+(%d+),(%d+) @@")
+      if a then os, oc, ns, nc = a, "1", b, c end
+    end
+
+    if not os then
+      -- both counts omitted
+      local a, b = raw:match("^@@ %-(%d+) %+(%d+) @@")
+      if a then os, oc, ns, nc = a, "1", b, "1" end
     end
 
     if os then

@@ -186,8 +186,12 @@ function M.setup(buf, win, repo_root)
       collapsed[meta.section] = not collapsed[meta.section]
       M.refresh(buf, win, repo_root)
     elseif meta.type == "file" then
-      local dv = require("diff.diff_view")
-      dv.open_file_diff(repo_root, meta.file)
+      local dv   = require("diff.diff_view")
+      -- Merge staging state into the file info (not stored on the record itself)
+      local file = vim.tbl_extend("force", meta.file, {
+        staged = (meta.section == "staged"),
+      })
+      dv.open_file_diff(repo_root, file)
     end
   end, opts)
 

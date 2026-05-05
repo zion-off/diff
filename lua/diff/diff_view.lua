@@ -11,16 +11,44 @@ local NS = vim.api.nvim_create_namespace("diff_nvim_diff")
 -- Module-level state
 -- ---------------------------------------------------------------------------
 
-M._left_win     = nil
-M._right_win    = nil
-M._left_buf     = nil
-M._right_buf    = nil
-M._left_aligned = nil   -- list of aligned line entries for the left pane
-M._right_aligned= nil
-M._scroll_guard = false
-M._scroll_aug   = nil   -- augroup id for scroll sync
-M._current_repo = nil
-M._current_file = nil
+M._left_win      = nil
+M._right_win     = nil
+M._left_buf      = nil
+M._right_buf     = nil
+M._left_aligned  = nil  -- list of aligned line entries for the left pane
+M._right_aligned = nil
+M._scroll_guard  = false
+M._scroll_aug    = nil  -- augroup id for scroll sync
+M._current_repo  = nil
+M._current_file  = nil
+-- Maps bufnr -> aligned table; used by _statuscolumn() below.
+M._buf_aligned   = {}
+
+-- ---------------------------------------------------------------------------
+-- statuscolumn: suppress line numbers on filler rows
+-- ---------------------------------------------------------------------------
+-- Called via: statuscolumn=%!v:lua.require('diff.diff_view')._statuscolumn()
+
+function M._statuscolumn()
+  -- g:statusline_winid is set by NeoVim while drawing statuscolumn/statusline
+  local win  = vim.g.statusline_winid or vim.api.nvim_get_current_win()
+  local buf  = vim.api.nvim_win_get_buf(win)
+  local lnum = vim.v.lnum
+
+  local aln = M._buf_aligned[buf]
+  if aln and aln[lnum] and aln[lnum].type == "filler" then
+    -- Return blank to hide the line number for filler rows.
+    -- Use the configured numberwidth (default 4) for consistent column width.
+    local nw = vim.wo[win] and vim.wo[win].numberwidth or 4
+    return string.rep(" ", nw)
+  end
+
+  -- Mimic NeoVim's default relative/absolute number formatting.
+  local nw   = (vim.wo[win] and vim.wo[win].numberwidth) or 4
+  local s    = tostring(lnum)
+  local pad  = math.max(0, nw - #s - 1)
+  return string.rep(" ", pad) .. s .. " "
+end
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -50,8 +78,8 @@ end
 --- Apply per-window options appropriate for a diff pane.
 --- @param win integer
 local function set_win_opts(win)
-  local opts = {
-    number         = true,
+  local base_opts = {
+    number         = false,  -- handled by statuscolumn below
     relativenumber = false,
     wrap           = false,
     foldcolumn     = "0",
@@ -60,10 +88,16 @@ local function set_win_opts(win)
     scrollbind     = false,  -- we handle sync manually via WinScrolled
     cursorbind     = false,
     diff           = false,
+    numberwidth    = 5,
   }
-  for k, v in pairs(opts) do
+  for k, v in pairs(base_opts) do
     pcall(vim.api.nvim_win_set_option, win, k, v)
   end
+  -- statuscolumn: suppress line numbers on filler rows (NeoVim 0.9+)
+  pcall(
+    vim.api.nvim_win_set_option, win, "statuscolumn",
+    "%!v:lua.require('diff.diff_view')._statuscolumn()"
+  )
 end
 
 --- Find the best window to host the diff view (widest non-diff.nvim window).
@@ -95,8 +129,6 @@ local function close_diff_wins()
       local buf  = vim.api.nvim_win_get_buf(win)
       local name = vim.api.nvim_buf_get_name(buf)
       if name:match("^diff://old/") or name:match("^diff://new/") then
-        -- Before closing, check if this is the last non-sidebar window
-        -- and if so, replace its buffer with a new scratch buffer
         pcall(vim.api.nvim_win_close, win, true)
       end
     end
@@ -107,12 +139,16 @@ local function close_diff_wins()
     M._scroll_aug = nil
   end
 
-  M._left_win     = nil
-  M._right_win    = nil
-  M._left_buf     = nil
-  M._right_buf    = nil
-  M._left_aligned = nil
-  M._right_aligned= nil
+  -- Clean up statuscolumn aligned tables for old buffers
+  if M._left_buf  then M._buf_aligned[M._left_buf]  = nil end
+  if M._right_buf then M._buf_aligned[M._right_buf] = nil end
+
+  M._left_win      = nil
+  M._right_win     = nil
+  M._left_buf      = nil
+  M._right_buf     = nil
+  M._left_aligned  = nil
+  M._right_aligned = nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -376,6 +412,10 @@ function M.open(opts)
   M._left_buf  = left_buf
   M._right_buf = right_buf
 
+  -- Register aligned tables for statuscolumn use (filler line number suppression)
+  M._buf_aligned[left_buf]  = left_aln
+  M._buf_aligned[right_buf] = right_aln
+
   -- Populate buffers with content lines (filler lines = empty string)
   local function fill_buf(buf, aligned)
     local content = {}
@@ -416,16 +456,25 @@ function M.open(opts)
     M._left_win  = left_win
     M._right_win = right_win
   else
-    -- No suitable host — create both windows fresh
-    vim.cmd("vsplit")
-    local right_win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(right_win, right_buf)
+    -- No suitable host window (e.g. only sidebar panels are open).
+    -- Navigate to the topmost-leftmost window; if it is also a diff.nvim
+    -- panel, create a new editing area to its left first.
+    vim.cmd("wincmd t")
+    local cur      = vim.api.nvim_get_current_win()
+    local cur_name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(cur))
+    if cur_name:match("^diff://") then
+      -- We are still inside a diff.nvim panel → open a new pane to the left
+      vim.cmd("topleft vsplit")
+      cur = vim.api.nvim_get_current_win()
+    end
+    -- Use cur as the right (new) pane
+    vim.api.nvim_win_set_buf(cur, right_buf)
     vim.cmd("leftabove vsplit")
     local left_win = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_buf(left_win, left_buf)
 
     M._left_win  = left_win
-    M._right_win = right_win
+    M._right_win = cur
   end
 
   set_win_opts(M._left_win)

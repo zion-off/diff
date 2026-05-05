@@ -17,15 +17,7 @@ local git        = require("diff.git")
 function M.setup(opts)
   config.setup(opts)
   highlights.setup(config.get())
-
-  -- Re-apply highlights when the colourscheme changes
-  vim.api.nvim_create_augroup("DiffNvimColorscheme", { clear = true })
-  vim.api.nvim_create_autocmd("ColorScheme", {
-    group    = "DiffNvimColorscheme",
-    callback = function()
-      highlights.setup(config.get())
-    end,
-  })
+  -- highlights.setup already installs a ColorScheme autocmd; nothing extra needed here.
 
   local cfg = config.get()
   local km  = cfg.keymaps or {}

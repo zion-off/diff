@@ -111,7 +111,9 @@ function M.prompt_note(opts)
 
   -- Cancel with <Esc>
   vim.keymap.set({ "n", "i" }, "<Esc>", function()
-    vim.api.nvim_win_close(win, true)
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
   end, { buffer = buf, nowait = true })
 end
 
