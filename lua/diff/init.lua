@@ -17,7 +17,6 @@ local git        = require("diff.git")
 function M.setup(opts)
   config.setup(opts)
   highlights.setup(config.get())
-  -- highlights.setup already installs a ColorScheme autocmd; nothing extra needed here.
 
   local cfg = config.get()
   local km  = cfg.keymaps or {}
@@ -30,10 +29,10 @@ function M.setup(opts)
     end
   end
 
-  -- Toggle sidebar
+  -- Toggle interface
   nmap(km.toggle_sidebar or "<leader>gs", function()
     M.toggle()
-  end, "toggle sidebar")
+  end, "toggle interface")
 
   -- Refresh panels
   nmap(km.refresh or "<leader>gr", function()
@@ -56,7 +55,6 @@ end
 -- ---------------------------------------------------------------------------
 
 --- Resolve the current repository root and call cb(root).
---- Shows a warning if not inside a git repository.
 --- @param cb fun(root: string)
 function M._with_root(cb)
   local cwd = vim.fn.getcwd()
@@ -70,22 +68,22 @@ function M._with_root(cb)
 end
 
 -- ---------------------------------------------------------------------------
--- Public API (usable without calling setup first)
+-- Public API
 -- ---------------------------------------------------------------------------
 
---- Open the sidebar.
+--- Open the diff.nvim interface.
 function M.open()
   M._with_root(function(root)
     sidebar.open(root)
   end)
 end
 
---- Close the sidebar.
+--- Close the interface.
 function M.close()
   sidebar.close()
 end
 
---- Toggle the sidebar open / closed.
+--- Toggle the interface open / closed.
 function M.toggle()
   M._with_root(function(root)
     sidebar.toggle(root)

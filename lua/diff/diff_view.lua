@@ -15,40 +15,13 @@ M._left_win      = nil
 M._right_win     = nil
 M._left_buf      = nil
 M._right_buf     = nil
-M._left_aligned  = nil  -- list of aligned line entries for the left pane
+M._left_aligned  = nil
 M._right_aligned = nil
 M._scroll_guard  = false
-M._scroll_aug    = nil  -- augroup id for scroll sync
+M._scroll_aug    = nil
 M._current_repo  = nil
 M._current_file  = nil
--- Maps bufnr -> aligned table; used by _statuscolumn() below.
 M._buf_aligned   = {}
-
--- ---------------------------------------------------------------------------
--- statuscolumn: suppress line numbers on filler rows
--- ---------------------------------------------------------------------------
--- Called via: statuscolumn=%!v:lua.require('diff.diff_view')._statuscolumn()
-
-function M._statuscolumn()
-  -- g:statusline_winid is set by NeoVim while drawing statuscolumn/statusline
-  local win  = vim.g.statusline_winid or vim.api.nvim_get_current_win()
-  local buf  = vim.api.nvim_win_get_buf(win)
-  local lnum = vim.v.lnum
-
-  local aln = M._buf_aligned[buf]
-  if aln and aln[lnum] and aln[lnum].type == "filler" then
-    -- Return blank to hide the line number for filler rows.
-    -- Use the configured numberwidth (default 4) for consistent column width.
-    local nw = vim.wo[win] and vim.wo[win].numberwidth or 4
-    return string.rep(" ", nw)
-  end
-
-  -- Mimic NeoVim's default relative/absolute number formatting.
-  local nw   = (vim.wo[win] and vim.wo[win].numberwidth) or 4
-  local s    = tostring(lnum)
-  local pad  = math.max(0, nw - #s - 1)
-  return string.rep(" ", pad) .. s .. " "
-end
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -58,7 +31,7 @@ end
 --- @param  name string
 --- @return integer
 local function make_buf(name)
-  -- Wipe existing buffer with same name
+  -- Wipe any existing buffer with the same name
   for _, b in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_valid(b) and vim.api.nvim_buf_get_name(b) == name then
       pcall(vim.api.nvim_buf_delete, b, { force = true })
@@ -71,77 +44,41 @@ local function make_buf(name)
   vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
   vim.api.nvim_set_option_value("swapfile", false, { buf = buf })
   vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
-  vim.api.nvim_set_option_value("readonly", true, { buf = buf })
   return buf
 end
 
 --- Apply per-window options appropriate for a diff pane.
 --- @param win integer
 local function set_win_opts(win)
-  local base_opts = {
-    number         = false,  -- handled by statuscolumn below
+  local wopts = {
+    number         = true,
     relativenumber = false,
     wrap           = false,
     foldcolumn     = "0",
     signcolumn     = "yes:1",
     cursorline     = true,
-    scrollbind     = false,  -- we handle sync manually via WinScrolled
+    scrollbind     = false,
     cursorbind     = false,
     diff           = false,
-    numberwidth    = 5,
   }
-  for k, v in pairs(base_opts) do
+  for k, v in pairs(wopts) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
-  -- statuscolumn: suppress line numbers on filler rows (NeoVim 0.9+)
-  pcall(
-    vim.api.nvim_set_option_value,
-    "statuscolumn",
-    "%!v:lua.require('diff.diff_view')._statuscolumn()",
-    { win = win }
-  )
-end
-
---- Find the best window to host the diff view (widest non-diff.nvim window).
---- @return integer|nil
-local function find_host_window()
-  local best_win   = nil
-  local best_width = 0
-  for _, win in ipairs(vim.api.nvim_list_wins()) do
-    if not vim.api.nvim_win_is_valid(win) then goto cont end
-    local buf  = vim.api.nvim_win_get_buf(win)
-    local name = vim.api.nvim_buf_get_name(buf)
-    -- Skip sidebar panels and existing diff panes
-    if not name:match("^diff://") then
-      local w = vim.api.nvim_win_get_width(win)
-      if w > best_width then
-        best_width = w
-        best_win   = win
-      end
-    end
-    ::cont::
-  end
-  return best_win
 end
 
 --- Close any open diff pane windows.
 local function close_diff_wins()
-  for _, win in ipairs(vim.api.nvim_list_wins()) do
-    if vim.api.nvim_win_is_valid(win) then
-      local buf  = vim.api.nvim_win_get_buf(win)
-      local name = vim.api.nvim_buf_get_name(buf)
-      if name:match("^diff://old/") or name:match("^diff://new/") then
-        pcall(vim.api.nvim_win_close, win, true)
-      end
-    end
-  end
-
   if M._scroll_aug then
     pcall(vim.api.nvim_del_augroup_by_id, M._scroll_aug)
     M._scroll_aug = nil
   end
 
-  -- Clean up statuscolumn aligned tables for old buffers
+  for _, win in ipairs({ M._left_win, M._right_win }) do
+    if win and vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_win_close, win, true)
+    end
+  end
+
   if M._left_buf  then M._buf_aligned[M._left_buf]  = nil end
   if M._right_buf then M._buf_aligned[M._right_buf] = nil end
 
@@ -158,42 +95,33 @@ end
 -- ---------------------------------------------------------------------------
 
 --- Apply line-level background highlights and gutter signs to one pane.
+--- Uses line_hl_group for reliable full-line background coloring.
 --- @param buf      integer
---- @param aligned  table[]   list of aligned line entries
+--- @param aligned  table[]
 local function apply_line_highlights(buf, aligned)
   for i, entry in ipairs(aligned) do
-    local row = i - 1   -- 0-based
+    local row = i - 1
 
     if entry.type == "filler" then
-      -- Filler: colour the whole line including EOL
       vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
-        end_row    = row,
-        end_col    = 0,
-        hl_group   = "DiffNvimFiller",
-        hl_eol     = true,
-        priority   = 10,
+        line_hl_group = "DiffNvimFiller",
+        priority      = 10,
       })
 
     elseif entry.type == "removed" then
       vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
-        end_row      = row,
-        end_col      = 0,
-        hl_group     = "DiffNvimRemoved",
-        hl_eol       = true,
-        priority     = 10,
-        sign_text    = "▍",
-        sign_hl_group= "DiffNvimGutterRemoved",
+        line_hl_group  = "DiffNvimRemoved",
+        sign_text      = "▍",
+        sign_hl_group  = "DiffNvimGutterRemoved",
+        priority       = 10,
       })
 
     elseif entry.type == "added" then
       vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
-        end_row      = row,
-        end_col      = 0,
-        hl_group     = "DiffNvimAdded",
-        hl_eol       = true,
-        priority     = 10,
-        sign_text    = "▍",
-        sign_hl_group= "DiffNvimGutterAdded",
+        line_hl_group  = "DiffNvimAdded",
+        sign_text      = "▍",
+        sign_hl_group  = "DiffNvimGutterAdded",
+        priority       = 10,
       })
     end
   end
@@ -209,38 +137,39 @@ local function apply_word_highlights(left_buf, right_buf, left_aln, right_aln)
   for i = 1, len do
     local l = left_aln[i]
     local r = right_aln[i]
-    if l.type == "removed" and r.type == "added" then
+    if l.type == "removed" and r.type == "added" and l.content ~= "" and r.content ~= "" then
       local old_ranges, new_ranges = word_diff.compute(l.content, r.content)
       local row = i - 1
 
       for _, range in ipairs(old_ranges) do
-        pcall(vim.api.nvim_buf_set_extmark, left_buf, NS, row, range.start_col, {
-          end_row  = row,
-          end_col  = range.end_col,
-          hl_group = "DiffNvimRemovedWord",
-          priority = 20,
-        })
+        if range.end_col > range.start_col then
+          pcall(vim.api.nvim_buf_set_extmark, left_buf, NS, row, range.start_col, {
+            end_row  = row,
+            end_col  = math.min(range.end_col, #l.content),
+            hl_group = "DiffNvimRemovedWord",
+            priority = 20,
+          })
+        end
       end
 
       for _, range in ipairs(new_ranges) do
-        pcall(vim.api.nvim_buf_set_extmark, right_buf, NS, row, range.start_col, {
-          end_row  = row,
-          end_col  = range.end_col,
-          hl_group = "DiffNvimAddedWord",
-          priority = 20,
-        })
+        if range.end_col > range.start_col then
+          pcall(vim.api.nvim_buf_set_extmark, right_buf, NS, row, range.start_col, {
+            end_row  = row,
+            end_col  = math.min(range.end_col, #r.content),
+            hl_group = "DiffNvimAddedWord",
+            priority = 20,
+          })
+        end
       end
     end
   end
 end
 
 -- ---------------------------------------------------------------------------
--- Scroll synchronisation
+-- Scroll synchronisation — properly guarded against recursion
 -- ---------------------------------------------------------------------------
 
---- Set up WinScrolled autocmd to keep both panes in sync.
---- @param left_win  integer
---- @param right_win integer
 local function setup_scroll_sync(left_win, right_win)
   if M._scroll_aug then
     pcall(vim.api.nvim_del_augroup_by_id, M._scroll_aug)
@@ -251,31 +180,79 @@ local function setup_scroll_sync(left_win, right_win)
 
   vim.api.nvim_create_autocmd("WinScrolled", {
     group    = aug,
-    callback = function(ev)
+    callback = function()
+      -- Guard: prevent recursive calls
       if M._scroll_guard then return end
 
-      local scrolled_win = tonumber(ev.match)
-      if not scrolled_win then return end
+      -- Determine which of our two windows scrolled
+      local cur_win = vim.api.nvim_get_current_win()
+      local source_win, target_win
 
-      local other_win
-      if scrolled_win == left_win then
-        other_win = right_win
-      elseif scrolled_win == right_win then
-        other_win = left_win
+      if cur_win == left_win then
+        source_win = left_win
+        target_win = right_win
+      elseif cur_win == right_win then
+        source_win = right_win
+        target_win = left_win
       else
         return
       end
 
-      if not vim.api.nvim_win_is_valid(other_win) then return end
+      if not vim.api.nvim_win_is_valid(source_win) then return end
+      if not vim.api.nvim_win_is_valid(target_win) then return end
+
+      -- Set guard BEFORE any scroll operation
+      M._scroll_guard = true
+
+      -- Get the scroll position of the source
+      local topline = vim.fn.getwininfo(source_win)[1].topline
+      local leftcol = vim.fn.getwininfo(source_win)[1].leftcol or 0
+
+      -- Apply to target
+      vim.api.nvim_win_call(target_win, function()
+        vim.fn.winrestview({ topline = topline, leftcol = leftcol })
+      end)
+
+      -- Release guard after the event loop settles to prevent cascading
+      vim.schedule(function()
+        M._scroll_guard = false
+      end)
+    end,
+  })
+
+  -- Also sync cursor line (CursorMoved) with debounce
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    group    = aug,
+    callback = function()
+      if M._scroll_guard then return end
+
+      local cur_win = vim.api.nvim_get_current_win()
+      local source_win, target_win
+
+      if cur_win == left_win then
+        source_win = left_win
+        target_win = right_win
+      elseif cur_win == right_win then
+        source_win = right_win
+        target_win = left_win
+      else
+        return
+      end
+
+      if not vim.api.nvim_win_is_valid(target_win) then return end
 
       M._scroll_guard = true
-      local view = vim.api.nvim_win_call(scrolled_win, function()
-        return vim.fn.winsaveview()
+
+      local cursor = vim.api.nvim_win_get_cursor(source_win)
+      local target_buf = vim.api.nvim_win_get_buf(target_win)
+      local line_count = vim.api.nvim_buf_line_count(target_buf)
+      local target_row = math.min(cursor[1], line_count)
+
+      pcall(vim.api.nvim_win_set_cursor, target_win, { target_row, 0 })
+
+      vim.schedule(function()
+        M._scroll_guard = false
       end)
-      vim.api.nvim_win_call(other_win, function()
-        vim.fn.winrestview({ topline = view.topline, leftcol = view.leftcol })
-      end)
-      M._scroll_guard = false
     end,
   })
 end
@@ -284,10 +261,6 @@ end
 -- Keymaps in diff pane
 -- ---------------------------------------------------------------------------
 
---- Set up keymaps for both diff pane buffers.
---- @param left_buf  integer
---- @param right_buf integer
---- @param opts      table  {file_path, repo_root}
 local function setup_keymaps(left_buf, right_buf, opts)
   local cfg = config.get()
   local km  = cfg.keymaps or {}
@@ -298,7 +271,6 @@ local function setup_keymaps(left_buf, right_buf, opts)
 
   local function leave_note(buf, side)
     return function()
-      -- Capture visual selection marks (still valid after leaving visual mode)
       local annotations = require("diff.annotations")
       local vstart = vim.fn.getpos("'<")
       local vend   = vim.fn.getpos("'>")
@@ -341,19 +313,18 @@ local function setup_keymaps(left_buf, right_buf, opts)
     local buf  = entry[1]
     local side = entry[2]
 
-    -- Leave note (normal and visual mode)
+    -- Leave note
     map(buf, { "n", "v" }, km.leave_note or "<leader>n", leave_note(buf, side))
 
     -- Toggle notes panel
     map(buf, "n", km.toggle_notes or "<leader>N", function()
-      local annotations = require("diff.annotations")
-      annotations.toggle_notes(opts.repo_root)
+      require("diff.annotations").toggle_notes(opts.repo_root)
     end)
 
-    -- Navigate to next changed hunk
+    -- Next hunk
     map(buf, "n", km.next_hunk or "]c", function()
-      local cur  = vim.api.nvim_win_get_cursor(0)[1]
-      local aln  = (buf == left_buf) and M._left_aligned or M._right_aligned
+      local cur = vim.api.nvim_win_get_cursor(0)[1]
+      local aln = (buf == left_buf) and M._left_aligned or M._right_aligned
       if not aln then return end
       for i = cur + 1, #aln do
         if aln[i].type == "removed" or aln[i].type == "added" then
@@ -363,10 +334,10 @@ local function setup_keymaps(left_buf, right_buf, opts)
       end
     end)
 
-    -- Navigate to previous changed hunk
+    -- Prev hunk
     map(buf, "n", km.prev_hunk or "[c", function()
-      local cur  = vim.api.nvim_win_get_cursor(0)[1]
-      local aln  = (buf == left_buf) and M._left_aligned or M._right_aligned
+      local cur = vim.api.nvim_win_get_cursor(0)[1]
+      local aln = (buf == left_buf) and M._left_aligned or M._right_aligned
       if not aln then return end
       for i = cur - 1, 1, -1 do
         if aln[i].type == "removed" or aln[i].type == "added" then
@@ -376,9 +347,14 @@ local function setup_keymaps(left_buf, right_buf, opts)
       end
     end)
 
-    -- Close diff view
+    -- Close diff view (return to sidebar)
     map(buf, "n", "q", function()
       close_diff_wins()
+      -- Return focus to the sidebar file panel
+      local sidebar = require("diff.sidebar")
+      if sidebar._file_win and vim.api.nvim_win_is_valid(sidebar._file_win) then
+        vim.api.nvim_set_current_win(sidebar._file_win)
+      end
     end)
   end
 end
@@ -413,8 +389,6 @@ function M.open(opts)
 
   M._left_buf  = left_buf
   M._right_buf = right_buf
-
-  -- Register aligned tables for statuscolumn use (filler line number suppression)
   M._buf_aligned[left_buf]  = left_aln
   M._buf_aligned[right_buf] = right_aln
 
@@ -432,7 +406,7 @@ function M.open(opts)
   fill_buf(left_buf,  left_aln)
   fill_buf(right_buf, right_aln)
 
-  -- Set filetype for syntax highlighting (Tree-sitter / filetype pipelines)
+  -- Set filetype for syntax highlighting
   local ft = opts.filetype or ""
   if ft == "" then
     ft = vim.filetype.match({ filename = opts.file_path }) or ""
@@ -442,41 +416,60 @@ function M.open(opts)
     pcall(vim.api.nvim_set_option_value, "filetype", ft, { buf = right_buf })
   end
 
-  -- ── Create windows ───────────────────────────────────────────────────────
-  local host = find_host_window()
+  -- ── Create windows in the main area ─────────────────────────────────────
+  -- Use the sidebar's main_win as the host for the diff panes
+  local sidebar = require("diff.sidebar")
+  local main_win = sidebar.get_main_win()
 
-  if host then
-    vim.api.nvim_set_current_win(host)
-    -- Replace host with the right (new) pane
-    vim.api.nvim_win_set_buf(host, right_buf)
-    local right_win = host
-    -- Split left for the old pane
+  if main_win and vim.api.nvim_win_is_valid(main_win) then
+    -- Use the main area: set right_buf into main_win, split left for old
+    vim.api.nvim_set_current_win(main_win)
+    vim.api.nvim_win_set_buf(main_win, right_buf)
+    local right_win = main_win
+
     vim.cmd("leftabove vsplit")
     local left_win = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_buf(left_win, left_buf)
 
     M._left_win  = left_win
     M._right_win = right_win
-  else
-    -- No suitable host window (e.g. only sidebar panels are open).
-    -- Navigate to the topmost-leftmost window; if it is also a diff.nvim
-    -- panel, create a new editing area to its left first.
-    vim.cmd("wincmd t")
-    local cur      = vim.api.nvim_get_current_win()
-    local cur_name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(cur))
-    if cur_name:match("^diff://") then
-      -- We are still inside a diff.nvim panel → open a new pane to the left
-      vim.cmd("topleft vsplit")
-      cur = vim.api.nvim_get_current_win()
-    end
-    -- Use cur as the right (new) pane
-    vim.api.nvim_win_set_buf(cur, right_buf)
-    vim.cmd("leftabove vsplit")
-    local left_win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(left_win, left_buf)
 
-    M._left_win  = left_win
-    M._right_win = cur
+    -- Update sidebar's main_win reference to the right pane
+    sidebar.set_main_win(right_win)
+  else
+    -- Fallback: find the widest non-panel window
+    local best_win, best_width = nil, 0
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_is_valid(win) then
+        local buf = vim.api.nvim_win_get_buf(win)
+        local name = vim.api.nvim_buf_get_name(buf)
+        if not name:match("^diff://file") and not name:match("^diff://commit") then
+          local w = vim.api.nvim_win_get_width(win)
+          if w > best_width then
+            best_width = w
+            best_win   = win
+          end
+        end
+      end
+    end
+
+    if best_win then
+      vim.api.nvim_set_current_win(best_win)
+      vim.api.nvim_win_set_buf(best_win, right_buf)
+      vim.cmd("leftabove vsplit")
+      local left_win = vim.api.nvim_get_current_win()
+      vim.api.nvim_win_set_buf(left_win, left_buf)
+      M._left_win  = left_win
+      M._right_win = best_win
+    else
+      -- Last resort: create fresh splits
+      vim.cmd("vsplit")
+      M._right_win = vim.api.nvim_get_current_win()
+      vim.api.nvim_win_set_buf(M._right_win, right_buf)
+      vim.cmd("leftabove vsplit")
+      M._left_win = vim.api.nvim_get_current_win()
+      vim.api.nvim_win_set_buf(M._left_win, left_buf)
+    end
   end
 
   set_win_opts(M._left_win)
@@ -507,23 +500,16 @@ end
 -- Open diff for a file from the file panel
 -- ---------------------------------------------------------------------------
 
---- Determine the old (left) file content for a given file and staging state.
---- @param root     string
---- @param file     table   file_info from git.get_status
---- @param callback fun(lines: string[])
 local function get_old_content(root, file, callback)
   if file.staged then
-    -- staged diff → old = HEAD
     git.get_file_at_ref(root, "HEAD", file.path, function(lines, err)
       callback(err and {} or lines)
     end)
   else
-    -- unstaged diff → old = index (:path)
     git.run({ "show", ":" .. file.path }, root, function(lines, _, code)
       if code == 0 then
         callback(lines)
       else
-        -- no staged version → fall back to HEAD
         git.get_file_at_ref(root, "HEAD", file.path, function(lines2, err2)
           callback(err2 and {} or lines2)
         end)
@@ -532,18 +518,12 @@ local function get_old_content(root, file, callback)
   end
 end
 
---- Determine the new (right) file content.
---- @param root     string
---- @param file     table
---- @param callback fun(lines: string[])
 local function get_new_content(root, file, callback)
   if file.staged then
-    -- staged diff → new = index
     git.run({ "show", ":" .. file.path }, root, function(lines, _, code)
       callback(code == 0 and lines or {})
     end)
   else
-    -- unstaged diff → new = working tree
     local full = root .. "/" .. file.path
     local lines = {}
     local f = io.open(full, "r")
@@ -559,13 +539,9 @@ end
 --- @param repo_root string
 --- @param file_info table   {path, status, staged}
 function M.open_file_diff(repo_root, file_info)
-  -- Binary detection
   git.is_binary(repo_root, file_info.path, function(is_bin)
     if is_bin then
-      vim.notify(
-        "diff.nvim: binary file — " .. file_info.path,
-        vim.log.levels.INFO
-      )
+      vim.notify("diff.nvim: binary file — " .. file_info.path, vim.log.levels.INFO)
       return
     end
 
@@ -615,10 +591,10 @@ end
 -- Open diff for a commit
 -- ---------------------------------------------------------------------------
 
---- Open a diff view scoped to a specific commit (all changed files).
+--- Open a diff view scoped to a specific commit.
 --- @param repo_root string
 --- @param hash      string
---- @param file_path string|nil   narrow to a single file if provided
+--- @param file_path string|nil
 function M.open_commit_diff(repo_root, hash, file_path)
   git.get_commit_diff(repo_root, hash, file_path, function(diff_text, err)
     if err then
@@ -626,11 +602,9 @@ function M.open_commit_diff(repo_root, hash, file_path)
       return
     end
 
-    -- Determine which file path to use for the view label
     local fp = file_path
 
     if not fp then
-      -- Try to extract the first changed file from the diff header
       for line in (diff_text or ""):gmatch("[^\n]+") do
         local m = line:match("^%+%+%+ b/(.+)$")
         if m then fp = m break end
@@ -638,7 +612,6 @@ function M.open_commit_diff(repo_root, hash, file_path)
       fp = fp or (hash:sub(1, 7) .. " (all files)")
     end
 
-    -- Fetch old and new content for the file (or leave empty for multi-file commit)
     local function fetch_side(ref, path, cb)
       if not path or path:match("%(all files%)") then
         cb({})
@@ -666,10 +639,10 @@ function M.open_commit_diff(repo_root, hash, file_path)
       })
     end
 
-    fetch_side(hash .. "^", file_path, function(lines)
+    fetch_side(hash .. "^", fp, function(lines)
       old_lines = lines; done()
     end)
-    fetch_side(hash, file_path, function(lines)
+    fetch_side(hash, fp, function(lines)
       new_lines = lines; done()
     end)
   end)

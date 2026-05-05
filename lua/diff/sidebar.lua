@@ -8,24 +8,24 @@ local config       = require("diff.config")
 -- Module-level state
 -- ---------------------------------------------------------------------------
 
-M._file_win   = nil
-M._commit_win = nil
-M._file_buf   = nil
-M._commit_buf = nil
-M._repo_root  = nil
-M._aug        = nil  -- augroup for auto-refresh
+M._file_win     = nil
+M._commit_win   = nil
+M._file_buf     = nil
+M._commit_buf   = nil
+M._main_win     = nil   -- the main editing area (right side) for diff panes
+M._repo_root    = nil
+M._aug          = nil   -- augroup for auto-refresh
+M._saved_layout = nil   -- saved session state to restore on close
 
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
 
---- Returns true when the sidebar is currently open and its windows are valid.
+--- Returns true when the plugin layout is currently open.
 --- @return boolean
 function M.is_open()
   return M._file_win ~= nil
     and vim.api.nvim_win_is_valid(M._file_win)
-    and M._commit_win ~= nil
-    and vim.api.nvim_win_is_valid(M._commit_win)
 end
 
 --- Create a scratch buffer suitable for a sidebar panel.
@@ -50,7 +50,7 @@ end
 --- Apply common window options for a sidebar panel.
 --- @param win integer
 local function set_panel_win_opts(win)
-  local opts = {
+  local wopts = {
     number         = false,
     relativenumber = false,
     wrap           = false,
@@ -61,86 +61,148 @@ local function set_panel_win_opts(win)
     spell          = false,
     list           = false,
   }
-  for k, v in pairs(opts) do
+  for k, v in pairs(wopts) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
 end
 
+--- Save the current window/buffer layout so it can be restored later.
+local function save_layout()
+  local layout = {
+    tabpage   = vim.api.nvim_get_current_tabpage(),
+    wins      = {},
+    current   = vim.api.nvim_get_current_win(),
+  }
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(win) then
+      table.insert(layout.wins, {
+        win  = win,
+        buf  = vim.api.nvim_win_get_buf(win),
+      })
+    end
+  end
+  return layout
+end
+
+--- Restore a previously saved layout. Closes the diff.nvim tab if we opened one.
+local function restore_layout(saved)
+  if not saved then return end
+  -- Switch back to original tabpage if it still exists
+  if saved.tabpage and vim.api.nvim_tabpage_is_valid(saved.tabpage) then
+    vim.api.nvim_set_current_tabpage(saved.tabpage)
+  end
+  -- Restore cursor to the original window if valid
+  if saved.current and vim.api.nvim_win_is_valid(saved.current) then
+    vim.api.nvim_set_current_win(saved.current)
+  end
+end
+
 -- ---------------------------------------------------------------------------
--- Open / close
+-- Open / close — takes over a new tab to create the full layout
 -- ---------------------------------------------------------------------------
 
---- Open the sidebar for the given repository root.
+--- Open the diff.nvim interface.
+--- Creates a new tab with: sidebar (left: file panel top, commit panel bottom)
+--- and main editing area on the right.
 --- @param repo_root string
 function M.open(repo_root)
   if M.is_open() then return end
 
   M._repo_root = repo_root
-  local cfg      = config.get()
-  local width    = cfg.sidebar_width    or 40
-  local position = cfg.sidebar_position or "right"
+  local cfg    = config.get()
+  local width  = cfg.sidebar_width or 40
 
-  -- Save current editing window so we can restore focus
-  local prev_win = vim.api.nvim_get_current_win()
+  -- Save the current layout before taking over
+  M._saved_layout = save_layout()
 
-  -- Create scratch buffers
-  local file_buf   = make_panel_buf("diff://file-panel")
-  local commit_buf = make_panel_buf("diff://commit-panel")
+  -- Open a new tab for the diff.nvim interface
+  vim.cmd("tabnew")
 
-  M._file_buf   = file_buf
-  M._commit_buf = commit_buf
+  -- The new tab has one window — this becomes the main area (right side)
+  M._main_win = vim.api.nvim_get_current_win()
 
-  -- ── Open the sidebar column ─────────────────────────────────────────────
-  -- botright / topleft vsplit creates a column taking the full editor height
-  local split_cmd = (position == "right") and "botright" or "topleft"
-  vim.cmd(split_cmd .. " " .. width .. "vsplit")
+  -- Create a scratch buffer for the main area (placeholder)
+  local main_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_set_option_value("buftype", "nofile", { buf = main_buf })
+  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = main_buf })
+  vim.api.nvim_buf_set_lines(main_buf, 0, -1, false, {
+    "",
+    "  diff.nvim",
+    "",
+    "  Select a file from the sidebar to view its diff.",
+    "  Press 'q' to close.",
+    "",
+  })
+  vim.api.nvim_win_set_buf(M._main_win, main_buf)
 
-  -- The new window (cursor is here) becomes the top panel
-  local file_win = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(file_win, file_buf)
-  M._file_win = file_win
+  -- Create sidebar split on the left
+  vim.cmd("topleft " .. width .. "vsplit")
+  local sidebar_win = vim.api.nvim_get_current_win()
+
+  -- Create the file panel buffer and assign it to the sidebar
+  local file_buf = make_panel_buf("diff://file-panel")
+  vim.api.nvim_win_set_buf(sidebar_win, file_buf)
+  M._file_win = sidebar_win
+  M._file_buf = file_buf
 
   -- Split below for the commit panel
   vim.cmd("rightbelow split")
   local commit_win = vim.api.nvim_get_current_win()
+  local commit_buf = make_panel_buf("diff://commit-panel")
   vim.api.nvim_win_set_buf(commit_win, commit_buf)
   M._commit_win = commit_win
+  M._commit_buf = commit_buf
 
-  -- Size: top panel ≈ 60%, bottom ≈ 40%
-  local total_h  = vim.api.nvim_win_get_height(file_win)
-                 + 1                                        -- separator
+  -- Size: file panel ≈ 60%, commit panel ≈ 40%
+  local total_h  = vim.api.nvim_win_get_height(M._file_win)
                  + vim.api.nvim_win_get_height(commit_win)
+                 + 1  -- status line separator
   local file_h   = math.max(4, math.floor(total_h * 0.60))
-  local commit_h = math.max(3, total_h - file_h - 1)
+  vim.api.nvim_win_set_height(M._file_win, file_h)
 
-  vim.api.nvim_win_set_height(file_win,   file_h)
-  vim.api.nvim_win_set_height(commit_win, commit_h)
+  set_panel_win_opts(M._file_win)
+  set_panel_win_opts(M._commit_win)
 
-  set_panel_win_opts(file_win)
-  set_panel_win_opts(commit_win)
+  -- Wire up panels
+  file_panel.setup(file_buf, M._file_win, repo_root)
+  commit_panel.setup(commit_buf, M._commit_win, repo_root)
 
-  -- ── Wire up panels ───────────────────────────────────────────────────────
-  file_panel.setup(file_buf, file_win, repo_root)
-  commit_panel.setup(commit_buf, commit_win, repo_root)
+  -- Focus the file panel to start
+  vim.api.nvim_set_current_win(M._file_win)
 
-  -- ── Return focus to the previous editing window ─────────────────────────
-  if vim.api.nvim_win_is_valid(prev_win) then
-    vim.api.nvim_set_current_win(prev_win)
-  end
-
+  -- Populate
   M.refresh()
 end
 
---- Close the sidebar and clean up its windows.
+--- Close the diff.nvim interface, restore previous layout.
 function M.close()
   if M._aug then
     pcall(vim.api.nvim_del_augroup_by_id, M._aug)
     M._aug = nil
   end
 
-  for _, win in ipairs({ M._file_win, M._commit_win }) do
-    if win and vim.api.nvim_win_is_valid(win) then
-      pcall(vim.api.nvim_win_close, win, true)
+  -- Close the diff.nvim tab (all windows in it will be closed)
+  -- First, check if the current tab is the diff.nvim tab
+  local cur_tab = vim.api.nvim_get_current_tabpage()
+  local diff_tab = nil
+
+  -- Find the tab containing our file panel window
+  if M._file_win and vim.api.nvim_win_is_valid(M._file_win) then
+    diff_tab = vim.api.nvim_win_get_tabpage(M._file_win)
+  end
+
+  -- Restore previous layout first (switch to old tab)
+  restore_layout(M._saved_layout)
+  M._saved_layout = nil
+
+  -- Now close the diff.nvim tab
+  if diff_tab and vim.api.nvim_tabpage_is_valid(diff_tab) then
+    -- Close all windows in that tab
+    local wins = vim.api.nvim_tabpage_list_wins(diff_tab)
+    for _, win in ipairs(wins) do
+      if vim.api.nvim_win_is_valid(win) then
+        pcall(vim.api.nvim_win_close, win, true)
+      end
     end
   end
 
@@ -148,16 +210,32 @@ function M.close()
   M._commit_win = nil
   M._file_buf   = nil
   M._commit_buf = nil
+  M._main_win   = nil
 end
 
---- Toggle the sidebar open/closed.
---- @param repo_root string|nil  If nil and sidebar is closed, resolves from cwd.
+--- Toggle the interface open/closed.
+--- @param repo_root string|nil
 function M.toggle(repo_root)
   if M.is_open() then
     M.close()
   else
     M.open(repo_root or M._repo_root or vim.fn.getcwd())
   end
+end
+
+--- Get the main editing window (right side) for the diff view to use.
+--- @return integer|nil
+function M.get_main_win()
+  if M._main_win and vim.api.nvim_win_is_valid(M._main_win) then
+    return M._main_win
+  end
+  return nil
+end
+
+--- Set/update the main window reference (called by diff_view when it creates panes).
+--- @param win integer
+function M.set_main_win(win)
+  M._main_win = win
 end
 
 -- ---------------------------------------------------------------------------
@@ -184,8 +262,6 @@ end
 -- Auto-refresh
 -- ---------------------------------------------------------------------------
 
---- Install autocmds that refresh the sidebar when NeoVim regains focus or
---- after a buffer is written.
 function M.setup_auto_refresh()
   local cfg = config.get()
   if not cfg.auto_refresh then return end
