@@ -17,7 +17,6 @@ M._left_buf      = nil
 M._right_buf     = nil
 M._left_aligned  = nil
 M._right_aligned = nil
-M._scroll_guard  = false
 M._scroll_aug    = nil
 M._current_repo  = nil
 M._current_file  = nil
@@ -88,8 +87,7 @@ local function close_diff_wins()
     M._scroll_aug = nil
   end
 
-  -- Reset scroll guard to prevent permanent lockout
-  M._scroll_guard = false
+  -- Reset scroll guard to prevent permanent lockout (no longer a boolean — kept for compat)
 
   -- Determine if we need to restore the main area window
   local sidebar = require("diff.sidebar")
@@ -222,7 +220,7 @@ local function apply_word_highlights(left_buf, right_buf, left_aln, right_aln)
             end_row  = row,
             end_col  = math.min(range.end_col, #l.content),
             hl_group = "DiffNvimRemovedWord",
-            priority = 60,
+            priority = 150,
           })
         end
       end
@@ -233,7 +231,7 @@ local function apply_word_highlights(left_buf, right_buf, left_aln, right_aln)
             end_row  = row,
             end_col  = math.min(range.end_col, #r.content),
             hl_group = "DiffNvimAddedWord",
-            priority = 60,
+            priority = 150,
           })
         end
       end
@@ -296,7 +294,7 @@ local function apply_note_markers(buf, aligned, side, repo_root, file_path)
 end
 
 -- ---------------------------------------------------------------------------
--- Scroll synchronisation — topline-based, properly guarded
+-- Scroll synchronisation — eventignore-based, no boolean guard needed
 -- ---------------------------------------------------------------------------
 
 local function setup_scroll_sync(left_win, right_win)
@@ -307,65 +305,62 @@ local function setup_scroll_sync(left_win, right_win)
   local aug = vim.api.nvim_create_augroup("DiffNvimScroll", { clear = true })
   M._scroll_aug = aug
 
-  -- Sync topline: since both buffers have identical line count (aligned),
-  -- syncing topline directly keeps them visually aligned.
+  -- Suppress scroll/cursor events on target window while syncing, preventing
+  -- cascading callbacks (e.g. rapid <C-u>/<C-d> firing multiple WinScrolled).
+  local function with_eventignore(fn)
+    local saved = vim.o.eventignore
+    vim.o.eventignore = saved ~= ""
+      and (saved .. ",WinScrolled,CursorMoved")
+      or  "WinScrolled,CursorMoved"
+    fn()
+    vim.o.eventignore = saved
+  end
+
+  -- Sync topline: both buffers have identical line count (aligned), so syncing
+  -- topline directly keeps them visually aligned. eventignore prevents the
+  -- target window's winrestview from re-triggering this callback.
   vim.api.nvim_create_autocmd("WinScrolled", {
     group    = aug,
     callback = function()
-      if M._scroll_guard then return end
-
       local cur_win = vim.api.nvim_get_current_win()
-      local source_win, target_win
+      local target_win
 
       if cur_win == left_win then
-        source_win = left_win
         target_win = right_win
       elseif cur_win == right_win then
-        source_win = right_win
         target_win = left_win
       else
         return
       end
 
-      if not vim.api.nvim_win_is_valid(source_win) then return end
+      if not vim.api.nvim_win_is_valid(cur_win)    then return end
       if not vim.api.nvim_win_is_valid(target_win) then return end
 
-      M._scroll_guard = true
-
-      local info = vim.fn.getwininfo(source_win)
-      if not info or #info == 0 then
-        vim.schedule(function() M._scroll_guard = false end)
-        return
-      end
+      local info = vim.fn.getwininfo(cur_win)
+      if not info or #info == 0 then return end
       local topline = info[1].topline
       local leftcol = info[1].leftcol or 0
 
-      vim.api.nvim_win_call(target_win, function()
-        vim.fn.winrestview({ topline = topline, leftcol = leftcol })
-      end)
-
-      -- Release guard asynchronously to prevent cascading
-      vim.schedule(function()
-        M._scroll_guard = false
+      with_eventignore(function()
+        vim.api.nvim_win_call(target_win, function()
+          vim.fn.winrestview({ topline = topline, leftcol = leftcol })
+        end)
       end)
     end,
   })
 
-  -- Sync cursor line via aligned_index (handles filler lines correctly)
+  -- Sync cursor via aligned_index identity map (both bufs have equal line count).
+  -- eventignore prevents set_cursor on target from re-triggering CursorMoved.
   vim.api.nvim_create_autocmd("CursorMoved", {
     group    = aug,
     callback = function()
-      if M._scroll_guard then return end
-
       local cur_win = vim.api.nvim_get_current_win()
-      local source_win, target_win, lookup
+      local target_win, lookup
 
       if cur_win == left_win then
-        source_win = left_win
         target_win = right_win
         lookup     = M._left_to_right
       elseif cur_win == right_win then
-        source_win = right_win
         target_win = left_win
         lookup     = M._right_to_left
       else
@@ -375,19 +370,16 @@ local function setup_scroll_sync(left_win, right_win)
       if not vim.api.nvim_win_is_valid(target_win) then return end
       if not lookup then return end
 
-      M._scroll_guard = true
-
-      local cursor = vim.api.nvim_win_get_cursor(source_win)
+      local cursor = vim.api.nvim_win_get_cursor(cur_win)
       local target_line = lookup[cursor[1]]
-      if target_line then
-        local target_buf = vim.api.nvim_win_get_buf(target_win)
-        local line_count = vim.api.nvim_buf_line_count(target_buf)
-        target_line = math.min(target_line, line_count)
-        pcall(vim.api.nvim_win_set_cursor, target_win, { target_line, 0 })
-      end
+      if not target_line then return end
 
-      vim.schedule(function()
-        M._scroll_guard = false
+      local target_buf = vim.api.nvim_win_get_buf(target_win)
+      local line_count = vim.api.nvim_buf_line_count(target_buf)
+      target_line = math.min(target_line, line_count)
+
+      with_eventignore(function()
+        pcall(vim.api.nvim_win_set_cursor, target_win, { target_line, 0 })
       end)
     end,
   })
@@ -564,31 +556,45 @@ function M.rerender()
     fill_buf(M._right_buf, right_aln)
   end
 
-  -- Re-apply highlights
-  vim.api.nvim_buf_clear_namespace(M._left_buf, NS, 0, -1)
-  apply_line_highlights(M._left_buf, left_aln, "old")
-  if M._right_buf then
-    vim.api.nvim_buf_clear_namespace(M._right_buf, NS, 0, -1)
-    apply_line_highlights(M._right_buf, right_aln, "new")
-    apply_word_highlights(M._left_buf, M._right_buf, left_aln, right_aln)
-  end
-
-  -- Re-apply tree-sitter
+  -- Re-apply tree-sitter first; defer all extmark application until after
+  -- tree-sitter has re-parsed the updated buffer content.
   local ft = M._current_ft or ""
   if ft ~= "" then
-    pcall(vim.treesitter.start, M._left_buf, ft)
+    local ts_ok_l = pcall(vim.treesitter.start, M._left_buf, ft)
+    if not ts_ok_l then
+      pcall(function() vim.bo[M._left_buf].syntax = ft end)
+    end
     if M._right_buf then
-      pcall(vim.treesitter.start, M._right_buf, ft)
+      local ts_ok_r = pcall(vim.treesitter.start, M._right_buf, ft)
+      if not ts_ok_r then
+        pcall(function() vim.bo[M._right_buf].syntax = ft end)
+      end
     end
   end
 
-  -- Re-apply note markers
-  if M._current_repo and M._current_file then
-    apply_note_markers(M._left_buf, left_aln, "old", M._current_repo, M._current_file)
-    if M._right_buf then
-      apply_note_markers(M._right_buf, right_aln, "new", M._current_repo, M._current_file)
+  local left_buf_ref  = M._left_buf
+  local right_buf_ref = M._right_buf
+
+  vim.schedule(function()
+    if not vim.api.nvim_buf_is_valid(left_buf_ref) then return end
+
+    -- Re-apply highlights
+    vim.api.nvim_buf_clear_namespace(left_buf_ref, NS, 0, -1)
+    apply_line_highlights(left_buf_ref, left_aln, "old")
+    if right_buf_ref and vim.api.nvim_buf_is_valid(right_buf_ref) then
+      vim.api.nvim_buf_clear_namespace(right_buf_ref, NS, 0, -1)
+      apply_line_highlights(right_buf_ref, right_aln, "new")
+      apply_word_highlights(left_buf_ref, right_buf_ref, left_aln, right_aln)
     end
-  end
+
+    -- Re-apply note markers
+    if M._current_repo and M._current_file then
+      apply_note_markers(left_buf_ref, left_aln, "old", M._current_repo, M._current_file)
+      if right_buf_ref and vim.api.nvim_buf_is_valid(right_buf_ref) then
+        apply_note_markers(right_buf_ref, right_aln, "new", M._current_repo, M._current_file)
+      end
+    end
+  end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -677,12 +683,15 @@ function M.open(opts)
     vim.api.nvim_buf_set_lines(pane_buf, 0, -1, false, content)
     vim.api.nvim_set_option_value("modifiable", false, { buf = pane_buf })
 
-    -- Set filetype
+    -- Set filetype and start tree-sitter; fall back to regex syntax if no TS parser
     local ft = opts.filetype or ""
     if ft == "" then ft = vim.filetype.match({ filename = opts.file_path }) or "" end
     if ft ~= "" then
       pcall(vim.api.nvim_set_option_value, "filetype", ft, { buf = pane_buf })
-      pcall(vim.treesitter.start, pane_buf, ft)
+      local ts_ok = pcall(vim.treesitter.start, pane_buf, ft)
+      if not ts_ok then
+        pcall(function() vim.bo[pane_buf].syntax = ft end)
+      end
     end
 
     -- Create window
@@ -719,12 +728,16 @@ function M.open(opts)
       "%#DiffNvimWinbar#  " .. label .. opts.file_path .. "  ",
       { win = target_win })
 
-    -- Apply highlights
-    vim.api.nvim_buf_clear_namespace(pane_buf, NS, 0, -1)
-    apply_line_highlights(pane_buf, aln, single_side)
-
-    -- Note markers
-    apply_note_markers(pane_buf, aln, single_side, opts.repo_root, opts.file_path)
+    -- Apply highlights — deferred so tree-sitter completes its first parse first
+    local pane_buf_ref = pane_buf
+    local repo_root_ref = opts.repo_root
+    local file_path_ref = opts.file_path
+    vim.schedule(function()
+      if not vim.api.nvim_buf_is_valid(pane_buf_ref) then return end
+      vim.api.nvim_buf_clear_namespace(pane_buf_ref, NS, 0, -1)
+      apply_line_highlights(pane_buf_ref, aln, single_side)
+      apply_note_markers(pane_buf_ref, aln, single_side, repo_root_ref, file_path_ref)
+    end)
 
     -- Keymaps (single buffer)
     M._buf_aligned[pane_buf] = aln
@@ -760,15 +773,18 @@ function M.open(opts)
   fill_buf(left_buf,  left_aln)
   fill_buf(right_buf, right_aln)
 
-  -- Set filetype and start tree-sitter for syntax highlighting
+  -- Set filetype and start tree-sitter for syntax highlighting; fall back to
+  -- regex syntax if no TS parser exists for this filetype.
   local ft = opts.filetype or ""
   if ft == "" then ft = vim.filetype.match({ filename = opts.file_path }) or "" end
   if ft ~= "" then
     pcall(vim.api.nvim_set_option_value, "filetype", ft, { buf = left_buf })
     pcall(vim.api.nvim_set_option_value, "filetype", ft, { buf = right_buf })
     -- Explicitly start tree-sitter (buftype=nofile doesn't auto-attach)
-    pcall(vim.treesitter.start, left_buf, ft)
-    pcall(vim.treesitter.start, right_buf, ft)
+    local ts_ok_l = pcall(vim.treesitter.start, left_buf, ft)
+    local ts_ok_r = pcall(vim.treesitter.start, right_buf, ft)
+    if not ts_ok_l then pcall(function() vim.bo[left_buf].syntax  = ft end) end
+    if not ts_ok_r then pcall(function() vim.bo[right_buf].syntax = ft end) end
   end
 
   -- ── Create windows in the main area ─────────────────────────────────────
@@ -836,16 +852,28 @@ function M.open(opts)
     { win = M._right_win })
 
   -- ── Apply highlights ─────────────────────────────────────────────────────
-  vim.api.nvim_buf_clear_namespace(left_buf,  NS, 0, -1)
-  vim.api.nvim_buf_clear_namespace(right_buf, NS, 0, -1)
+  -- Deferred via vim.schedule so tree-sitter completes its first parse before
+  -- our extmarks are applied. This prevents TS from overwriting word highlights.
+  local left_buf_ref  = left_buf
+  local right_buf_ref = right_buf
+  local repo_root_ref = opts.repo_root
+  local file_path_ref = opts.file_path
 
-  apply_line_highlights(left_buf,  left_aln,  "old")
-  apply_line_highlights(right_buf, right_aln, "new")
-  apply_word_highlights(left_buf, right_buf, left_aln, right_aln)
+  vim.schedule(function()
+    if not vim.api.nvim_buf_is_valid(left_buf_ref)  then return end
+    if not vim.api.nvim_buf_is_valid(right_buf_ref) then return end
 
-  -- ── Note markers ─────────────────────────────────────────────────────────
-  apply_note_markers(left_buf, left_aln, "old", opts.repo_root, opts.file_path)
-  apply_note_markers(right_buf, right_aln, "new", opts.repo_root, opts.file_path)
+    vim.api.nvim_buf_clear_namespace(left_buf_ref,  NS, 0, -1)
+    vim.api.nvim_buf_clear_namespace(right_buf_ref, NS, 0, -1)
+
+    apply_line_highlights(left_buf_ref,  left_aln,  "old")
+    apply_line_highlights(right_buf_ref, right_aln, "new")
+    apply_word_highlights(left_buf_ref, right_buf_ref, left_aln, right_aln)
+
+    -- ── Note markers ───────────────────────────────────────────────────────
+    apply_note_markers(left_buf_ref,  left_aln,  "old", repo_root_ref, file_path_ref)
+    apply_note_markers(right_buf_ref, right_aln, "new", repo_root_ref, file_path_ref)
+  end)
 
   -- ── Scroll sync ──────────────────────────────────────────────────────────
   setup_scroll_sync(M._left_win, M._right_win)
