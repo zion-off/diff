@@ -69,6 +69,12 @@ function M.append_note(note)
   f:close()
 
   vim.notify("diff.nvim: note saved → " .. path, vim.log.levels.INFO)
+
+  -- Refresh note markers in the current diff view
+  local dv = require("diff.diff_view")
+  if dv._current_repo and dv._current_file then
+    dv.rerender()
+  end
 end
 
 --- Open a small floating input prompt and call back with the entered text.

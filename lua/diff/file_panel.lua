@@ -192,7 +192,6 @@ function M.setup(buf, win, repo_root)
       M.refresh(buf, win, repo_root)
     elseif meta.type == "file" then
       local dv   = require("diff.diff_view")
-      -- Merge staging state into the file info
       local file = vim.tbl_extend("force", meta.file, {
         staged = (meta.section == "staged"),
       })
@@ -201,33 +200,33 @@ function M.setup(buf, win, repo_root)
         vim.notify("diff.nvim: error opening diff: " .. tostring(err), vim.log.levels.ERROR)
       end
     end
-  end, opts)
+  end, vim.tbl_extend("force", opts, { desc = "diff.nvim: open diff / toggle section" }))
 
   -- 's': stage file (unstaged section only)
   vim.keymap.set("n", km.stage_file or "s", function()
     local lnr  = vim.api.nvim_win_get_cursor(win)[1]
     local meta = line_map[lnr]
     if not meta or meta.type ~= "file" or meta.section ~= "unstaged" then return end
-    git.stage_file(repo_root, meta.file.path, function(ok, err)
-      if not ok then
+    git.stage_file(repo_root, meta.file.path, function(success, err)
+      if not success then
         vim.notify("diff.nvim: stage failed: " .. (err or ""), vim.log.levels.ERROR)
       end
       M.refresh(buf, win, repo_root)
     end)
-  end, opts)
+  end, vim.tbl_extend("force", opts, { desc = "diff.nvim: stage file" }))
 
   -- 'u': unstage file (staged section only)
   vim.keymap.set("n", km.unstage_file or "u", function()
     local lnr  = vim.api.nvim_win_get_cursor(win)[1]
     local meta = line_map[lnr]
     if not meta or meta.type ~= "file" or meta.section ~= "staged" then return end
-    git.unstage_file(repo_root, meta.file.path, function(ok, err)
-      if not ok then
+    git.unstage_file(repo_root, meta.file.path, function(success, err)
+      if not success then
         vim.notify("diff.nvim: unstage failed: " .. (err or ""), vim.log.levels.ERROR)
       end
       M.refresh(buf, win, repo_root)
     end)
-  end, opts)
+  end, vim.tbl_extend("force", opts, { desc = "diff.nvim: unstage file" }))
 
   -- 'z': toggle collapse of the section the cursor is in
   vim.keymap.set("n", km.collapse or "z", function()
@@ -239,17 +238,17 @@ function M.setup(buf, win, repo_root)
       collapsed[section] = not collapsed[section]
       M.refresh(buf, win, repo_root)
     end
-  end, opts)
+  end, vim.tbl_extend("force", opts, { desc = "diff.nvim: toggle section collapse" }))
 
   -- '<leader>gr': refresh
   vim.keymap.set("n", km.refresh or "<leader>gr", function()
     M.refresh(buf, win, repo_root)
-  end, opts)
+  end, vim.tbl_extend("force", opts, { desc = "diff.nvim: refresh file list" }))
 
   -- 'q': close the entire diff.nvim interface
   vim.keymap.set("n", "q", function()
     require("diff.sidebar").close()
-  end, opts)
+  end, vim.tbl_extend("force", opts, { desc = "diff.nvim: close interface" }))
 end
 
 --- Fetch git status and re-render the panel.
