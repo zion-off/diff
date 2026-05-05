@@ -243,6 +243,19 @@ function M._delete_note_at_cursor(buf, path, repo_root)
     end
   end
 
+  -- If no separator found, extend to the next ## Note header or end of file
+  if block_end == block_start then
+    for i = block_start + 1, #lines do
+      if lines[i]:match("^## Note") then
+        block_end = i - 1
+        break
+      end
+    end
+    if block_end == block_start then
+      block_end = #lines
+    end
+  end
+
   -- Also consume any blank lines immediately after the separator
   while block_end < #lines and lines[block_end + 1] == "" do
     block_end = block_end + 1

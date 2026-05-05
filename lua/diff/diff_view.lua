@@ -93,8 +93,8 @@ local function close_diff_wins()
 
   -- Determine if we need to restore the main area window
   local sidebar = require("diff.sidebar")
-  local right_is_main = (M._right_win == sidebar._main_win)
-  local left_is_main  = (M._left_win  == sidebar._main_win)
+  local right_is_main = (M._right_win ~= nil and M._right_win == sidebar._main_win)
+  local left_is_main  = (M._left_win ~= nil and M._left_win == sidebar._main_win)
 
   for _, win in ipairs({ M._left_win, M._right_win }) do
     if win and vim.api.nvim_win_is_valid(win) then
@@ -426,10 +426,15 @@ local function setup_keymaps(left_buf, right_buf, opts)
       if aligned then
         local function file_line(buf_line)
           local entry = aligned[buf_line]
-          return entry and entry.line_num or buf_line
+          return entry and entry.line_num  -- nil for filler/separator lines
         end
-        line_start = file_line(line_start) or line_start
-        line_end   = file_line(line_end)   or line_end
+        line_start = file_line(line_start)
+        line_end   = file_line(line_end)
+        if not line_start then
+          vim.notify("diff.nvim: cannot leave note on a filler/separator line", vim.log.levels.WARN)
+          return
+        end
+        if not line_end then line_end = line_start end
       end
 
       annotations.prompt_note({
@@ -684,30 +689,36 @@ function M.open(opts)
     -- Create window
     local sidebar = require("diff.sidebar")
     local main_win = sidebar.get_main_win()
+    local target_win = nil
 
     if main_win and vim.api.nvim_win_is_valid(main_win) then
-      vim.api.nvim_set_current_win(main_win)
-      vim.api.nvim_win_set_buf(main_win, pane_buf)
-      if single_side == "new" then
-        M._right_win = main_win
-        M._right_buf = pane_buf
-        M._left_win = nil
-        M._left_buf = nil
-      else
-        M._left_win = main_win
-        M._left_buf = pane_buf
-        M._right_win = nil
-        M._right_buf = nil
-      end
-
-      set_win_opts(main_win)
-
-      -- Winbar
-      local label = single_side == "new" and "NEW: " or "DELETED: "
-      pcall(vim.api.nvim_set_option_value, "winbar",
-        "%#DiffNvimWinbar#  " .. label .. opts.file_path .. "  ",
-        { win = main_win })
+      target_win = main_win
+    else
+      -- Fallback: use current window
+      target_win = vim.api.nvim_get_current_win()
     end
+
+    vim.api.nvim_set_current_win(target_win)
+    vim.api.nvim_win_set_buf(target_win, pane_buf)
+    if single_side == "new" then
+      M._right_win = target_win
+      M._right_buf = pane_buf
+      M._left_win = nil
+      M._left_buf = nil
+    else
+      M._left_win = target_win
+      M._left_buf = pane_buf
+      M._right_win = nil
+      M._right_buf = nil
+    end
+
+    set_win_opts(target_win)
+
+    -- Winbar
+    local label = single_side == "new" and "NEW: " or "DELETED: "
+    pcall(vim.api.nvim_set_option_value, "winbar",
+      "%#DiffNvimWinbar#  " .. label .. opts.file_path .. "  ",
+      { win = target_win })
 
     -- Apply highlights
     vim.api.nvim_buf_clear_namespace(pane_buf, NS, 0, -1)
