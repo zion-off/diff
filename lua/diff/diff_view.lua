@@ -205,8 +205,13 @@ local function setup_scroll_sync(left_win, right_win)
       M._scroll_guard = true
 
       -- Get the scroll position of the source
-      local topline = vim.fn.getwininfo(source_win)[1].topline
-      local leftcol = vim.fn.getwininfo(source_win)[1].leftcol or 0
+      local info = vim.fn.getwininfo(source_win)
+      if not info or #info == 0 then
+        M._scroll_guard = false
+        return
+      end
+      local topline = info[1].topline
+      local leftcol = info[1].leftcol or 0
 
       -- Apply to target
       vim.api.nvim_win_call(target_win, function()

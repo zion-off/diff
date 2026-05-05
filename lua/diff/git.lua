@@ -213,7 +213,7 @@ function M.get_commits(root, n, callback)
     root,
     function(lines, stderr, code)
       if code ~= 0 then
-        callback({}, stderr)
+        callback(nil, stderr)
         return
       end
 

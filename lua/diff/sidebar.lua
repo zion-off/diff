@@ -26,6 +26,8 @@ M._saved_layout = nil   -- saved session state to restore on close
 function M.is_open()
   return M._file_win ~= nil
     and vim.api.nvim_win_is_valid(M._file_win)
+    and M._commit_win ~= nil
+    and vim.api.nvim_win_is_valid(M._commit_win)
 end
 
 --- Create a scratch buffer suitable for a sidebar panel.
