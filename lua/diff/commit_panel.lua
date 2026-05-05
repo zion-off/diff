@@ -19,6 +19,11 @@ local expanded = {}
 -- cached file lists per commit hash
 local file_cache = {}
 
+-- Track the currently open tooltip window so rapid K presses don't stack
+-- multiple tooltips and so cleanup is always possible.
+M._tooltip_win = nil
+M._tooltip_buf = nil
+
 -- ---------------------------------------------------------------------------
 -- Ref badge helpers
 -- ---------------------------------------------------------------------------
@@ -198,81 +203,130 @@ end
 -- Commit tooltip (K key)
 -- ---------------------------------------------------------------------------
 
+--- Close any existing tooltip, cleaning up module state.
+local function close_tooltip()
+  if M._tooltip_win and vim.api.nvim_win_is_valid(M._tooltip_win) then
+    pcall(vim.api.nvim_win_close, M._tooltip_win, true)
+  end
+  M._tooltip_win = nil
+  M._tooltip_buf = nil
+end
+
 --- Show a floating window with the full commit message for hash.
+--- Tracked in M._tooltip_win so rapid invocations never stack.
 --- @param repo_root string
 --- @param hash      string
 local function show_commit_tooltip(repo_root, hash)
+  -- Close any pre-existing tooltip before starting the async fetch
+  close_tooltip()
+
+  -- Wrap the entire async callback in xpcall so an error inside never leaves
+  -- M._tooltip_win pointing at a dead/inconsistent state.
   git.run({ "show", "--no-patch", "--format=%B", hash }, repo_root, function(lines, stderr, code)
-    if code ~= 0 then
-      vim.notify("diff.nvim: " .. (stderr or "cannot fetch commit message"), vim.log.levels.WARN)
-      return
-    end
+    local ok, err = xpcall(function()
+      if code ~= 0 then
+        vim.notify("diff.nvim: " .. (stderr or "cannot fetch commit message"), vim.log.levels.WARN)
+        return
+      end
 
-    -- Strip trailing empty lines
-    while #lines > 0 and lines[#lines] == "" do
-      table.remove(lines)
-    end
-    if #lines == 0 then
-      lines = { "(empty commit message)" }
-    end
+      -- Strip trailing empty lines
+      while #lines > 0 and lines[#lines] == "" do
+        table.remove(lines)
+      end
+      if #lines == 0 then
+        lines = { "(empty commit message)" }
+      end
 
-    -- Calculate window dimensions
-    local max_width = 80
-    local max_height = math.floor(vim.o.lines * 0.6)
-    local width = 0
-    for _, l in ipairs(lines) do
-      width = math.max(width, vim.fn.strdisplaywidth(l))
-    end
-    width = math.min(width + 2, max_width)
-    local height = math.min(#lines, max_height)
+      -- Calculate window dimensions
+      local max_width = 80
+      local max_height = math.floor(vim.o.lines * 0.6)
+      local width = 0
+      for _, l in ipairs(lines) do
+        width = math.max(width, vim.fn.strdisplaywidth(l))
+      end
+      width  = math.max(1, math.min(width + 2, max_width))
+      local height = math.max(1, math.min(#lines, max_height))
 
-    -- Clamp to viewport bounds
-    local row = math.max(0, math.floor((vim.o.lines - height) / 2))
-    local col = math.max(0, math.floor((vim.o.columns - width) / 2))
+      -- Clamp to viewport bounds
+      local row = math.max(0, math.floor((vim.o.lines - height) / 2))
+      local col = math.max(0, math.floor((vim.o.columns - width) / 2))
 
-    local buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
-    vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+      local buf = vim.api.nvim_create_buf(false, true)
+      vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
+      vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+      vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 
-    local ok_win, win = pcall(vim.api.nvim_open_win, buf, true, {
-      relative  = "editor",
-      width     = width,
-      height    = height,
-      row       = row,
-      col       = col,
-      style     = "minimal",
-      border    = "rounded",
-      title     = " Commit ",
-      title_pos = "center",
-    })
-    if not ok_win then
-      pcall(vim.api.nvim_buf_delete, buf, { force = true })
-      return
-    end
+      -- Guard: if a different tooltip was opened while git was running, bail
+      if M._tooltip_buf and vim.api.nvim_buf_is_valid(M._tooltip_buf) then
+        pcall(vim.api.nvim_buf_delete, buf, { force = true })
+        return
+      end
 
-    vim.api.nvim_set_option_value("wrap",          true,  { win = win })
-    vim.api.nvim_set_option_value("linebreak",     true,  { win = win })
-    vim.api.nvim_set_option_value("sidescroll",    0,     { win = win })
-    vim.api.nvim_set_option_value("sidescrolloff", 0,     { win = win })
-    vim.api.nvim_set_option_value("number",        false, { win = win })
+      local ok_win, win = pcall(vim.api.nvim_open_win, buf, true, {
+        relative  = "editor",
+        width     = width,
+        height    = height,
+        row       = row,
+        col       = col,
+        style     = "minimal",
+        border    = "rounded",
+        title     = " Commit ",
+        title_pos = "center",
+      })
+      if not ok_win then
+        pcall(vim.api.nvim_buf_delete, buf, { force = true })
+        return
+      end
 
-    -- Block horizontal movement/scroll in the tooltip
-    local nop_keys = { "<ScrollWheelRight>", "<ScrollWheelLeft>", "<Left>", "<Right>", "zh", "zl" }
-    for _, key in ipairs(nop_keys) do
-      vim.keymap.set("n", key, "<Nop>", { buffer = buf, silent = true, desc = "diff.nvim: (disabled)" })
-    end
+      -- Validate immediately; open_win can theoretically succeed but return an
+      -- invalid win if the editor is closing.
+      if not vim.api.nvim_win_is_valid(win) then
+        pcall(vim.api.nvim_buf_delete, buf, { force = true })
+        return
+      end
 
-    -- Close on q/Esc; allow j/k for scrolling
-    local close_keys = { "q", "<Esc>" }
-    for _, key in ipairs(close_keys) do
-      vim.keymap.set("n", key, function()
-        if vim.api.nvim_win_is_valid(win) then
-          vim.api.nvim_win_close(win, true)
-        end
-      end, { buffer = buf, nowait = true, silent = true, desc = "diff.nvim: close tooltip" })
-    end
+      M._tooltip_win = win
+      M._tooltip_buf = buf
+
+      pcall(vim.api.nvim_set_option_value, "wrap",          true,  { win = win })
+      pcall(vim.api.nvim_set_option_value, "linebreak",     true,  { win = win })
+      pcall(vim.api.nvim_set_option_value, "sidescroll",    0,     { win = win })
+      pcall(vim.api.nvim_set_option_value, "sidescrolloff", 0,     { win = win })
+      pcall(vim.api.nvim_set_option_value, "number",        false, { win = win })
+
+      -- Block horizontal movement/scroll
+      local nop_keys = { "<ScrollWheelRight>", "<ScrollWheelLeft>", "<Left>", "<Right>", "zh", "zl" }
+      for _, key in ipairs(nop_keys) do
+        vim.keymap.set("n", key, "<Nop>", { buffer = buf, silent = true, desc = "diff.nvim: (disabled)" })
+      end
+
+      -- Close on q/Esc: always clears module state
+      local function do_close()
+        close_tooltip()
+      end
+      for _, key in ipairs({ "q", "<Esc>" }) do
+        vim.keymap.set("n", key, do_close,
+          { buffer = buf, nowait = true, silent = true, desc = "diff.nvim: close tooltip" })
+      end
+
+      -- BufLeave: auto-close so tooltip dismisses when focus moves away
+      vim.api.nvim_create_autocmd("BufLeave", {
+        buffer  = buf,
+        once    = true,
+        callback = function()
+          vim.schedule(function()
+            close_tooltip()
+          end)
+        end,
+      })
+    end, function(err_msg)
+      -- xpcall error handler: clean up state and notify user
+      close_tooltip()
+      vim.notify("diff.nvim: tooltip error: " .. tostring(err_msg), vim.log.levels.ERROR)
+    end)
+    -- ok is false if xpcall caught an error; already handled above
+    _ = ok  -- suppress unused warning
   end)
 end
 
@@ -297,6 +351,8 @@ function M.setup(buf, win, repo_root)
   file_cache = {}
   line_map = {}
   _commits = nil
+  -- Close any open tooltip from previous session
+  close_tooltip()
 
   local cfg  = config.get()
   local km   = cfg.keymaps or {}

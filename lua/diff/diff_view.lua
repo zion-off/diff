@@ -177,12 +177,15 @@ local function apply_line_highlights(buf, aligned, side)
     local row = i - 1
 
     if entry.type == "filler" then
-      -- Use virtual text with stipple character for visual distinction
+      -- Use virtual text with stipple character for visual distinction.
+      -- number_hl_group = "Conceal" visually suppresses the line number for
+      -- filler rows — they are structural padding, not real content.
       vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
-        line_hl_group = "DiffNvimFiller",
-        virt_text     = { { string.rep("░", 80), "DiffNvimFillerChar" } },
-        virt_text_pos = "overlay",
-        priority      = PRIORITY_LINE_BG,
+        line_hl_group    = "DiffNvimFiller",
+        number_hl_group  = "Conceal",
+        virt_text        = { { string.rep("░", 80), "DiffNvimFillerChar" } },
+        virt_text_pos    = "overlay",
+        priority         = PRIORITY_LINE_BG,
       })
 
     elseif entry.type == "removed" then
@@ -202,9 +205,11 @@ local function apply_line_highlights(buf, aligned, side)
       })
 
     elseif entry.type == "separator" then
+      -- Separator rows also carry no real line number.
       vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
-        line_hl_group = "DiffNvimSeparator",
-        priority      = PRIORITY_LINE_BG,
+        line_hl_group   = "DiffNvimSeparator",
+        number_hl_group = "Conceal",
+        priority        = PRIORITY_LINE_BG,
       })
     end
   end
@@ -970,63 +975,72 @@ end
 
 --- Open the diff view for a file from the file panel.
 --- Wrapped in pcall for crash resilience.
+--- All independent git calls are fired simultaneously:
+---   is_binary + get_old_content + get_new_content + get_diff  (4 parallel)
 --- @param repo_root string
 --- @param file_info table   {path, status, staged}
 function M.open_file_diff(repo_root, file_info)
   local ok, err = pcall(function()
-    git.is_binary(repo_root, file_info.path, function(is_bin)
+    -- Fire all 4 operations in parallel.  We only render when all 4 complete.
+    -- If binary is detected we notify and bail (the other results are discarded).
+    local pending = 4
+    local old_lines, new_lines, diff_text, is_bin
+
+    local aborted = false
+    local function done()
+      pending = pending - 1
+      if pending > 0 then return end
+      if aborted then return end
+
       if is_bin then
         vim.notify("diff.nvim: binary file — " .. file_info.path, vim.log.levels.INFO)
         return
       end
 
-      local pending = 3
-      local old_lines, new_lines, diff_text
-
-      local function done()
-        pending = pending - 1
-        if pending > 0 then return end
-
-        local open_ok, open_err = pcall(function()
-          local ft = vim.filetype.match({ filename = file_info.path }) or ""
-          M.open({
-            repo_root   = repo_root,
-            file_path   = file_info.path,
-            old_lines   = old_lines  or {},
-            new_lines   = new_lines  or {},
-            diff_text   = diff_text  or "",
-            filetype    = ft,
-            file_status = file_info.status,
-          })
-        end)
-        if not open_ok then
-          vim.notify("diff.nvim: error rendering diff: " .. tostring(open_err), vim.log.levels.ERROR)
-          close_diff_wins()
-        end
-      end
-
-      get_old_content(repo_root, file_info, function(lines)
-        old_lines = lines
-        done()
+      local open_ok, open_err = pcall(function()
+        local ft = vim.filetype.match({ filename = file_info.path }) or ""
+        M.open({
+          repo_root   = repo_root,
+          file_path   = file_info.path,
+          old_lines   = old_lines  or {},
+          new_lines   = new_lines  or {},
+          diff_text   = diff_text  or "",
+          filetype    = ft,
+          file_status = file_info.status,
+        })
       end)
-
-      get_new_content(repo_root, file_info, function(lines)
-        new_lines = lines
-        done()
-      end)
-
-      if file_info.status == "untracked" then
-        git.get_untracked_diff(repo_root, file_info.path, function(text, _)
-          diff_text = text or ""
-          done()
-        end)
-      else
-        git.get_diff(repo_root, file_info.path, file_info.staged or false, function(text, _)
-          diff_text = text or ""
-          done()
-        end)
+      if not open_ok then
+        vim.notify("diff.nvim: error rendering diff: " .. tostring(open_err), vim.log.levels.ERROR)
+        close_diff_wins()
       end
+    end
+
+    git.is_binary(repo_root, file_info.path, function(bin)
+      is_bin = bin
+      done()
     end)
+
+    get_old_content(repo_root, file_info, function(lines)
+      old_lines = lines
+      done()
+    end)
+
+    get_new_content(repo_root, file_info, function(lines)
+      new_lines = lines
+      done()
+    end)
+
+    if file_info.status == "untracked" then
+      git.get_untracked_diff(repo_root, file_info.path, function(text, _)
+        diff_text = text or ""
+        done()
+      end)
+    else
+      git.get_diff(repo_root, file_info.path, file_info.staged or false, function(text, _)
+        diff_text = text or ""
+        done()
+      end)
+    end
   end)
 
   if not ok then
@@ -1040,77 +1054,101 @@ end
 -- ---------------------------------------------------------------------------
 
 --- Open a diff view scoped to a specific commit.
+--- When file_path is known all three git operations (diff, old content, new
+--- content) are fired simultaneously instead of sequentially.
 --- @param repo_root    string
 --- @param hash         string
 --- @param file_path    string|nil
 --- @param file_status  string|nil  "A","M","D" etc.
 function M.open_commit_diff(repo_root, hash, file_path, file_status)
   local ok, err = pcall(function()
-    git.get_commit_diff(repo_root, hash, file_path, function(diff_text, cb_err)
-      if cb_err then
-        vim.notify("diff.nvim: commit diff error: " .. cb_err, vim.log.levels.ERROR)
+    local function fetch_side(ref, path, cb)
+      if not path or path:match("%(all files%)") then
+        cb({})
         return
       end
+      git.get_file_at_ref(repo_root, ref, path, function(lines, ferr)
+        cb(ferr and {} or lines)
+      end)
+    end
 
-      local fp = file_path
+    local function open_when_ready(fp, diff_text_val, old_lines_val, new_lines_val)
+      local open_ok, open_err = pcall(function()
+        local ft = fp and (vim.filetype.match({ filename = fp }) or "") or ""
+        local status = nil
+        if file_status then
+          if file_status == "A" then status = "added"
+          elseif file_status == "D" then status = "deleted"
+          end
+        end
+        M.open({
+          repo_root   = repo_root,
+          file_path   = fp or hash:sub(1, 7),
+          old_lines   = old_lines_val  or {},
+          new_lines   = new_lines_val  or {},
+          diff_text   = diff_text_val  or "",
+          filetype    = ft,
+          file_status = status,
+        })
+      end)
+      if not open_ok then
+        vim.notify("diff.nvim: error rendering commit diff: " .. tostring(open_err), vim.log.levels.ERROR)
+        close_diff_wins()
+      end
+    end
 
-      if not fp then
+    if file_path then
+      -- All 3 operations are independent when we know the file path:
+      -- fire them simultaneously instead of sequentially.
+      local pending = 3
+      local old_lines, new_lines, diff_text
+
+      local function done()
+        pending = pending - 1
+        if pending > 0 then return end
+        open_when_ready(file_path, diff_text, old_lines, new_lines)
+      end
+
+      fetch_side(hash .. "^", file_path, function(lines) old_lines = lines; done() end)
+      fetch_side(hash,        file_path, function(lines) new_lines = lines; done() end)
+      git.get_commit_diff(repo_root, hash, file_path, function(text, cb_err)
+        if cb_err then
+          vim.notify("diff.nvim: commit diff error: " .. cb_err, vim.log.levels.ERROR)
+          pending = 0  -- prevent further processing
+          return
+        end
+        diff_text = text
+        done()
+      end)
+    else
+      -- No file path known: need diff text first to extract it
+      git.get_commit_diff(repo_root, hash, nil, function(diff_text, cb_err)
+        if cb_err then
+          vim.notify("diff.nvim: commit diff error: " .. cb_err, vim.log.levels.ERROR)
+          return
+        end
+
+        local fp = nil
         for line in (diff_text or ""):gmatch("[^\n]+") do
           local m = line:match("^%+%+%+ b/(.+)$")
           if m then fp = m break end
         end
         fp = fp or (hash:sub(1, 7) .. " (all files)")
-      end
 
-      local function fetch_side(ref, path, cb)
-        if not path or path:match("%(all files%)") then
-          cb({})
-          return
+        -- Now that we have fp, fetch old/new in parallel
+        local pending = 2
+        local old_lines, new_lines
+
+        local function done()
+          pending = pending - 1
+          if pending > 0 then return end
+          open_when_ready(fp, diff_text, old_lines, new_lines)
         end
-        git.get_file_at_ref(repo_root, ref, path, function(lines, ferr)
-          cb(ferr and {} or lines)
-        end)
-      end
 
-      local pending = 2
-      local old_lines, new_lines
-
-      local function done()
-        pending = pending - 1
-        if pending > 0 then return end
-
-        local open_ok, open_err = pcall(function()
-          local ft = fp and (vim.filetype.match({ filename = fp }) or "") or ""
-          -- Determine file status for single-pane detection
-          local status = nil
-          if file_status then
-            if file_status == "A" then status = "added"
-            elseif file_status == "D" then status = "deleted"
-            end
-          end
-          M.open({
-            repo_root   = repo_root,
-            file_path   = fp or hash:sub(1, 7),
-            old_lines   = old_lines or {},
-            new_lines   = new_lines or {},
-            diff_text   = diff_text or "",
-            filetype    = ft,
-            file_status = status,
-          })
-        end)
-        if not open_ok then
-          vim.notify("diff.nvim: error rendering commit diff: " .. tostring(open_err), vim.log.levels.ERROR)
-          close_diff_wins()
-        end
-      end
-
-      fetch_side(hash .. "^", fp, function(lines)
-        old_lines = lines; done()
+        fetch_side(hash .. "^", fp, function(lines) old_lines = lines; done() end)
+        fetch_side(hash,        fp, function(lines) new_lines = lines; done() end)
       end)
-      fetch_side(hash, fp, function(lines)
-        new_lines = lines; done()
-      end)
-    end)
+    end
   end)
 
   if not ok then
