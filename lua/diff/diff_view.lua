@@ -44,8 +44,11 @@ M._single_pane      = false
 M._single_side      = nil  -- "old" or "new"
 
 -- ---------------------------------------------------------------------------
--- Helpers
+-- Highlight priorities (relative to tree-sitter's default of 100)
 -- ---------------------------------------------------------------------------
+local PRIORITY_LINE_BG   = 50   -- background diff colors — below TS so syntax shows through
+local PRIORITY_WORD_HL   = 150  -- word diff highlights — above TS so they are clearly visible
+local PRIORITY_NOTE_SIGN = 70   -- note markers — between line bg and word highlights
 
 --- Create a scratch buffer for a diff pane.
 --- @param  name string
@@ -179,7 +182,7 @@ local function apply_line_highlights(buf, aligned, side)
         line_hl_group = "DiffNvimFiller",
         virt_text     = { { string.rep("░", 80), "DiffNvimFillerChar" } },
         virt_text_pos = "overlay",
-        priority      = 50,
+        priority      = PRIORITY_LINE_BG,
       })
 
     elseif entry.type == "removed" then
@@ -187,7 +190,7 @@ local function apply_line_highlights(buf, aligned, side)
         line_hl_group  = "DiffNvimRemoved",
         sign_text      = "▍",
         sign_hl_group  = "DiffNvimGutterRemoved",
-        priority       = 50,
+        priority       = PRIORITY_LINE_BG,
       })
 
     elseif entry.type == "added" then
@@ -195,13 +198,13 @@ local function apply_line_highlights(buf, aligned, side)
         line_hl_group  = "DiffNvimAdded",
         sign_text      = "▍",
         sign_hl_group  = "DiffNvimGutterAdded",
-        priority       = 50,
+        priority       = PRIORITY_LINE_BG,
       })
 
     elseif entry.type == "separator" then
       vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
         line_hl_group = "DiffNvimSeparator",
-        priority      = 50,
+        priority      = PRIORITY_LINE_BG,
       })
     end
   end
@@ -228,7 +231,7 @@ local function apply_word_highlights(left_buf, right_buf, left_aln, right_aln)
             end_row  = row,
             end_col  = math.min(range.end_col, #l.content),
             hl_group = "DiffNvimRemovedWord",
-            priority = 150,
+            priority = PRIORITY_WORD_HL,
           })
         end
       end
@@ -239,7 +242,7 @@ local function apply_word_highlights(left_buf, right_buf, left_aln, right_aln)
             end_row  = row,
             end_col  = math.min(range.end_col, #r.content),
             hl_group = "DiffNvimAddedWord",
-            priority = 150,
+            priority = PRIORITY_WORD_HL,
           })
         end
       end
@@ -290,7 +293,7 @@ local function apply_note_markers(buf, aligned, side, repo_root, file_path)
                 sign_hl_group = "DiffNvimNoteMarker",
                 virt_text     = { { "  " .. preview, "DiffNvimNoteVirtText" } },
                 virt_text_pos = "eol",
-                priority      = 70,
+                priority      = PRIORITY_NOTE_SIGN,
               })
               break
             end
@@ -316,11 +319,11 @@ local function setup_scroll_sync(left_win, right_win)
   -- Suppress scroll/cursor events on target window while syncing, preventing
   -- cascading callbacks (e.g. rapid <C-u>/<C-d> firing multiple WinScrolled).
   -- Always restores eventignore even if fn() throws (exception-safe).
+  -- Sets to exactly "WinScrolled,CursorMoved" (no concatenation) to avoid
+  -- duplicate event names; the original value is always restored afterward.
   local function with_eventignore(fn)
     local saved = vim.o.eventignore
-    vim.o.eventignore = saved ~= ""
-      and (saved .. ",WinScrolled,CursorMoved")
-      or  "WinScrolled,CursorMoved"
+    vim.o.eventignore = "WinScrolled,CursorMoved"
     local ok, err = pcall(fn)
     vim.o.eventignore = saved
     if not ok then error(err, 0) end
