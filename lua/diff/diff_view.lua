@@ -628,17 +628,16 @@ function M.open(opts)
 
   local left_aln, right_aln
   if single_pane then
-    -- For single-pane mode, create a simple list with all lines marked
     if single_side == "new" then
-      left_aln = {}
+      -- Only right pane is shown; left_aln unused in single-pane new-file mode
       right_aln = {}
       for i, line in ipairs(new_lines) do
         table.insert(right_aln, { content = line, line_num = i, type = "added" })
       end
-      left_aln = right_aln  -- unused in single-pane but keeps structure consistent
+      left_aln = right_aln
     else
+      -- Only left pane is shown; right_aln unused in single-pane deleted-file mode
       left_aln = {}
-      right_aln = {}
       for i, line in ipairs(old_lines) do
         table.insert(left_aln, { content = line, line_num = i, type = "removed" })
       end
