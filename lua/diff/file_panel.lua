@@ -237,6 +237,11 @@ function M.setup(buf, win, repo_root)
   vim.keymap.set("n", km.refresh or "<leader>gr", function()
     M.refresh(buf, win, repo_root)
   end, opts)
+
+  -- 'q': close the entire diff.nvim interface
+  vim.keymap.set("n", "q", function()
+    require("diff.sidebar").close()
+  end, opts)
 end
 
 --- Fetch git status and re-render the panel.

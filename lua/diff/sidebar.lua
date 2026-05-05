@@ -197,13 +197,9 @@ function M.close()
 
   -- Now close the diff.nvim tab
   if diff_tab and vim.api.nvim_tabpage_is_valid(diff_tab) then
-    -- Close all windows in that tab
-    local wins = vim.api.nvim_tabpage_list_wins(diff_tab)
-    for _, win in ipairs(wins) do
-      if vim.api.nvim_win_is_valid(win) then
-        pcall(vim.api.nvim_win_close, win, true)
-      end
-    end
+    -- Use tabclose which handles the "last window" edge case correctly
+    local tab_nr = vim.api.nvim_tabpage_get_number(diff_tab)
+    pcall(vim.cmd, "tabclose " .. tab_nr)
   end
 
   M._file_win   = nil
