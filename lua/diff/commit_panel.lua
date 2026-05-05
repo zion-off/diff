@@ -247,7 +247,7 @@ local function show_commit_tooltip(repo_root, hash)
       title     = " Commit ",
       title_pos = "center",
     })
-    if not ok_win or not vim.api.nvim_win_is_valid(win) then
+    if not ok_win then
       pcall(vim.api.nvim_buf_delete, buf, { force = true })
       return
     end

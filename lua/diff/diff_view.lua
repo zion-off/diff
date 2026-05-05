@@ -92,6 +92,9 @@ local function close_diff_wins()
     M._scroll_aug = nil
   end
 
+  -- Invalidate any pending vim.schedule highlight callbacks from the closing view
+  M._render_gen = (M._render_gen or 0) + 1
+
   -- Reset scroll guard to prevent permanent lockout (no longer a boolean — kept for compat)
 
   -- Determine if we need to restore the main area window

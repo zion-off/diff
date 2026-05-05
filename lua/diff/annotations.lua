@@ -86,11 +86,11 @@ function M.prompt_note(opts)
   vim.api.nvim_set_option_value("buftype", "prompt", { buf = buf })
   vim.fn.prompt_setprompt(buf, "Note: ")
 
-  local width  = math.min(70, vim.o.columns - 4)
-  local row    = math.floor((vim.o.lines - 3) / 2)
-  local col    = math.floor((vim.o.columns - width) / 2)
+  local width  = math.max(1, math.min(70, vim.o.columns - 4))
+  local row    = math.max(0, math.floor((vim.o.lines - 3) / 2))
+  local col    = math.max(0, math.floor((vim.o.columns - width) / 2))
 
-  local win = vim.api.nvim_open_win(buf, true, {
+  local ok_win, win = pcall(vim.api.nvim_open_win, buf, true, {
     relative   = "editor",
     width      = width,
     height     = 1,
@@ -101,7 +101,7 @@ function M.prompt_note(opts)
     title      = " Leave Note ",
     title_pos  = "center",
   })
-  if not win or not vim.api.nvim_win_is_valid(win) then
+  if not ok_win then
     vim.notify("diff.nvim: could not open note prompt window", vim.log.levels.WARN)
     pcall(vim.api.nvim_buf_delete, buf, { force = true })
     return
@@ -166,12 +166,12 @@ function M.toggle_notes(repo_root)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 
-  local width  = math.min(80, vim.o.columns - 4)
-  local height = math.min(40, vim.o.lines - 4)
-  local row    = math.floor((vim.o.lines   - height) / 2)
-  local col    = math.floor((vim.o.columns - width)  / 2)
+  local width  = math.max(1, math.min(80, vim.o.columns - 4))
+  local height = math.max(1, math.min(40, vim.o.lines - 4))
+  local row    = math.max(0, math.floor((vim.o.lines   - height) / 2))
+  local col    = math.max(0, math.floor((vim.o.columns - width)  / 2))
 
-  local win = vim.api.nvim_open_win(buf, true, {
+  local ok_win, win = pcall(vim.api.nvim_open_win, buf, true, {
     relative  = "editor",
     width     = width,
     height    = height,
@@ -182,7 +182,7 @@ function M.toggle_notes(repo_root)
     title     = " diff.nvim Notes  [dd=delete  q=close] ",
     title_pos = "center",
   })
-  if not win or not vim.api.nvim_win_is_valid(win) then
+  if not ok_win then
     vim.notify("diff.nvim: could not open notes panel", vim.log.levels.WARN)
     pcall(vim.api.nvim_buf_delete, buf, { force = true })
     return
