@@ -318,13 +318,18 @@ local function show_commit_tooltip(repo_root, hash)
           { buffer = buf, nowait = true, silent = true, desc = "diff.nvim: close tooltip" })
       end
 
-      -- BufLeave: auto-close so tooltip dismisses when focus moves away
+      -- BufLeave: auto-close so tooltip dismisses when focus moves away.
+      -- Capture the buffer reference so the scheduled callback only closes
+      -- THIS tooltip and not a newer one that may have been opened in the gap.
+      local captured_buf = buf
       vim.api.nvim_create_autocmd("BufLeave", {
         buffer  = buf,
         once    = true,
         callback = function()
           vim.schedule(function()
-            close_tooltip()
+            if M._tooltip_buf == captured_buf then
+              close_tooltip()
+            end
           end)
         end,
       })
