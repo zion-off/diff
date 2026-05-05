@@ -22,6 +22,11 @@ M._current_repo  = nil
 M._current_file  = nil
 M._buf_aligned   = {}
 
+-- Render generation counter: incremented on each M.open() call.
+-- Scheduled callbacks check this to avoid applying stale highlights
+-- if M.open() is called again before the first schedule fires.
+M._render_gen    = 0
+
 -- Cursor alignment lookup tables (built at render time)
 -- Maps: left_to_right[left_buf_line] = right_buf_line (and vice-versa)
 M._left_to_right = nil
@@ -307,36 +312,39 @@ local function setup_scroll_sync(left_win, right_win)
 
   -- Suppress scroll/cursor events on target window while syncing, preventing
   -- cascading callbacks (e.g. rapid <C-u>/<C-d> firing multiple WinScrolled).
+  -- Always restores eventignore even if fn() throws (exception-safe).
   local function with_eventignore(fn)
     local saved = vim.o.eventignore
     vim.o.eventignore = saved ~= ""
       and (saved .. ",WinScrolled,CursorMoved")
       or  "WinScrolled,CursorMoved"
-    fn()
+    local ok, err = pcall(fn)
     vim.o.eventignore = saved
+    if not ok then error(err, 0) end
   end
 
   -- Sync topline: both buffers have identical line count (aligned), so syncing
-  -- topline directly keeps them visually aligned. eventignore prevents the
-  -- target window's winrestview from re-triggering this callback.
+  -- topline directly keeps them visually aligned. Use args.match (the window that
+  -- actually scrolled) rather than get_current_win() to handle API-driven scrolls.
   vim.api.nvim_create_autocmd("WinScrolled", {
     group    = aug,
-    callback = function()
-      local cur_win = vim.api.nvim_get_current_win()
+    callback = function(ev)
+      -- args.match contains the ID of the window that scrolled
+      local scrolled_win = tonumber(ev.match)
       local target_win
 
-      if cur_win == left_win then
+      if scrolled_win == left_win then
         target_win = right_win
-      elseif cur_win == right_win then
+      elseif scrolled_win == right_win then
         target_win = left_win
       else
         return
       end
 
-      if not vim.api.nvim_win_is_valid(cur_win)    then return end
-      if not vim.api.nvim_win_is_valid(target_win) then return end
+      if not vim.api.nvim_win_is_valid(scrolled_win) then return end
+      if not vim.api.nvim_win_is_valid(target_win)   then return end
 
-      local info = vim.fn.getwininfo(cur_win)
+      local info = vim.fn.getwininfo(scrolled_win)
       if not info or #info == 0 then return end
       local topline = info[1].topline
       local leftcol = info[1].leftcol or 0
@@ -350,7 +358,9 @@ local function setup_scroll_sync(left_win, right_win)
   })
 
   -- Sync cursor via aligned_index identity map (both bufs have equal line count).
-  -- eventignore prevents set_cursor on target from re-triggering CursorMoved.
+  -- Also syncs topline as a safety net for cursor jumps (:norm gg, :norm G) that
+  -- may not fire WinScrolled in all Neovim builds.
+  -- Preserves column position and uses eventignore to prevent re-entrant callbacks.
   vim.api.nvim_create_autocmd("CursorMoved", {
     group    = aug,
     callback = function()
@@ -378,8 +388,17 @@ local function setup_scroll_sync(left_win, right_win)
       local line_count = vim.api.nvim_buf_line_count(target_buf)
       target_line = math.min(target_line, line_count)
 
+      -- Preserve column; also sync topline to handle :norm gg/:norm G
+      local info = vim.fn.getwininfo(cur_win)
+      local topline = (info and #info > 0) and info[1].topline or nil
+
       with_eventignore(function()
-        pcall(vim.api.nvim_win_set_cursor, target_win, { target_line, 0 })
+        pcall(vim.api.nvim_win_set_cursor, target_win, { target_line, cursor[2] })
+        if topline then
+          vim.api.nvim_win_call(target_win, function()
+            vim.fn.winrestview({ topline = topline })
+          end)
+        end
       end)
     end,
   })
@@ -575,7 +594,12 @@ function M.rerender()
   local left_buf_ref  = M._left_buf
   local right_buf_ref = M._right_buf
 
+  -- Increment render generation for rerender as well
+  M._render_gen = M._render_gen + 1
+  local this_rerender_gen = M._render_gen
+
   vim.schedule(function()
+    if this_rerender_gen ~= M._render_gen then return end
     if not vim.api.nvim_buf_is_valid(left_buf_ref) then return end
 
     -- Re-apply highlights
@@ -605,6 +629,11 @@ end
 --- @param opts table {repo_root, file_path, old_lines, new_lines, diff_text, filetype, file_status}
 function M.open(opts)
   close_diff_wins()
+
+  -- Increment render generation so any stale scheduled callbacks from a previous
+  -- M.open() call detect they are outdated and skip highlight application.
+  M._render_gen = M._render_gen + 1
+  local this_gen = M._render_gen
 
   local old_lines = opts.old_lines or {}
   local new_lines = opts.new_lines or {}
@@ -728,11 +757,13 @@ function M.open(opts)
       "%#DiffNvimWinbar#  " .. label .. opts.file_path .. "  ",
       { win = target_win })
 
-    -- Apply highlights — deferred so tree-sitter completes its first parse first
+    -- Apply highlights — deferred so tree-sitter completes its first parse first.
+    -- Guard with generation counter to skip stale callbacks from rapid re-opens.
     local pane_buf_ref = pane_buf
     local repo_root_ref = opts.repo_root
     local file_path_ref = opts.file_path
     vim.schedule(function()
+      if this_gen ~= M._render_gen then return end
       if not vim.api.nvim_buf_is_valid(pane_buf_ref) then return end
       vim.api.nvim_buf_clear_namespace(pane_buf_ref, NS, 0, -1)
       apply_line_highlights(pane_buf_ref, aln, single_side)
@@ -854,12 +885,14 @@ function M.open(opts)
   -- ── Apply highlights ─────────────────────────────────────────────────────
   -- Deferred via vim.schedule so tree-sitter completes its first parse before
   -- our extmarks are applied. This prevents TS from overwriting word highlights.
+  -- Guard with generation counter to skip stale callbacks from rapid re-opens.
   local left_buf_ref  = left_buf
   local right_buf_ref = right_buf
   local repo_root_ref = opts.repo_root
   local file_path_ref = opts.file_path
 
   vim.schedule(function()
+    if this_gen ~= M._render_gen then return end
     if not vim.api.nvim_buf_is_valid(left_buf_ref)  then return end
     if not vim.api.nvim_buf_is_valid(right_buf_ref) then return end
 

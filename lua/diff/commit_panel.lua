@@ -236,7 +236,7 @@ local function show_commit_tooltip(repo_root, hash)
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 
-    local win = vim.api.nvim_open_win(buf, true, {
+    local ok_win, win = pcall(vim.api.nvim_open_win, buf, true, {
       relative  = "editor",
       width     = width,
       height    = height,
@@ -247,6 +247,10 @@ local function show_commit_tooltip(repo_root, hash)
       title     = " Commit ",
       title_pos = "center",
     })
+    if not ok_win or not vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_buf_delete, buf, { force = true })
+      return
+    end
 
     vim.api.nvim_set_option_value("wrap",          true,  { win = win })
     vim.api.nvim_set_option_value("linebreak",     true,  { win = win })

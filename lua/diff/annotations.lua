@@ -101,6 +101,14 @@ function M.prompt_note(opts)
     title      = " Leave Note ",
     title_pos  = "center",
   })
+  if not win or not vim.api.nvim_win_is_valid(win) then
+    vim.notify("diff.nvim: could not open note prompt window", vim.log.levels.WARN)
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    return
+  end
+
+  vim.api.nvim_set_option_value("sidescroll",    0, { win = win })
+  vim.api.nvim_set_option_value("sidescrolloff", 0, { win = win })
 
   vim.cmd("startinsert")
 
@@ -174,9 +182,17 @@ function M.toggle_notes(repo_root)
     title     = " diff.nvim Notes  [dd=delete  q=close] ",
     title_pos = "center",
   })
+  if not win or not vim.api.nvim_win_is_valid(win) then
+    vim.notify("diff.nvim: could not open notes panel", vim.log.levels.WARN)
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    return
+  end
 
-  vim.api.nvim_set_option_value("wrap", false, { win = win })
-  vim.api.nvim_set_option_value("number", false, { win = win })
+  vim.api.nvim_set_option_value("wrap",          true,  { win = win })
+  vim.api.nvim_set_option_value("linebreak",     true,  { win = win })
+  vim.api.nvim_set_option_value("sidescroll",    0,     { win = win })
+  vim.api.nvim_set_option_value("sidescrolloff", 0,     { win = win })
+  vim.api.nvim_set_option_value("number",        false, { win = win })
 
   M._win = win
   M._buf = buf
