@@ -251,8 +251,8 @@ local function show_commit_tooltip(repo_root, hash)
     vim.api.nvim_set_option_value("wrap", true, { win = win })
     vim.api.nvim_set_option_value("number", false, { win = win })
 
-    -- Close on any keypress
-    local close_keys = { "q", "<Esc>", "<CR>", "j", "k", "h", "l", "<Space>" }
+    -- Close on q/Esc; allow j/k for scrolling
+    local close_keys = { "q", "<Esc>" }
     for _, key in ipairs(close_keys) do
       vim.keymap.set("n", key, function()
         if vim.api.nvim_win_is_valid(win) then

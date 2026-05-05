@@ -135,21 +135,18 @@ local function close_diff_wins()
 end
 
 --- Build cursor alignment lookup tables from aligned lists.
---- Maps each buffer line in the left pane to its corresponding buffer line in the right.
+--- Both aligned arrays are guaranteed to be the same length by the diff_parser.
+--- Since line i in left corresponds to line i in right by construction
+--- (fillers pad both sides equally), the mapping is identity.
+--- This function exists to make the cursor sync code explicit about the invariant.
 --- @param left_aln  table[]
 --- @param right_aln table[]
 local function build_cursor_map(left_aln, right_aln)
-  -- Both aligned arrays are the same length. The aligned_index IS the buffer line.
-  -- For cursor sync: if the cursor is at aligned_index i, it should be at index i in both.
-  -- Since both buffers have the same number of lines (guaranteed by aligned builder),
-  -- we just need line i → line i. But we also need to skip filler lines and map
-  -- to the nearest real content line.
+  local len = math.min(#left_aln, #right_aln)
   local l2r = {}
   local r2l = {}
-  local len = #left_aln
 
   for i = 1, len do
-    -- Direct 1:1 mapping since both buffers have equal line counts
     l2r[i] = i
     r2l[i] = i
   end
@@ -267,7 +264,8 @@ local function apply_note_markers(buf, aligned, side, repo_root, file_path)
   vim.api.nvim_buf_clear_namespace(buf, ns_notes, 0, -1)
 
   -- Pattern: ## Note — <file_path>, lines <start>[–<end>] [(<side> side)]
-  for header, note_text in content:gmatch("## Note — ([^\n]+)\n+> ([^\n]+)") do
+  -- Tolerant: accepts both en-dash and hyphen; handles blank line between header and quote
+  for header, note_text in content:gmatch("## Note [—%-]- ([^\n]+)\n+> ([^\n]+)") do
     local note_file = header:match("^(.+), lines %d+")
     if note_file and note_file == file_path then
       local note_side = header:match("%((.+) side%)")
@@ -524,6 +522,9 @@ end
 
 --- Re-render the diff with current state (used after context expansion).
 function M.rerender()
+  -- Single-pane mode does not support expand/collapse
+  if M._single_pane then return end
+
   if not M._current_hunks or not M._current_old or not M._current_new then return end
   if not M._left_buf or not vim.api.nvim_buf_is_valid(M._left_buf) then return end
   if M._right_buf and not vim.api.nvim_buf_is_valid(M._right_buf) then return end
@@ -599,14 +600,14 @@ function M.open(opts)
   local diff_text = opts.diff_text or ""
   local file_status = opts.file_status or nil
 
-  -- Detect single-pane mode: added files (no old) or deleted files (no new)
+  -- Detect single-pane mode: added/untracked files (no old) or deleted files (no new)
   local single_pane = false
   local single_side = nil
 
-  if file_status == "added" or (#old_lines == 0 and #new_lines > 0 and diff_text == "") then
+  if file_status == "added" or file_status == "untracked" then
     single_pane = true
     single_side = "new"
-  elseif file_status == "deleted" or (#new_lines == 0 and #old_lines > 0 and diff_text == "") then
+  elseif file_status == "deleted" then
     single_pane = true
     single_side = "old"
   end
@@ -698,19 +699,19 @@ function M.open(opts)
         M._right_win = nil
         M._right_buf = nil
       end
-    end
 
-    set_win_opts(main_win)
+      set_win_opts(main_win)
+
+      -- Winbar
+      local label = single_side == "new" and "NEW: " or "DELETED: "
+      pcall(vim.api.nvim_set_option_value, "winbar",
+        "%#DiffNvimWinbar#  " .. label .. opts.file_path .. "  ",
+        { win = main_win })
+    end
 
     -- Apply highlights
     vim.api.nvim_buf_clear_namespace(pane_buf, NS, 0, -1)
     apply_line_highlights(pane_buf, aln, single_side)
-
-    -- Winbar
-    local label = single_side == "new" and "NEW: " or "DELETED: "
-    pcall(vim.api.nvim_set_option_value, "winbar",
-      "%#DiffNvimWinbar#  " .. label .. opts.file_path .. "  ",
-      { win = main_win })
 
     -- Note markers
     apply_note_markers(pane_buf, aln, single_side, opts.repo_root, opts.file_path)

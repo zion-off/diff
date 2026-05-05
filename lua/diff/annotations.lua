@@ -122,7 +122,7 @@ function M.prompt_note(opts)
     if vim.api.nvim_win_is_valid(win) then
       vim.api.nvim_win_close(win, true)
     end
-  end, { buffer = buf, nowait = true })
+  end, { buffer = buf, nowait = true, desc = "diff.nvim: cancel note" })
 end
 
 --- Toggle the notes panel (floating window with all saved notes).
@@ -192,13 +192,13 @@ function M.toggle_notes(repo_root)
         M._win = nil
         M._buf = nil
       end
-    end, { buffer = buf, nowait = true })
+    end, { buffer = buf, nowait = true, desc = "diff.nvim: close notes panel" })
   end
 
   -- Keymap: delete note under cursor
   vim.keymap.set("n", "dd", function()
     M._delete_note_at_cursor(buf, path, repo_root)
-  end, { buffer = buf, nowait = true })
+  end, { buffer = buf, nowait = true, desc = "diff.nvim: delete note" })
 end
 
 --- Apply syntax-style highlights to the notes buffer lines.
