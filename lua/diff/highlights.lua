@@ -29,6 +29,8 @@ local defaults = {
   DiffNvimRefTag          = { fg = "#d080d0" },
   DiffNvimNoteHeader      = { fg = "#d0b060", bold = true },
   DiffNvimNoteText        = { fg = "#c0c0c0" },
+  DiffNvimSeparator       = { fg = "#606070", bg = "#1a1a2a", italic = true },
+  DiffNvimCommitFileEntry = { fg = "#a0a0b0" },
 }
 
 -- Merged table of defaults + user overrides, populated in setup()

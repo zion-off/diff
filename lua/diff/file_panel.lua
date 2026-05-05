@@ -187,11 +187,14 @@ function M.setup(buf, win, repo_root)
       M.refresh(buf, win, repo_root)
     elseif meta.type == "file" then
       local dv   = require("diff.diff_view")
-      -- Merge staging state into the file info (not stored on the record itself)
+      -- Merge staging state into the file info
       local file = vim.tbl_extend("force", meta.file, {
         staged = (meta.section == "staged"),
       })
-      dv.open_file_diff(repo_root, file)
+      local ok, err = pcall(dv.open_file_diff, repo_root, file)
+      if not ok then
+        vim.notify("diff.nvim: error opening diff: " .. tostring(err), vim.log.levels.ERROR)
+      end
     end
   end, opts)
 

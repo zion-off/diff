@@ -3,6 +3,7 @@ local M = {}
 M.defaults = {
   sidebar_position = "right", -- "right" or "left"
   sidebar_width = 40,
+  context_lines = 3, -- lines of context around each hunk (nil = show all)
   notes_path = nil, -- nil = XDG default
   auto_refresh = true,
   keymaps = {
@@ -16,6 +17,8 @@ M.defaults = {
     prev_hunk      = "[c",
     leave_note     = "<leader>n",
     toggle_notes   = "<leader>N",
+    expand_context = "zo",
+    expand_all     = "zR",
   },
   highlights = {},
 }

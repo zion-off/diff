@@ -23,6 +23,13 @@ M._current_repo  = nil
 M._current_file  = nil
 M._buf_aligned   = {}
 
+-- State needed for expand-context feature
+M._current_hunks    = nil
+M._current_old      = nil
+M._current_new      = nil
+M._current_ctx      = nil
+M._current_ft       = nil
+
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
@@ -31,7 +38,6 @@ M._buf_aligned   = {}
 --- @param  name string
 --- @return integer
 local function make_buf(name)
-  -- Wipe any existing buffer with the same name
   for _, b in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_valid(b) and vim.api.nvim_buf_get_name(b) == name then
       pcall(vim.api.nvim_buf_delete, b, { force = true })
@@ -66,7 +72,7 @@ local function set_win_opts(win)
   end
 end
 
---- Close any open diff pane windows.
+--- Close any open diff pane windows safely.
 local function close_diff_wins()
   if M._scroll_aug then
     pcall(vim.api.nvim_del_augroup_by_id, M._scroll_aug)
@@ -94,8 +100,7 @@ end
 -- Highlight application
 -- ---------------------------------------------------------------------------
 
---- Apply line-level background highlights and gutter signs to one pane.
---- Uses line_hl_group for reliable full-line background coloring.
+--- Apply line-level background highlights, gutter signs, and separator styling.
 --- @param buf      integer
 --- @param aligned  table[]
 local function apply_line_highlights(buf, aligned)
@@ -123,6 +128,12 @@ local function apply_line_highlights(buf, aligned)
         sign_hl_group  = "DiffNvimGutterAdded",
         priority       = 10,
       })
+
+    elseif entry.type == "separator" then
+      vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
+        line_hl_group = "DiffNvimSeparator",
+        priority      = 10,
+      })
     end
   end
 end
@@ -138,7 +149,8 @@ local function apply_word_highlights(left_buf, right_buf, left_aln, right_aln)
     local l = left_aln[i]
     local r = right_aln[i]
     if l.type == "removed" and r.type == "added" and l.content ~= "" and r.content ~= "" then
-      local old_ranges, new_ranges = word_diff.compute(l.content, r.content)
+      local ok, old_ranges, new_ranges = pcall(word_diff.compute, l.content, r.content)
+      if not ok then goto continue end
       local row = i - 1
 
       for _, range in ipairs(old_ranges) do
@@ -163,11 +175,12 @@ local function apply_word_highlights(left_buf, right_buf, left_aln, right_aln)
         end
       end
     end
+    ::continue::
   end
 end
 
 -- ---------------------------------------------------------------------------
--- Scroll synchronisation — properly guarded against recursion
+-- Scroll synchronisation — topline-based, properly guarded
 -- ---------------------------------------------------------------------------
 
 local function setup_scroll_sync(left_win, right_win)
@@ -178,13 +191,13 @@ local function setup_scroll_sync(left_win, right_win)
   local aug = vim.api.nvim_create_augroup("DiffNvimScroll", { clear = true })
   M._scroll_aug = aug
 
+  -- Sync topline: since both buffers have identical line count (aligned),
+  -- syncing topline directly keeps them visually aligned.
   vim.api.nvim_create_autocmd("WinScrolled", {
     group    = aug,
     callback = function()
-      -- Guard: prevent recursive calls
       if M._scroll_guard then return end
 
-      -- Determine which of our two windows scrolled
       local cur_win = vim.api.nvim_get_current_win()
       local source_win, target_win
 
@@ -201,31 +214,28 @@ local function setup_scroll_sync(left_win, right_win)
       if not vim.api.nvim_win_is_valid(source_win) then return end
       if not vim.api.nvim_win_is_valid(target_win) then return end
 
-      -- Set guard BEFORE any scroll operation
       M._scroll_guard = true
 
-      -- Get the scroll position of the source
       local info = vim.fn.getwininfo(source_win)
       if not info or #info == 0 then
-        M._scroll_guard = false
+        vim.schedule(function() M._scroll_guard = false end)
         return
       end
       local topline = info[1].topline
       local leftcol = info[1].leftcol or 0
 
-      -- Apply to target
       vim.api.nvim_win_call(target_win, function()
         vim.fn.winrestview({ topline = topline, leftcol = leftcol })
       end)
 
-      -- Release guard after the event loop settles to prevent cascading
+      -- Release guard asynchronously to prevent cascading
       vim.schedule(function()
         M._scroll_guard = false
       end)
     end,
   })
 
-  -- Also sync cursor line (CursorMoved) with debounce
+  -- Sync cursor line
   vim.api.nvim_create_autocmd("CursorMoved", {
     group    = aug,
     callback = function()
@@ -352,16 +362,78 @@ local function setup_keymaps(left_buf, right_buf, opts)
       end
     end)
 
+    -- Expand context (zo) — expand by N more lines at the separator under cursor
+    map(buf, "n", km.expand_context or "zo", function()
+      M._expand_context()
+    end)
+
+    -- Expand all (zR) — show all context (set context_lines to nil and re-render)
+    map(buf, "n", km.expand_all or "zR", function()
+      M._expand_all()
+    end)
+
     -- Close diff view (return to sidebar)
     map(buf, "n", "q", function()
       close_diff_wins()
-      -- Return focus to the sidebar file panel
       local sidebar = require("diff.sidebar")
       if sidebar._file_win and vim.api.nvim_win_is_valid(sidebar._file_win) then
         vim.api.nvim_set_current_win(sidebar._file_win)
       end
     end)
   end
+end
+
+--- Expand context by doubling the context_lines setting and re-rendering.
+function M._expand_context()
+  if not M._current_hunks then return end
+  local current = M._current_ctx or 3
+  M._current_ctx = current + 10 -- expand by 10 more lines
+  M._rerender()
+end
+
+--- Show all context (no collapsing).
+function M._expand_all()
+  if not M._current_hunks then return end
+  M._current_ctx = nil -- nil means show all
+  M._rerender()
+end
+
+--- Re-render the diff with current state (used after context expansion).
+function M._rerender()
+  if not M._current_hunks or not M._current_old or not M._current_new then return end
+  if not M._left_buf or not vim.api.nvim_buf_is_valid(M._left_buf) then return end
+  if not M._right_buf or not vim.api.nvim_buf_is_valid(M._right_buf) then return end
+
+  local left_aln, right_aln = diff_parser.build_aligned_lines(
+    M._current_hunks, M._current_old, M._current_new, M._current_ctx
+  )
+
+  M._left_aligned  = left_aln
+  M._right_aligned = right_aln
+  M._buf_aligned[M._left_buf]  = left_aln
+  M._buf_aligned[M._right_buf] = right_aln
+
+  -- Re-fill buffers
+  local function fill_buf(buf, aligned)
+    local content = {}
+    for _, entry in ipairs(aligned) do
+      table.insert(content, entry.content)
+    end
+    vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, content)
+    vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+  end
+
+  fill_buf(M._left_buf,  left_aln)
+  fill_buf(M._right_buf, right_aln)
+
+  -- Re-apply highlights
+  vim.api.nvim_buf_clear_namespace(M._left_buf,  NS, 0, -1)
+  vim.api.nvim_buf_clear_namespace(M._right_buf, NS, 0, -1)
+
+  apply_line_highlights(M._left_buf,  left_aln)
+  apply_line_highlights(M._right_buf, right_aln)
+  apply_word_highlights(M._left_buf, M._right_buf, left_aln, right_aln)
 end
 
 -- ---------------------------------------------------------------------------
@@ -379,12 +451,21 @@ function M.open(opts)
 
   -- Parse diff and build aligned line lists
   local hunks = diff_parser.parse(diff_text)
-  local left_aln, right_aln = diff_parser.build_aligned_lines(hunks, old_lines, new_lines)
 
-  M._left_aligned  = left_aln
-  M._right_aligned = right_aln
-  M._current_repo  = opts.repo_root
-  M._current_file  = opts.file_path
+  local cfg = config.get()
+  local ctx = cfg.context_lines -- nil = show all, number = collapsed
+
+  local left_aln, right_aln = diff_parser.build_aligned_lines(hunks, old_lines, new_lines, ctx)
+
+  M._left_aligned    = left_aln
+  M._right_aligned   = right_aln
+  M._current_repo    = opts.repo_root
+  M._current_file    = opts.file_path
+  M._current_hunks   = hunks
+  M._current_old     = old_lines
+  M._current_new     = new_lines
+  M._current_ctx     = ctx
+  M._current_ft      = opts.filetype
 
   -- Create buffers
   local left_name  = "diff://old/" .. opts.file_path
@@ -397,7 +478,7 @@ function M.open(opts)
   M._buf_aligned[left_buf]  = left_aln
   M._buf_aligned[right_buf] = right_aln
 
-  -- Populate buffers with content lines (filler lines = empty string)
+  -- Populate buffers
   local function fill_buf(buf, aligned)
     local content = {}
     for _, entry in ipairs(aligned) do
@@ -422,12 +503,10 @@ function M.open(opts)
   end
 
   -- ── Create windows in the main area ─────────────────────────────────────
-  -- Use the sidebar's main_win as the host for the diff panes
   local sidebar = require("diff.sidebar")
   local main_win = sidebar.get_main_win()
 
   if main_win and vim.api.nvim_win_is_valid(main_win) then
-    -- Use the main area: set right_buf into main_win, split left for old
     vim.api.nvim_set_current_win(main_win)
     vim.api.nvim_win_set_buf(main_win, right_buf)
     local right_win = main_win
@@ -439,7 +518,6 @@ function M.open(opts)
     M._left_win  = left_win
     M._right_win = right_win
 
-    -- Update sidebar's main_win reference to the right pane
     sidebar.set_main_win(right_win)
   else
     -- Fallback: find the widest non-panel window
@@ -467,7 +545,6 @@ function M.open(opts)
       M._left_win  = left_win
       M._right_win = best_win
     else
-      -- Last resort: create fresh splits
       vim.cmd("vsplit")
       M._right_win = vim.api.nvim_get_current_win()
       vim.api.nvim_win_set_buf(M._right_win, right_buf)
@@ -502,7 +579,7 @@ function M.open(opts)
 end
 
 -- ---------------------------------------------------------------------------
--- Open diff for a file from the file panel
+-- Open diff for a file from the file panel (with crash protection)
 -- ---------------------------------------------------------------------------
 
 local function get_old_content(root, file, callback)
@@ -541,59 +618,73 @@ local function get_new_content(root, file, callback)
 end
 
 --- Open the diff view for a file from the file panel.
+--- Wrapped in pcall for crash resilience.
 --- @param repo_root string
 --- @param file_info table   {path, status, staged}
 function M.open_file_diff(repo_root, file_info)
-  git.is_binary(repo_root, file_info.path, function(is_bin)
-    if is_bin then
-      vim.notify("diff.nvim: binary file — " .. file_info.path, vim.log.levels.INFO)
-      return
-    end
+  local ok, err = pcall(function()
+    git.is_binary(repo_root, file_info.path, function(is_bin)
+      if is_bin then
+        vim.notify("diff.nvim: binary file — " .. file_info.path, vim.log.levels.INFO)
+        return
+      end
 
-    local pending = 3
-    local old_lines, new_lines, diff_text
+      local pending = 3
+      local old_lines, new_lines, diff_text
 
-    local function done()
-      pending = pending - 1
-      if pending > 0 then return end
+      local function done()
+        pending = pending - 1
+        if pending > 0 then return end
 
-      local ft = vim.filetype.match({ filename = file_info.path }) or ""
-      M.open({
-        repo_root  = repo_root,
-        file_path  = file_info.path,
-        old_lines  = old_lines  or {},
-        new_lines  = new_lines  or {},
-        diff_text  = diff_text  or "",
-        filetype   = ft,
-      })
-    end
+        local open_ok, open_err = pcall(function()
+          local ft = vim.filetype.match({ filename = file_info.path }) or ""
+          M.open({
+            repo_root  = repo_root,
+            file_path  = file_info.path,
+            old_lines  = old_lines  or {},
+            new_lines  = new_lines  or {},
+            diff_text  = diff_text  or "",
+            filetype   = ft,
+          })
+        end)
+        if not open_ok then
+          vim.notify("diff.nvim: error rendering diff: " .. tostring(open_err), vim.log.levels.ERROR)
+          close_diff_wins()
+        end
+      end
 
-    get_old_content(repo_root, file_info, function(lines)
-      old_lines = lines
-      done()
-    end)
-
-    get_new_content(repo_root, file_info, function(lines)
-      new_lines = lines
-      done()
-    end)
-
-    if file_info.status == "untracked" then
-      git.get_untracked_diff(repo_root, file_info.path, function(text, _)
-        diff_text = text or ""
+      get_old_content(repo_root, file_info, function(lines)
+        old_lines = lines
         done()
       end)
-    else
-      git.get_diff(repo_root, file_info.path, file_info.staged or false, function(text, _)
-        diff_text = text or ""
+
+      get_new_content(repo_root, file_info, function(lines)
+        new_lines = lines
         done()
       end)
-    end
+
+      if file_info.status == "untracked" then
+        git.get_untracked_diff(repo_root, file_info.path, function(text, _)
+          diff_text = text or ""
+          done()
+        end)
+      else
+        git.get_diff(repo_root, file_info.path, file_info.staged or false, function(text, _)
+          diff_text = text or ""
+          done()
+        end)
+      end
+    end)
   end)
+
+  if not ok then
+    vim.notify("diff.nvim: unexpected error: " .. tostring(err), vim.log.levels.ERROR)
+    close_diff_wins()
+  end
 end
 
 -- ---------------------------------------------------------------------------
--- Open diff for a commit
+-- Open diff for a commit (with crash protection)
 -- ---------------------------------------------------------------------------
 
 --- Open a diff view scoped to a specific commit.
@@ -601,56 +692,70 @@ end
 --- @param hash      string
 --- @param file_path string|nil
 function M.open_commit_diff(repo_root, hash, file_path)
-  git.get_commit_diff(repo_root, hash, file_path, function(diff_text, err)
-    if err then
-      vim.notify("diff.nvim: commit diff error: " .. err, vim.log.levels.ERROR)
-      return
-    end
-
-    local fp = file_path
-
-    if not fp then
-      for line in (diff_text or ""):gmatch("[^\n]+") do
-        local m = line:match("^%+%+%+ b/(.+)$")
-        if m then fp = m break end
-      end
-      fp = fp or (hash:sub(1, 7) .. " (all files)")
-    end
-
-    local function fetch_side(ref, path, cb)
-      if not path or path:match("%(all files%)") then
-        cb({})
+  local ok, err = pcall(function()
+    git.get_commit_diff(repo_root, hash, file_path, function(diff_text, cb_err)
+      if cb_err then
+        vim.notify("diff.nvim: commit diff error: " .. cb_err, vim.log.levels.ERROR)
         return
       end
-      git.get_file_at_ref(repo_root, ref, path, function(lines, ferr)
-        cb(ferr and {} or lines)
+
+      local fp = file_path
+
+      if not fp then
+        for line in (diff_text or ""):gmatch("[^\n]+") do
+          local m = line:match("^%+%+%+ b/(.+)$")
+          if m then fp = m break end
+        end
+        fp = fp or (hash:sub(1, 7) .. " (all files)")
+      end
+
+      local function fetch_side(ref, path, cb)
+        if not path or path:match("%(all files%)") then
+          cb({})
+          return
+        end
+        git.get_file_at_ref(repo_root, ref, path, function(lines, ferr)
+          cb(ferr and {} or lines)
+        end)
+      end
+
+      local pending = 2
+      local old_lines, new_lines
+
+      local function done()
+        pending = pending - 1
+        if pending > 0 then return end
+
+        local open_ok, open_err = pcall(function()
+          local ft = fp and (vim.filetype.match({ filename = fp }) or "") or ""
+          M.open({
+            repo_root = repo_root,
+            file_path = fp or hash:sub(1, 7),
+            old_lines = old_lines or {},
+            new_lines = new_lines or {},
+            diff_text = diff_text or "",
+            filetype  = ft,
+          })
+        end)
+        if not open_ok then
+          vim.notify("diff.nvim: error rendering commit diff: " .. tostring(open_err), vim.log.levels.ERROR)
+          close_diff_wins()
+        end
+      end
+
+      fetch_side(hash .. "^", fp, function(lines)
+        old_lines = lines; done()
       end)
-    end
-
-    local pending = 2
-    local old_lines, new_lines
-
-    local function done()
-      pending = pending - 1
-      if pending > 0 then return end
-      local ft = fp and (vim.filetype.match({ filename = fp }) or "") or ""
-      M.open({
-        repo_root = repo_root,
-        file_path = fp or hash:sub(1, 7),
-        old_lines = old_lines or {},
-        new_lines = new_lines or {},
-        diff_text = diff_text or "",
-        filetype  = ft,
-      })
-    end
-
-    fetch_side(hash .. "^", fp, function(lines)
-      old_lines = lines; done()
-    end)
-    fetch_side(hash, fp, function(lines)
-      new_lines = lines; done()
+      fetch_side(hash, fp, function(lines)
+        new_lines = lines; done()
+      end)
     end)
   end)
+
+  if not ok then
+    vim.notify("diff.nvim: unexpected error in commit diff: " .. tostring(err), vim.log.levels.ERROR)
+    close_diff_wins()
+  end
 end
 
 return M
