@@ -26,13 +26,18 @@ function M.get_notes_path(repo_root)
   local dir = xdg .. "/diff.nvim"
   vim.fn.mkdir(dir, "p")
 
-  -- Slug: last path component + sanitised full path hash suffix
+  -- Slug: repo name + a short hash of the full path to prevent collisions
+  -- between different repos that share the same directory name.
   local repo_name = repo_root:match("[^/]+$") or "repo"
-  local slug = repo_root:gsub("[^%w%-_]", "_")
-  -- Keep path manageable: take last 60 chars of the slug
-  if #slug > 60 then slug = slug:sub(-60) end
+  -- Simple djb2-style hash for collision resistance (does not need to be
+  -- cryptographic — just distinguishes paths like /foo/bar from /baz/bar).
+  local hash_val = 5381
+  for i = 1, #repo_root do
+    hash_val = (hash_val * 33 + string.byte(repo_root, i)) % 0xFFFFFFFF
+  end
+  local path_hash = string.format("%08x", hash_val)
 
-  return dir .. "/" .. repo_name .. "_" .. slug .. ".md"
+  return dir .. "/" .. repo_name .. "_" .. path_hash .. ".md"
 end
 
 --- Append a note entry to the notes file.
@@ -48,7 +53,9 @@ function M.append_note(note)
 
   local lines_str = tostring(note.line_start)
   if note.line_end and note.line_end ~= note.line_start then
-    lines_str = lines_str .. "–" .. tostring(note.line_end)
+    -- Use ASCII hyphen (U+002D) as range separator. The note marker parser
+    -- in diff_view.lua accepts both hyphen and en-dash for backward compat.
+    lines_str = lines_str .. "-" .. tostring(note.line_end)
   end
 
   local side_str = note.side and (" (" .. note.side .. " side)") or ""
@@ -284,11 +291,13 @@ function M._delete_note_at_cursor(buf, path, repo_root)
 
   -- Persist the change to disk
   local new_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-  local f = io.open(path, "w")
-  if f then
-    f:write(table.concat(new_lines, "\n") .. "\n")
-    f:close()
+  local f2, f2_err = io.open(path, "w")
+  if f2 then
+    f2:write(table.concat(new_lines, "\n") .. "\n")
+    f2:close()
     vim.notify("diff.nvim: note deleted", vim.log.levels.INFO)
+  else
+    vim.notify("diff.nvim: failed to persist deletion: " .. tostring(f2_err), vim.log.levels.ERROR)
   end
 
   -- Re-apply highlights
