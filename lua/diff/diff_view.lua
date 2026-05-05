@@ -457,6 +457,11 @@ local function setup_keymaps(left_buf, right_buf, opts)
           return
         end
         if not line_end then line_end = line_start end
+      else
+        -- Aligned table not available: cannot determine original file line number.
+        -- Bail rather than record a raw buffer row (which is meaningless as a file annotation).
+        vim.notify("diff.nvim: cannot determine file line mapping for annotation", vim.log.levels.WARN)
+        return
       end
 
       annotations.prompt_note({
@@ -986,11 +991,9 @@ function M.open_file_diff(repo_root, file_info)
     local pending = 4
     local old_lines, new_lines, diff_text, is_bin
 
-    local aborted = false
     local function done()
       pending = pending - 1
       if pending > 0 then return end
-      if aborted then return end
 
       if is_bin then
         vim.notify("diff.nvim: binary file — " .. file_info.path, vim.log.levels.INFO)
@@ -1102,8 +1105,10 @@ function M.open_commit_diff(repo_root, hash, file_path, file_status)
       -- fire them simultaneously instead of sequentially.
       local pending = 3
       local old_lines, new_lines, diff_text
+      local aborted = false  -- set on error to prevent open_when_ready on partial data
 
       local function done()
+        if aborted then return end
         pending = pending - 1
         if pending > 0 then return end
         open_when_ready(file_path, diff_text, old_lines, new_lines)
@@ -1113,8 +1118,8 @@ function M.open_commit_diff(repo_root, hash, file_path, file_status)
       fetch_side(hash,        file_path, function(lines) new_lines = lines; done() end)
       git.get_commit_diff(repo_root, hash, file_path, function(text, cb_err)
         if cb_err then
+          aborted = true
           vim.notify("diff.nvim: commit diff error: " .. cb_err, vim.log.levels.ERROR)
-          pending = 0  -- prevent further processing
           return
         end
         diff_text = text

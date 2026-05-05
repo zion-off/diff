@@ -21,8 +21,10 @@ local file_cache = {}
 
 -- Track the currently open tooltip window so rapid K presses don't stack
 -- multiple tooltips and so cleanup is always possible.
-M._tooltip_win = nil
-M._tooltip_buf = nil
+M._tooltip_win     = nil
+M._tooltip_buf     = nil
+-- Monotonic counter to detect stale callbacks from superseded tooltip requests.
+M._tooltip_req_id  = 0
 
 -- ---------------------------------------------------------------------------
 -- Ref badge helpers
@@ -214,16 +216,25 @@ end
 
 --- Show a floating window with the full commit message for hash.
 --- Tracked in M._tooltip_win so rapid invocations never stack.
+--- Uses a monotonic request counter to discard stale callbacks.
 --- @param repo_root string
 --- @param hash      string
 local function show_commit_tooltip(repo_root, hash)
   -- Close any pre-existing tooltip before starting the async fetch
   close_tooltip()
 
+  -- Snapshot the current request ID; if another K press fires before this
+  -- callback completes, M._tooltip_req_id is incremented and we discard.
+  M._tooltip_req_id = M._tooltip_req_id + 1
+  local my_req_id = M._tooltip_req_id
+
   -- Wrap the entire async callback in xpcall so an error inside never leaves
   -- M._tooltip_win pointing at a dead/inconsistent state.
   git.run({ "show", "--no-patch", "--format=%B", hash }, repo_root, function(lines, stderr, code)
-    local ok, err = xpcall(function()
+    local ok = xpcall(function()
+      -- Stale callback: a newer K press has superseded this one
+      if my_req_id ~= M._tooltip_req_id then return end
+
       if code ~= 0 then
         vim.notify("diff.nvim: " .. (stderr or "cannot fetch commit message"), vim.log.levels.WARN)
         return
@@ -257,11 +268,8 @@ local function show_commit_tooltip(repo_root, hash)
       vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
       vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 
-      -- Guard: if a different tooltip was opened while git was running, bail
-      if M._tooltip_buf and vim.api.nvim_buf_is_valid(M._tooltip_buf) then
-        pcall(vim.api.nvim_buf_delete, buf, { force = true })
-        return
-      end
+      -- Guard: request ID already checked at top of xpcall body;
+      -- no need for the old M._tooltip_buf validity check here.
 
       local ok_win, win = pcall(vim.api.nvim_open_win, buf, true, {
         relative  = "editor",
@@ -325,8 +333,6 @@ local function show_commit_tooltip(repo_root, hash)
       close_tooltip()
       vim.notify("diff.nvim: tooltip error: " .. tostring(err_msg), vim.log.levels.ERROR)
     end)
-    -- ok is false if xpcall caught an error; already handled above
-    _ = ok  -- suppress unused warning
   end)
 end
 
@@ -351,8 +357,9 @@ function M.setup(buf, win, repo_root)
   file_cache = {}
   line_map = {}
   _commits = nil
-  -- Close any open tooltip from previous session
+  -- Close any open tooltip from previous session and reset the request counter
   close_tooltip()
+  M._tooltip_req_id = 0
 
   local cfg  = config.get()
   local km   = cfg.keymaps or {}

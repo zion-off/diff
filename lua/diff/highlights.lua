@@ -8,26 +8,38 @@ local M = {}
 
 -- Dark-background palette (vim.o.background == "dark")
 local DARK = {
-  added_bg       = "#0e2716",  -- very dark green  — line background
-  removed_bg     = "#2b1116",  -- very dark red    — line background
-  added_word_bg  = "#1a4728",  -- medium dark green — word highlight
-  removed_word_bg= "#4a1520",  -- medium dark red   — word highlight
-  filler_bg      = "#1e1e2e",
-  filler_fg      = "#3a3a4a",
-  separator_bg   = "#1a1a2a",
-  separator_fg   = "#606070",
+  added_bg        = "#0e2716",  -- very dark green  — line background
+  removed_bg      = "#2b1116",  -- very dark red    — line background
+  added_word_bg   = "#1a4728",  -- medium dark green — word highlight
+  removed_word_bg = "#4a1520",  -- medium dark red   — word highlight
+  filler_bg       = "#1e1e2e",
+  filler_fg       = "#3a3a4a",
+  separator_bg    = "#1a1a2a",
+  separator_fg    = "#606070",
+  gutter_added    = "#3a8c3a",
+  gutter_removed  = "#8c3a3a",
+  gutter_changed  = "#8c7a3a",
+  ref_head        = "#f0d080",
+  note_marker     = "#d0a040",
+  note_virt       = "#808080",
 }
 
 -- Light-background palette (vim.o.background == "light")
 local LIGHT = {
-  added_bg       = "#dff0e8",  -- very pale green  — line background
-  removed_bg     = "#f0dde0",  -- very pale red    — line background
-  added_word_bg  = "#b5ddc7",  -- moderate green   — word highlight
-  removed_word_bg= "#dbb5bc",  -- moderate red     — word highlight
-  filler_bg      = "#f0f0f5",
-  filler_fg      = "#c0c0cc",
-  separator_bg   = "#e8e8f0",
-  separator_fg   = "#909099",
+  added_bg        = "#dff0e8",  -- very pale green  — line background
+  removed_bg      = "#f0dde0",  -- very pale red    — line background
+  added_word_bg   = "#b5ddc7",  -- moderate green   — word highlight
+  removed_word_bg = "#dbb5bc",  -- moderate red     — word highlight
+  filler_bg       = "#f0f0f5",
+  filler_fg       = "#c0c0cc",
+  separator_bg    = "#e8e8f0",
+  separator_fg    = "#909099",
+  gutter_added    = "#2a7a2a",
+  gutter_removed  = "#9a2a2a",
+  gutter_changed  = "#8a6a1a",
+  ref_head        = "#8a6600",
+  note_marker     = "#9a6200",
+  note_virt       = "#606060",
 }
 
 -- Default highlight definitions: group name -> nvim_set_hl opts.
@@ -49,10 +61,10 @@ local function build_defaults()
     DiffNvimAddedWord       = { bg = p.added_word_bg,    fg = "NONE" },
     DiffNvimRemovedWord     = { bg = p.removed_word_bg,  fg = "NONE" },
 
-    -- Gutter indicators
-    DiffNvimGutterAdded     = { fg = "#3a8c3a", bold = true },
-    DiffNvimGutterRemoved   = { fg = "#8c3a3a", bold = true },
-    DiffNvimGutterChanged   = { fg = "#8c7a3a", bold = true },
+    -- Gutter indicators (palette-adaptive for light/dark mode)
+    DiffNvimGutterAdded     = { fg = p.gutter_added,   bold = true },
+    DiffNvimGutterRemoved   = { fg = p.gutter_removed, bold = true },
+    DiffNvimGutterChanged   = { fg = p.gutter_changed, bold = true },
 
     -- File panel status badges
     DiffNvimStatusModified  = { link = "Type" },
@@ -76,7 +88,7 @@ local function build_defaults()
     DiffNvimCommitSubject   = { link = "Normal" },
 
     -- Ref badges
-    DiffNvimRefHead         = { fg = "#f0d080", bold = true },
+    DiffNvimRefHead         = { fg = p.ref_head, bold = true },
     DiffNvimRefBranch       = { link = "String" },
     DiffNvimRefRemote       = { link = "Identifier" },
     DiffNvimRefTag          = { link = "Constant" },
@@ -84,8 +96,8 @@ local function build_defaults()
     -- Notes
     DiffNvimNoteHeader      = { bold = true, link = "WarningMsg" },
     DiffNvimNoteText        = { link = "Comment" },
-    DiffNvimNoteMarker      = { fg = "#d0a040", bold = true },
-    DiffNvimNoteVirtText    = { fg = "#808080", italic = true },
+    DiffNvimNoteMarker      = { fg = p.note_marker, bold = true },
+    DiffNvimNoteVirtText    = { fg = p.note_virt, italic = true },
 
     -- Separators (collapsed hunks)
     DiffNvimSeparator       = { fg = p.separator_fg, bg = p.separator_bg, italic = true },
