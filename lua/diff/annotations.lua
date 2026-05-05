@@ -100,7 +100,9 @@ function M.prompt_note(opts)
 
   -- Confirm with <CR>
   vim.fn.prompt_setcallback(buf, function(text)
-    vim.api.nvim_win_close(win, true)
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
     if text and text ~= "" then
       M.append_note(vim.tbl_extend("force", opts, {
         text      = text,

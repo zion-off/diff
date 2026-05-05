@@ -182,6 +182,7 @@ function M.setup(buf, win, repo_root)
 
   -- <CR>: open diff or toggle section collapse
   vim.keymap.set("n", km.open_diff or "<CR>", function()
+    if not vim.api.nvim_win_is_valid(win) then return end
     local lnr  = vim.api.nvim_win_get_cursor(win)[1]
     local meta = line_map[lnr]
     if not meta then return end
@@ -260,6 +261,7 @@ function M.refresh(buf, win, repo_root)
     if err then
       vim.notify("diff.nvim: status error: " .. err, vim.log.levels.WARN)
     end
+    if not vim.api.nvim_buf_is_valid(buf) then return end
     render(buf, status or { staged = {}, unstaged = {} })
   end)
 end

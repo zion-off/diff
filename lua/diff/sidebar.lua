@@ -145,8 +145,9 @@ function M.open(repo_root)
   })
   vim.api.nvim_win_set_buf(M._main_win, main_buf)
 
-  -- Create sidebar split on the left
-  vim.cmd("topleft " .. width .. "vsplit")
+  -- Create sidebar split (respects sidebar_position config)
+  local position = cfg.sidebar_position == "right" and "botright" or "topleft"
+  vim.cmd(position .. " " .. width .. " vsplit")
   local sidebar_win = vim.api.nvim_get_current_win()
 
   -- Create the file panel buffer and assign it to the sidebar

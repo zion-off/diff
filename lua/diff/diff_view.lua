@@ -79,9 +79,33 @@ local function close_diff_wins()
     M._scroll_aug = nil
   end
 
+  -- Reset scroll guard to prevent permanent lockout
+  M._scroll_guard = false
+
+  -- Determine if we need to restore the main area window
+  local sidebar = require("diff.sidebar")
+  local right_is_main = (M._right_win == sidebar._main_win)
+
   for _, win in ipairs({ M._left_win, M._right_win }) do
     if win and vim.api.nvim_win_is_valid(win) then
-      pcall(vim.api.nvim_win_close, win, true)
+      -- Don't close the right pane if it IS the main area window —
+      -- just clear its buffer so it can be reused for the next diff
+      if win == M._right_win and right_is_main then
+        -- Replace with a placeholder buffer
+        local placeholder = vim.api.nvim_create_buf(false, true)
+        vim.api.nvim_set_option_value("buftype", "nofile", { buf = placeholder })
+        vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = placeholder })
+        vim.api.nvim_buf_set_lines(placeholder, 0, -1, false, {
+          "",
+          "  diff.nvim",
+          "",
+          "  Select a file from the sidebar to view its diff.",
+          "",
+        })
+        pcall(vim.api.nvim_win_set_buf, win, placeholder)
+      else
+        pcall(vim.api.nvim_win_close, win, true)
+      end
     end
   end
 

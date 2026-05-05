@@ -287,6 +287,7 @@ function M.refresh(buf, win, repo_root)
     if err then
       vim.notify("diff.nvim: commits error: " .. err, vim.log.levels.WARN)
     end
+    if not vim.api.nvim_buf_is_valid(buf) then return end
     _commits = commits or {}
     render(buf, _commits)
   end)
