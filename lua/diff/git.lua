@@ -297,6 +297,57 @@ function M.get_commit_diff(root, hash, file_path, callback)
 end
 
 -- ---------------------------------------------------------------------------
+-- Commit file list
+-- ---------------------------------------------------------------------------
+
+--- Get the list of files changed in a commit.
+--- @param root     string
+--- @param hash     string
+--- @param callback fun(files: table[]|nil, err: string|nil)
+---   Each file entry: { path = string, old_path = string|nil, status = string, status_char = string }
+function M.get_commit_files(root, hash, callback)
+  M.run(
+    { "diff-tree", "--no-commit-id", "-r", "--name-status", hash },
+    root,
+    function(lines, stderr, code)
+      if code ~= 0 then
+        callback(nil, stderr)
+        return
+      end
+
+      local files = {}
+      for _, line in ipairs(lines) do
+        if line == "" then goto next end
+        -- Format: "M\tpath" or "R100\told\tnew"
+        local status_char, rest = line:match("^(%a%d*)%s+(.+)$")
+        if status_char and rest then
+          local s = status_char:sub(1, 1)
+          local path = rest
+          local old_path = nil
+          -- Handle renames/copies (R100, C100)
+          if s == "R" or s == "C" then
+            local tab = rest:find("\t", 1, true)
+            if tab then
+              old_path = rest:sub(1, tab - 1)
+              path = rest:sub(tab + 1)
+            end
+          end
+          table.insert(files, {
+            path        = path,
+            old_path    = old_path,
+            status      = parse_status_char(s),
+            status_char = s,
+          })
+        end
+        ::next::
+      end
+
+      callback(files, nil)
+    end
+  )
+end
+
+-- ---------------------------------------------------------------------------
 -- Staging
 -- ---------------------------------------------------------------------------
 
