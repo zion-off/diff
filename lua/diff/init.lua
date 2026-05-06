@@ -25,31 +25,14 @@ function M.setup(opts)
 
   local function nmap(key, fn, desc)
     if key and key ~= "" then
-      vim.keymap.set("n", key, fn, { silent = true, desc = "diff.nvim: " .. desc })
+      vim.keymap.set("n", key, fn, { silent = true, desc = desc .. " (diff)" })
     end
   end
 
-  -- Toggle interface
+  -- Toggle interface (global — needed to open the plugin)
   nmap(km.toggle_sidebar or "<leader>gs", function()
     M.toggle()
-  end, "toggle interface")
-
-  -- Toggle sidebar panels only (show/hide file+commit panels)
-  nmap(km.toggle_sidebar_panel or "<leader>gS", function()
-    sidebar.toggle_sidebar_panel()
-  end, "toggle sidebar panels")
-
-  -- Copy notes file path to clipboard
-  nmap(km.copy_notes_path or "<leader>gy", function()
-    require("diff.annotations").copy_notes_path()
-  end, "copy notes path to clipboard")
-
-  -- Toggle notes panel
-  nmap(km.toggle_notes or "<leader>N", function()
-    M._with_root(function(root)
-      require("diff.annotations").toggle_notes(root)
-    end)
-  end, "toggle notes panel")
+  end, "Toggle interface")
 
   -- Auto-refresh sidebar on focus / save (and start fs watcher)
   sidebar.setup_auto_refresh()

@@ -307,7 +307,7 @@ local function show_commit_tooltip(repo_root, hash)
       -- Block horizontal movement/scroll
       local nop_keys = { "<ScrollWheelRight>", "<ScrollWheelLeft>", "<Left>", "<Right>", "zh", "zl" }
       for _, key in ipairs(nop_keys) do
-        vim.keymap.set("n", key, "<Nop>", { buffer = buf, silent = true, desc = "diff.nvim: (disabled)" })
+        vim.keymap.set("n", key, "<Nop>", { buffer = buf, silent = true, desc = "(disabled) (diff)" })
       end
 
       -- Close on q/Esc: always clears module state
@@ -316,7 +316,7 @@ local function show_commit_tooltip(repo_root, hash)
       end
       for _, key in ipairs({ "q", "<Esc>" }) do
         vim.keymap.set("n", key, do_close,
-          { buffer = buf, nowait = true, silent = true, desc = "diff.nvim: close tooltip" })
+          { buffer = buf, nowait = true, silent = true, desc = "Close tooltip (diff)" })
       end
 
       -- BufLeave: auto-close so tooltip dismisses when focus moves away.
@@ -409,7 +409,7 @@ function M.setup(buf, win, repo_root)
         vim.notify("diff.nvim: error opening commit diff: " .. tostring(dv_err), vim.log.levels.ERROR)
       end
     end
-  end, vim.tbl_extend("force", opts, { desc = "diff.nvim: expand commit / open file diff" }))
+  end, vim.tbl_extend("force", opts, { desc = "Expand commit / open file diff (diff)" }))
 
   -- K: show full commit message tooltip
   vim.keymap.set("n", km.commit_tooltip or "K", function()
@@ -422,12 +422,12 @@ function M.setup(buf, win, repo_root)
     if commit then
       show_commit_tooltip(repo_root, commit.hash)
     end
-  end, vim.tbl_extend("force", opts, { desc = "diff.nvim: show full commit message" }))
+  end, vim.tbl_extend("force", opts, { desc = "Show full commit message (diff)" }))
 
   -- 'q': close the entire diff.nvim interface
   vim.keymap.set("n", "q", function()
     require("diff.sidebar").close()
-  end, vim.tbl_extend("force", opts, { desc = "diff.nvim: close interface" }))
+  end, vim.tbl_extend("force", opts, { desc = "Close (diff)" }))
 end
 
 --- Fetch recent commits and re-render the panel.
