@@ -193,6 +193,16 @@ local function load_notes_lines()
   return lines
 end
 
+--- Close the notes panel and clear sidebar state.
+--- @param sidebar table
+local function close_notes_panel(sidebar)
+  if sidebar._notes_win and vim.api.nvim_win_is_valid(sidebar._notes_win) then
+    pcall(vim.api.nvim_win_close, sidebar._notes_win, true)
+  end
+  sidebar._notes_win = nil
+  sidebar._notes_buf = nil
+end
+
 --- (Re-)render the notes buffer from the session file.
 --- @param buf integer
 function M._render_notes_buf(buf)
@@ -211,9 +221,7 @@ function M.toggle_notes(repo_root)
 
   -- Close if already open
   if sidebar._notes_win and vim.api.nvim_win_is_valid(sidebar._notes_win) then
-    pcall(vim.api.nvim_win_close, sidebar._notes_win, true)
-    sidebar._notes_win = nil
-    sidebar._notes_buf = nil
+    close_notes_panel(sidebar)
     return
   end
 
@@ -276,11 +284,7 @@ function M.toggle_notes(repo_root)
 
   -- Keymaps: close
   vim.keymap.set("n", "q", function()
-    if sidebar._notes_win and vim.api.nvim_win_is_valid(sidebar._notes_win) then
-      pcall(vim.api.nvim_win_close, sidebar._notes_win, true)
-      sidebar._notes_win = nil
-      sidebar._notes_buf = nil
-    end
+    close_notes_panel(sidebar)
   end, { buffer = buf, nowait = true, desc = "Close notes panel (diff)" })
 
   -- Keymap: delete note under cursor
