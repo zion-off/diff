@@ -162,7 +162,7 @@ end
 
 --- Get the diff for a tracked file.
 function M.get_diff(root, path, staged, callback)
-  local args = { "diff", "--no-ext-diff" }
+  local args = { "diff", "--no-ext-diff", "--diff-algorithm=histogram" }
   if staged then
     table.insert(args, "--cached")
   end
@@ -180,7 +180,7 @@ end
 --- Get a diff for an untracked file.
 function M.get_untracked_diff(root, path, callback)
   M.run(
-    { "diff", "--no-ext-diff", "--no-index", "--", "/dev/null", path },
+    { "diff", "--no-ext-diff", "--diff-algorithm=histogram", "--no-index", "--", "/dev/null", path },
     root,
     function(lines, stderr, code)
       if code ~= 0 and code ~= 1 then
@@ -278,7 +278,7 @@ end
 
 --- Get the diff introduced by a commit.
 function M.get_commit_diff(root, hash, file_path, callback)
-  local args = { "diff", "--no-ext-diff", hash .. "^.." .. hash }
+  local args = { "diff", "--no-ext-diff", "--diff-algorithm=histogram", hash .. "^.." .. hash }
   if file_path then
     vim.list_extend(args, { "--", file_path })
   end
