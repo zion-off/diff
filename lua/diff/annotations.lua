@@ -248,7 +248,7 @@ function M.toggle_notes(repo_root)
   end
 
   -- Open the split from that window
-  vim.api.nvim_set_current_win(target_win)
+  pcall(vim.api.nvim_set_current_win, target_win)
   vim.cmd("rightbelow " .. width .. " vsplit")
   local win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, buf)
@@ -377,12 +377,16 @@ function M._delete_note_at_cursor(buf, path, repo_root)
     f2:write(table.concat(new_lines, "\n") .. "\n")
     f2:close()
     vim.notify("diff.nvim: note deleted", vim.log.levels.INFO)
+    -- Re-apply highlights on successfully updated buffer
+    M._apply_notes_highlights(buf, new_lines)
   else
+    -- Write failed — revert the buffer to its original content
     vim.notify("diff.nvim: failed to persist deletion: " .. tostring(f2_err), vim.log.levels.ERROR)
+    vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+    M._apply_notes_highlights(buf, lines)
   end
-
-  -- Re-apply highlights
-  M._apply_notes_highlights(buf, new_lines)
 end
 
 return M

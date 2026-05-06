@@ -20,6 +20,7 @@ M._sidebar_hidden = false -- true when sidebar panels are temporarily hidden
 M._notes_win     = nil   -- notes right-side split window
 M._notes_buf     = nil   -- notes buffer
 M._fs_watcher    = nil   -- libuv fs_event handle for .git/index watch
+M._debounce_timer = nil  -- pending debounce timer for fs_event (module-level for cleanup)
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -202,6 +203,12 @@ function M.close()
   if M._fs_watcher then
     pcall(function() M._fs_watcher:stop() end)
     M._fs_watcher = nil
+  end
+
+  -- Cancel any pending debounce timer
+  if M._debounce_timer then
+    pcall(function() M._debounce_timer:stop() M._debounce_timer:close() end)
+    M._debounce_timer = nil
   end
 
   -- Close the notes panel split if open
@@ -430,25 +437,31 @@ function M._start_fs_watcher()
     M._fs_watcher = nil
   end
 
+  -- Cancel any pending debounce timer from the old watcher
+  if M._debounce_timer then
+    pcall(function() M._debounce_timer:stop() M._debounce_timer:close() end)
+    M._debounce_timer = nil
+  end
+
   local root = M._repo_root
   if not root then return end
 
   local index_path = root .. "/.git/index"
 
-  local ok, fs_event = pcall(vim.loop.new_fs_event)
+  -- Prefer vim.uv (Neovim 0.10+) over deprecated vim.loop
+  local uv = vim.uv or vim.loop
+  local ok, fs_event = pcall(uv.new_fs_event)
   if not ok or not fs_event then return end
-
-  local debounce_timer = nil
 
   local started = fs_event:start(index_path, {}, vim.schedule_wrap(function(err, _, _)
     if err then return end
     -- Debounce: cancel any pending timer and restart it
-    if debounce_timer then
-      pcall(function() debounce_timer:stop() debounce_timer:close() end)
-      debounce_timer = nil
+    if M._debounce_timer then
+      pcall(function() M._debounce_timer:stop() M._debounce_timer:close() end)
+      M._debounce_timer = nil
     end
-    debounce_timer = vim.defer_fn(function()
-      debounce_timer = nil
+    M._debounce_timer = vim.defer_fn(function()
+      M._debounce_timer = nil
       if M.is_open() then
         M.refresh()
       end
