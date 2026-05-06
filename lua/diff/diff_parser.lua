@@ -117,7 +117,7 @@ local function similarity(a, b)
   -- Exact-match fast path: also handles strings that are too short to produce
   -- bigrams (length 1) where the bigram loop would produce an empty table.
   if a == b then return 1.0 end
-  if #a == 0 or  #b == 0 then return 0.0 end
+  if #a == 0 or #b == 0 then return 0.0 end
 
   local function bigrams(s)
     local t = {}
@@ -192,8 +192,11 @@ local function find_matches(removed, added)
   while i > 0 and j > 0 do
     local s = sim[i][j]
     -- Check whether the DP arrived here via the (i,j) pair transition.
-    -- Use 1e-6 epsilon (not 1e-9) so accumulated float sums near 100.0 don't
-    -- cause false negatives in the comparison.
+    -- Use 1e-6 epsilon (not 1e-9): each similarity score is in [0.0, 1.0],
+    -- so accumulated sums can reach up to MATCH_MAX_DIM (100.0) when many
+    -- lines match.  At magnitude 100, machine epsilon is ~1e-14, so 1e-6
+    -- provides ample headroom while remaining far tighter than any meaningful
+    -- score difference.
     local took_pair = s >= MATCH_THRESHOLD
       and math.abs(dp[i][j] - (dp[i-1][j-1] + s)) < 1e-6
     if took_pair then
@@ -250,11 +253,13 @@ local function emit_change_group(removed, added, left, right)
     local seg_a   = aj - a_ptr           -- count of unmatched added in gap
     local seg_len = math.max(seg_r, seg_a)
     for k = 1, seg_len do
-      local l = (k <= seg_r)
-        and make_entry(removed[r_ptr + k - 1].content, removed[r_ptr + k - 1].old_line, "removed")
+      local rem_k = k <= seg_r and removed[r_ptr + k - 1]
+      local add_k = k <= seg_a and added[a_ptr + k - 1]
+      local l = rem_k
+        and make_entry(rem_k.content, rem_k.old_line, "removed")
         or filler()
-      local r = (k <= seg_a)
-        and make_entry(added[a_ptr + k - 1].content, added[a_ptr + k - 1].new_line, "added")
+      local r = add_k
+        and make_entry(add_k.content, add_k.new_line, "added")
         or filler()
       table.insert(left,  l)
       table.insert(right, r)
@@ -273,11 +278,13 @@ local function emit_change_group(removed, added, left, right)
   local tail_a   = math.max(0, na - a_ptr + 1)
   local tail_len = math.max(tail_r, tail_a)
   for k = 1, tail_len do
-    local l = (k <= tail_r)
-      and make_entry(removed[r_ptr + k - 1].content, removed[r_ptr + k - 1].old_line, "removed")
+    local rem_k = k <= tail_r and removed[r_ptr + k - 1]
+    local add_k = k <= tail_a and added[a_ptr + k - 1]
+    local l = rem_k
+      and make_entry(rem_k.content, rem_k.old_line, "removed")
       or filler()
-    local r = (k <= tail_a)
-      and make_entry(added[a_ptr + k - 1].content, added[a_ptr + k - 1].new_line, "added")
+    local r = add_k
+      and make_entry(add_k.content, add_k.new_line, "added")
       or filler()
     table.insert(left,  l)
     table.insert(right, r)
