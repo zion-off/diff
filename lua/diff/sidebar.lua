@@ -315,7 +315,8 @@ function M.toggle_sidebar_panel()
     end
 
     if not target_win then return end
-    vim.api.nvim_set_current_win(target_win)
+    local ok_sw = pcall(vim.api.nvim_set_current_win, target_win)
+    if not ok_sw then return end
     vim.cmd(position .. " " .. width .. " vsplit")
     local sidebar_win = vim.api.nvim_get_current_win()
 

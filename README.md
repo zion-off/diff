@@ -61,8 +61,8 @@ Call `require("diff").setup(opts)` once from your config. All fields are optiona
 
 ```lua
 require("diff").setup({
-  -- Sidebar position: "right" (default) or "left"
-  sidebar_position = "right",
+  -- Sidebar position: "left" (default) or "right"
+  sidebar_position = "left",
 
   -- Sidebar width in columns (default: 40)
   sidebar_width = 40,
@@ -123,6 +123,7 @@ require("diff").setup({
 | Key | Action |
 |---|---|
 | `<CR>` | Open diff for commit |
+| `K` | Show full commit message tooltip |
 
 ### Diff View
 
@@ -130,6 +131,8 @@ require("diff").setup({
 |---|---|
 | `]c` | Next change chunk |
 | `[c` | Previous change chunk |
+| `zo` | Expand context (+10 lines) |
+| `zR` | Show all context |
 | `<leader>n` | Leave a note on current / visual selection |
 | `<leader>N` | Toggle notes panel |
 | `q` | Close diff view |
