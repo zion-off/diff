@@ -15,7 +15,7 @@ M._session_path    = nil
 M._session_file_created = false
 
 -- Timestamp captured once at module-load time; used to name the session file.
-local _session_ts = os.date("%Y%m%dT%H%M%S")
+local _session_timestamp = os.date("%Y%m%dT%H%M%S")
 
 -- ---------------------------------------------------------------------------
 -- Session file path helpers
@@ -39,7 +39,7 @@ function M.get_notes_path(repo_root)
   vim.fn.mkdir(dir, "p")
 
   local repo_name = repo_root:match("[^/]+$") or "repo"
-  M._session_path = dir .. "/" .. repo_name .. "_" .. _session_ts .. ".md"
+  M._session_path = dir .. "/" .. repo_name .. "_" .. _session_timestamp .. ".md"
   return M._session_path
 end
 
