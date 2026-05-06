@@ -293,7 +293,7 @@ function M.toggle_notes(repo_root)
 
   -- Return focus to the file panel if it's open
   if sidebar._file_win and vim.api.nvim_win_is_valid(sidebar._file_win) then
-    vim.api.nvim_set_current_win(sidebar._file_win)
+    pcall(vim.api.nvim_set_current_win, sidebar._file_win)
   end
 end
 
