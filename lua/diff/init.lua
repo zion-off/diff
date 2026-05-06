@@ -34,10 +34,15 @@ function M.setup(opts)
     M.toggle()
   end, "toggle interface")
 
-  -- Refresh panels
-  nmap(km.refresh or "<leader>gr", function()
-    M.refresh()
-  end, "refresh panels")
+  -- Toggle sidebar panels only (show/hide file+commit panels)
+  nmap(km.toggle_sidebar_panel or "<leader>gS", function()
+    sidebar.toggle_sidebar_panel()
+  end, "toggle sidebar panels")
+
+  -- Copy notes file path to clipboard
+  nmap(km.copy_notes_path or "<leader>gy", function()
+    require("diff.annotations").copy_notes_path()
+  end, "copy notes path to clipboard")
 
   -- Toggle notes panel
   nmap(km.toggle_notes or "<leader>N", function()
@@ -46,7 +51,7 @@ function M.setup(opts)
     end)
   end, "toggle notes panel")
 
-  -- Auto-refresh sidebar on focus / save
+  -- Auto-refresh sidebar on focus / save (and start fs watcher)
   sidebar.setup_auto_refresh()
 end
 

@@ -5,18 +5,30 @@ local config = require("diff.config")
 -- Namespace for highlights in the notes panel
 local NS = vim.api.nvim_create_namespace("diff_nvim_notes")
 
--- Track the open notes window
-M._win = nil
-M._buf = nil
+-- ---------------------------------------------------------------------------
+-- Session-scoped file state
+-- ---------------------------------------------------------------------------
 
---- Get the path to the notes Markdown file for a given repo root.
---- Uses config.notes_path if set, otherwise XDG_DATA_HOME/diff.nvim/<slug>.md
+-- Computed once at first append_note call and cached for the session.
+-- Nil until the first note is written this session.
+M._session_path    = nil
+M._session_file_created = false
+
+-- Timestamp captured once at module-load time; used to name the session file.
+local _session_ts = os.date("%Y%m%dT%H%M%S")
+
+-- ---------------------------------------------------------------------------
+-- Session file path helpers
+-- ---------------------------------------------------------------------------
+
+--- Compute the session file path for a given repo root.
+--- Format: ~/.local/share/diff.nvim/<repo-name>_<timestamp>.md
+--- The path is cached in M._session_path after the first call.
 --- @param repo_root string
 --- @return string
 function M.get_notes_path(repo_root)
-  local cfg = config.get()
-  if cfg.notes_path and cfg.notes_path ~= "" then
-    return cfg.notes_path
+  if M._session_path then
+    return M._session_path
   end
 
   local xdg = os.getenv("XDG_DATA_HOME")
@@ -26,21 +38,17 @@ function M.get_notes_path(repo_root)
   local dir = xdg .. "/diff.nvim"
   vim.fn.mkdir(dir, "p")
 
-  -- Slug: repo name + a short hash of the full path to prevent collisions
-  -- between different repos that share the same directory name.
   local repo_name = repo_root:match("[^/]+$") or "repo"
-  -- Simple djb2-style hash for collision resistance (does not need to be
-  -- cryptographic — just distinguishes paths like /foo/bar from /baz/bar).
-  local hash_val = 5381
-  for i = 1, #repo_root do
-    hash_val = (hash_val * 33 + string.byte(repo_root, i)) % 0xFFFFFFFF
-  end
-  local path_hash = string.format("%08x", hash_val)
-
-  return dir .. "/" .. repo_name .. "_" .. path_hash .. ".md"
+  M._session_path = dir .. "/" .. repo_name .. "_" .. _session_ts .. ".md"
+  return M._session_path
 end
 
---- Append a note entry to the notes file.
+-- ---------------------------------------------------------------------------
+-- Append note — lazy file creation
+-- ---------------------------------------------------------------------------
+
+--- Append a note entry to the session notes file.
+--- The file is created on the very first write (lazy init).
 --- @param note table {file_path, line_start, line_end, side, text, repo_root, timestamp}
 function M.append_note(note)
   local path = M.get_notes_path(note.repo_root)
@@ -75,6 +83,9 @@ function M.append_note(note)
   f:write(entry)
   f:close()
 
+  -- Mark file as created for this session
+  M._session_file_created = true
+
   vim.notify("diff.nvim: note saved → " .. path, vim.log.levels.INFO)
 
   -- Refresh note markers in the current diff view
@@ -82,48 +93,69 @@ function M.append_note(note)
   if dv._current_repo and dv._current_file then
     dv.rerender()
   end
+
+  -- Live-update the notes panel split if it is open
+  local sidebar = require("diff.sidebar")
+  if sidebar._notes_win and vim.api.nvim_win_is_valid(sidebar._notes_win) then
+    M._render_notes_buf(sidebar._notes_buf)
+  end
 end
 
---- Open a small floating input prompt and call back with the entered text.
+-- ---------------------------------------------------------------------------
+-- Copy notes path to clipboard
+-- ---------------------------------------------------------------------------
+
+--- Copy the current session notes file path to the system clipboard.
+--- Shows a warning if no note has been written yet this session.
+function M.copy_notes_path()
+  if not M._session_file_created then
+    vim.notify("diff.nvim: no notes yet this session", vim.log.levels.WARN)
+    return
+  end
+  local path = M._session_path
+  vim.fn.setreg("+", path)
+  vim.notify("diff.nvim: path copied to clipboard", vim.log.levels.INFO)
+end
+
+-- ---------------------------------------------------------------------------
+-- Note input prompt
+-- ---------------------------------------------------------------------------
+
+--- Open an input prompt and call back with the entered text.
+--- Tries nui.nvim first; falls back to vim.ui.input (styled by noice/dressing
+--- if the user has those plugins).
 --- @param opts table  {file_path, line_start, line_end, side, repo_root}
 function M.prompt_note(opts)
-  -- Create a scratch buffer for the prompt
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
-  vim.api.nvim_set_option_value("buftype", "prompt", { buf = buf })
-  vim.fn.prompt_setprompt(buf, "Note: ")
-
-  local width  = math.max(1, math.min(70, vim.o.columns - 4))
-  local row    = math.max(0, math.floor((vim.o.lines - 3) / 2))
-  local col    = math.max(0, math.floor((vim.o.columns - width) / 2))
-
-  local ok_win, win = pcall(vim.api.nvim_open_win, buf, true, {
-    relative   = "editor",
-    width      = width,
-    height     = 1,
-    row        = row,
-    col        = col,
-    style      = "minimal",
-    border     = "rounded",
-    title      = " Leave Note ",
-    title_pos  = "center",
-  })
-  if not ok_win then
-    vim.notify("diff.nvim: could not open note prompt window", vim.log.levels.WARN)
-    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+  -- Try nui.nvim
+  local nui_ok, NuiInput = pcall(require, "nui.input")
+  if nui_ok and NuiInput then
+    local width = 60
+    local input = NuiInput({
+      position = "50%",
+      size     = { width = width },
+      border   = {
+        style = "rounded",
+        text  = { top = " Leave a note ", top_align = "center" },
+      },
+      win_options = { winhighlight = "Normal:Normal" },
+    }, {
+      prompt   = "> ",
+      on_submit = function(text)
+        if text and text ~= "" then
+          M.append_note(vim.tbl_extend("force", opts, {
+            text      = text,
+            timestamp = os.date("%Y-%m-%d %H:%M:%S"),
+          }))
+        end
+      end,
+    })
+    input:mount()
+    input:map("i", "<Esc>", function() input:unmount() end, { noremap = true })
     return
   end
 
-  vim.api.nvim_set_option_value("sidescroll",    0, { win = win })
-  vim.api.nvim_set_option_value("sidescrolloff", 0, { win = win })
-
-  vim.cmd("startinsert")
-
-  -- Confirm with <CR>
-  vim.fn.prompt_setcallback(buf, function(text)
-    if vim.api.nvim_win_is_valid(win) then
-      vim.api.nvim_win_close(win, true)
-    end
+  -- Fallback: vim.ui.input (styled by noice.nvim / dressing.nvim if present)
+  vim.ui.input({ prompt = "Leave a note: " }, function(text)
     if text and text ~= "" then
       M.append_note(vim.tbl_extend("force", opts, {
         text      = text,
@@ -131,98 +163,143 @@ function M.prompt_note(opts)
       }))
     end
   end)
-
-  -- Cancel with <Esc>
-  vim.keymap.set({ "n", "i" }, "<Esc>", function()
-    if vim.api.nvim_win_is_valid(win) then
-      vim.api.nvim_win_close(win, true)
-    end
-  end, { buffer = buf, nowait = true, desc = "diff.nvim: cancel note" })
 end
 
---- Toggle the notes panel (floating window with all saved notes).
---- @param repo_root string
-function M.toggle_notes(repo_root)
-  -- Close if already open
-  if M._win and vim.api.nvim_win_is_valid(M._win) then
-    vim.api.nvim_win_close(M._win, true)
-    M._win = nil
-    M._buf = nil
-    return
-  end
+-- ---------------------------------------------------------------------------
+-- Notes panel — right-side split
+-- ---------------------------------------------------------------------------
 
-  local path  = M.get_notes_path(repo_root)
+--- Load lines from the session file (or return placeholder).
+--- @return string[]
+local function load_notes_lines()
+  local path = M._session_path
   local lines = {}
 
-  local f = io.open(path, "r")
-  if f then
-    for line in f:lines() do
-      table.insert(lines, line)
+  if path then
+    local f = io.open(path, "r")
+    if f then
+      for line in f:lines() do
+        table.insert(lines, line)
+      end
+      f:close()
     end
-    f:close()
   end
 
   if #lines == 0 then
     lines = { "# diff.nvim Notes", "", "No notes yet." }
   end
+  return lines
+end
 
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
-  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
-  vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
+--- (Re-)render the notes buffer from the session file.
+--- @param buf integer
+function M._render_notes_buf(buf)
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
+  local lines = load_notes_lines()
+  vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+  M._apply_notes_highlights(buf, lines)
+end
 
-  local width  = math.max(1, math.min(80, vim.o.columns - 4))
-  local height = math.max(1, math.min(40, vim.o.lines - 4))
-  local row    = math.max(0, math.floor((vim.o.lines   - height) / 2))
-  local col    = math.max(0, math.floor((vim.o.columns - width)  / 2))
+--- Toggle the notes panel (right-side vertical split).
+--- @param repo_root string
+function M.toggle_notes(repo_root)
+  local sidebar = require("diff.sidebar")
 
-  local ok_win, win = pcall(vim.api.nvim_open_win, buf, true, {
-    relative  = "editor",
-    width     = width,
-    height    = height,
-    row       = row,
-    col       = col,
-    style     = "minimal",
-    border    = "rounded",
-    title     = " diff.nvim Notes  [dd=delete  q=close] ",
-    title_pos = "center",
-  })
-  if not ok_win then
-    vim.notify("diff.nvim: could not open notes panel", vim.log.levels.WARN)
-    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+  -- Close if already open
+  if sidebar._notes_win and vim.api.nvim_win_is_valid(sidebar._notes_win) then
+    pcall(vim.api.nvim_win_close, sidebar._notes_win, true)
+    sidebar._notes_win = nil
+    sidebar._notes_buf = nil
     return
   end
 
-  vim.api.nvim_set_option_value("wrap",          true,  { win = win })
-  vim.api.nvim_set_option_value("linebreak",     true,  { win = win })
-  vim.api.nvim_set_option_value("sidescroll",    0,     { win = win })
-  vim.api.nvim_set_option_value("sidescrolloff", 0,     { win = win })
-  vim.api.nvim_set_option_value("number",        false, { win = win })
+  -- Ensure we have a session path (may still be nil if no note written yet)
+  -- get_notes_path will compute and cache it.
+  M.get_notes_path(repo_root)
 
-  M._win = win
-  M._buf = buf
+  local cfg   = config.get()
+  local width = cfg.notes_width or 40
 
-  -- Apply highlights
-  M._apply_notes_highlights(buf, lines)
+  -- Create a scratch buffer
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_set_option_value("buftype",    "nofile",   { buf = buf })
+  vim.api.nvim_set_option_value("bufhidden",  "wipe",     { buf = buf })
+  vim.api.nvim_set_option_value("filetype",   "markdown", { buf = buf })
+  vim.api.nvim_set_option_value("modifiable", false,      { buf = buf })
+
+  -- Open a rightbelow vsplit from the rightmost diff pane.
+  -- Find the rightmost valid window (by x-position / column).
+  local target_win = nil
+  local best_col   = -1
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(win) then
+      local pos = vim.api.nvim_win_get_position(win)
+      if pos[2] > best_col then
+        best_col   = pos[2]
+        target_win = win
+      end
+    end
+  end
+
+  if not target_win then
+    target_win = vim.api.nvim_get_current_win()
+  end
+
+  -- Open the split from that window
+  vim.api.nvim_set_current_win(target_win)
+  vim.cmd("rightbelow " .. width .. " vsplit")
+  local win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(win, buf)
+
+  -- Window options
+  local wopts = {
+    winfixwidth = true,
+    wrap        = true,
+    linebreak   = true,
+    number      = false,
+    signcolumn  = "no",
+    cursorline  = true,
+  }
+  for k, v in pairs(wopts) do
+    pcall(vim.api.nvim_set_option_value, k, v, { win = win })
+  end
+
+  sidebar._notes_win = win
+  sidebar._notes_buf = buf
+
+  -- Render content
+  M._render_notes_buf(buf)
 
   -- Keymaps: close
-  for _, k in ipairs({ "q", "<Esc>" }) do
-    vim.keymap.set("n", k, function()
-      if M._win and vim.api.nvim_win_is_valid(M._win) then
-        vim.api.nvim_win_close(M._win, true)
-        M._win = nil
-        M._buf = nil
-      end
-    end, { buffer = buf, nowait = true, desc = "diff.nvim: close notes panel" })
-  end
+  vim.keymap.set("n", "q", function()
+    if sidebar._notes_win and vim.api.nvim_win_is_valid(sidebar._notes_win) then
+      pcall(vim.api.nvim_win_close, sidebar._notes_win, true)
+      sidebar._notes_win = nil
+      sidebar._notes_buf = nil
+    end
+  end, { buffer = buf, nowait = true, desc = "diff.nvim: close notes panel" })
 
   -- Keymap: delete note under cursor
   vim.keymap.set("n", "dd", function()
+    local path = M._session_path
+    if not path then
+      vim.notify("diff.nvim: no notes file this session", vim.log.levels.WARN)
+      return
+    end
     M._delete_note_at_cursor(buf, path, repo_root)
   end, { buffer = buf, nowait = true, desc = "diff.nvim: delete note" })
+
+  -- Return focus to the file panel if it's open
+  if sidebar._file_win and vim.api.nvim_win_is_valid(sidebar._file_win) then
+    vim.api.nvim_set_current_win(sidebar._file_win)
+  end
 end
+
+-- ---------------------------------------------------------------------------
+-- Highlight helpers
+-- ---------------------------------------------------------------------------
 
 --- Apply syntax-style highlights to the notes buffer lines.
 function M._apply_notes_highlights(buf, lines)
@@ -238,6 +315,10 @@ function M._apply_notes_highlights(buf, lines)
     end
   end
 end
+
+-- ---------------------------------------------------------------------------
+-- Delete note
+-- ---------------------------------------------------------------------------
 
 --- Delete the note block that the cursor is currently in.
 function M._delete_note_at_cursor(buf, path, repo_root)
