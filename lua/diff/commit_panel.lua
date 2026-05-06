@@ -424,11 +424,6 @@ function M.setup(buf, win, repo_root)
     end
   end, vim.tbl_extend("force", opts, { desc = "diff.nvim: show full commit message" }))
 
-  -- '<leader>gr': refresh
-  vim.keymap.set("n", km.refresh or "<leader>gr", function()
-    M.refresh(buf, win, repo_root)
-  end, vim.tbl_extend("force", opts, { desc = "diff.nvim: refresh commits" }))
-
   -- 'q': close the entire diff.nvim interface
   vim.keymap.set("n", "q", function()
     require("diff.sidebar").close()

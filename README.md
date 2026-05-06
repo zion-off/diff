@@ -67,25 +67,26 @@ require("diff").setup({
   -- Sidebar width in columns (default: 40)
   sidebar_width = 40,
 
-  -- Override the notes file path. nil = XDG default:
-  --   $XDG_DATA_HOME/diff.nvim/<repo>.md  (or ~/.local/share/diff.nvim/...)
-  notes_path = nil,
+  -- Notes panel width in columns (default: 40)
+  notes_width = 40,
 
   -- Auto-refresh panels on FocusGained / BufWritePost (default: true)
+  -- Also watches .git/index via libuv fs_event for immediate refresh.
   auto_refresh = true,
 
   -- Keybinding overrides (set any to false/"" to disable)
   keymaps = {
-    toggle_sidebar = "<leader>gs",
-    refresh        = "<leader>gr",
-    open_diff      = "<CR>",
-    stage_file     = "s",
-    unstage_file   = "u",
-    collapse       = "z",
-    next_hunk      = "]c",
-    prev_hunk      = "[c",
-    leave_note     = "<leader>n",
-    toggle_notes   = "<leader>N",
+    toggle_sidebar       = "<leader>gs",
+    toggle_sidebar_panel = "<leader>gS",
+    copy_notes_path      = "<leader>gy",
+    open_diff            = "<CR>",
+    stage_file           = "s",
+    unstage_file         = "u",
+    collapse             = "z",
+    next_hunk            = "]c",
+    prev_hunk            = "[c",
+    leave_note           = "<leader>n",
+    toggle_notes         = "<leader>N",
   },
 
   -- Highlight colour overrides — any valid :hi attribute table
@@ -103,8 +104,9 @@ require("diff").setup({
 
 | Key | Action |
 |---|---|
-| `<leader>gs` | Toggle sidebar |
-| `<leader>gr` | Refresh file & commit panels |
+| `<leader>gs` | Toggle sidebar (full interface) |
+| `<leader>gS` | Toggle sidebar panels only (show/hide file + commit panels) |
+| `<leader>gy` | Copy session notes file path to clipboard |
 | `<leader>N` | Toggle notes panel |
 
 ### File Status Panel
@@ -115,14 +117,12 @@ require("diff").setup({
 | `s` | Stage file |
 | `u` | Unstage file |
 | `z` | Toggle section collapse |
-| `<leader>gr` | Refresh |
 
 ### Commit Graph Panel
 
 | Key | Action |
 |---|---|
 | `<CR>` | Open diff for commit |
-| `<leader>gr` | Refresh |
 
 ### Diff View
 
@@ -139,7 +139,7 @@ require("diff").setup({
 | Key | Action |
 |---|---|
 | `dd` | Delete note under cursor |
-| `q` / `<Esc>` | Close panel |
+| `q` | Close panel |
 
 ---
 
@@ -157,13 +157,19 @@ require("diff").setup({
 
 ## Notes Storage Format
 
-Notes are stored in a per-repository Markdown file at:
+Notes are stored in a per-session Markdown file at:
 
 ```
-$XDG_DATA_HOME/diff.nvim/<repo-name>_<path-slug>.md
+$XDG_DATA_HOME/diff.nvim/<repo-name>_<timestamp>.md
 ```
 
 (Falls back to `~/.local/share/diff.nvim/` when `XDG_DATA_HOME` is unset.)
+
+The timestamp (`YYYYMMDDTHHmmss`) is captured once when the plugin first writes
+a note in the session. The file is created **lazily** — only when the first note
+is actually written. Each Neovim session produces its own file.
+
+Example filename: `diff_20260507T142301.md`
 
 Each note looks like:
 
@@ -178,7 +184,8 @@ Each note looks like:
 ---
 ```
 
-The file is append-only by default. Copy-paste the whole file directly into a coding-agent prompt.
+Copy the session file path to the clipboard with `<leader>gy`, then paste it
+directly into a coding-agent prompt.
 
 ---
 

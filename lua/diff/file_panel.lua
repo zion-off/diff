@@ -240,11 +240,6 @@ function M.setup(buf, win, repo_root)
     end
   end, vim.tbl_extend("force", opts, { desc = "diff.nvim: toggle section collapse" }))
 
-  -- '<leader>gr': refresh
-  vim.keymap.set("n", km.refresh or "<leader>gr", function()
-    M.refresh(buf, win, repo_root)
-  end, vim.tbl_extend("force", opts, { desc = "diff.nvim: refresh file list" }))
-
   -- 'q': close the entire diff.nvim interface
   vim.keymap.set("n", "q", function()
     require("diff.sidebar").close()
