@@ -281,7 +281,7 @@ function M.toggle_notes(repo_root)
       sidebar._notes_win = nil
       sidebar._notes_buf = nil
     end
-  end, { buffer = buf, nowait = true, desc = "diff.nvim: close notes panel" })
+  end, { buffer = buf, nowait = true, desc = "Close notes panel (diff)" })
 
   -- Keymap: delete note under cursor
   vim.keymap.set("n", "dd", function()
@@ -291,7 +291,7 @@ function M.toggle_notes(repo_root)
       return
     end
     M._delete_note_at_cursor(buf, path, repo_root)
-  end, { buffer = buf, nowait = true, desc = "diff.nvim: delete note" })
+  end, { buffer = buf, nowait = true, desc = "Delete note (diff)" })
 
   -- Return focus to the file panel if it's open
   if sidebar._file_win and vim.api.nvim_win_is_valid(sidebar._file_win) then

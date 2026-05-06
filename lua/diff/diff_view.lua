@@ -424,7 +424,7 @@ local function setup_keymaps(left_buf, right_buf, opts)
   local km  = cfg.keymaps or {}
 
   local function map(buf, mode, key, fn, desc)
-    vim.keymap.set(mode, key, fn, { buffer = buf, nowait = true, silent = true, desc = "diff.nvim: " .. desc })
+    vim.keymap.set(mode, key, fn, { buffer = buf, nowait = true, silent = true, desc = desc .. " (diff)" })
   end
 
   local function leave_note(buf, side)
@@ -484,12 +484,12 @@ local function setup_keymaps(left_buf, right_buf, opts)
     local side = entry[2]
 
     -- Leave note
-    map(buf, { "n", "v" }, km.leave_note or "<leader>n", leave_note(buf, side), "leave note")
+    map(buf, { "n", "v" }, km.leave_note or "<leader>n", leave_note(buf, side), "Leave note")
 
     -- Toggle notes panel
     map(buf, "n", km.toggle_notes or "<leader>N", function()
       require("diff.annotations").toggle_notes(opts.repo_root)
-    end, "toggle notes panel")
+    end, "Toggle notes panel")
 
     -- Next hunk
     map(buf, "n", km.next_hunk or "]c", function()
@@ -502,7 +502,7 @@ local function setup_keymaps(left_buf, right_buf, opts)
           return
         end
       end
-    end, "next hunk")
+    end, "Next hunk")
 
     -- Prev hunk
     map(buf, "n", km.prev_hunk or "[c", function()
@@ -515,17 +515,17 @@ local function setup_keymaps(left_buf, right_buf, opts)
           return
         end
       end
-    end, "prev hunk")
+    end, "Prev hunk")
 
     -- Expand context (zo)
     map(buf, "n", km.expand_context or "zo", function()
       M.expand_context()
-    end, "expand context (+10 lines)")
+    end, "Expand context (+10 lines)")
 
     -- Expand all (zR)
     map(buf, "n", km.expand_all or "zR", function()
       M.expand_all()
-    end, "show all context")
+    end, "Show all context")
 
     -- Close diff view (return to sidebar)
     map(buf, "n", "q", function()
@@ -534,7 +534,7 @@ local function setup_keymaps(left_buf, right_buf, opts)
       if sidebar._file_win and vim.api.nvim_win_is_valid(sidebar._file_win) then
         vim.api.nvim_set_current_win(sidebar._file_win)
       end
-    end, "close diff view")
+    end, "Close diff view")
   end
 end
 
