@@ -516,11 +516,17 @@ local function setup_keymaps(left_buf, right_buf, opts)
       local cur = vim.api.nvim_win_get_cursor(0)[1]
       local aln = (buf == left_buf) and M._left_aligned or M._right_aligned
       if not aln then return end
-      for i = cur + 1, #aln do
-        if aln[i].type == "removed" or aln[i].type == "added" then
-          vim.api.nvim_win_set_cursor(0, { i, 0 })
-          return
-        end
+      local i = cur
+      -- skip past the remainder of the current hunk
+      while i <= #aln and (aln[i].type == "removed" or aln[i].type == "added") do
+        i = i + 1
+      end
+      -- skip context/filler/separator until the next hunk starts
+      while i <= #aln and aln[i].type ~= "removed" and aln[i].type ~= "added" do
+        i = i + 1
+      end
+      if i <= #aln then
+        vim.api.nvim_win_set_cursor(0, { i, 0 })
       end
     end, "Next hunk")
 
@@ -529,11 +535,21 @@ local function setup_keymaps(left_buf, right_buf, opts)
       local cur = vim.api.nvim_win_get_cursor(0)[1]
       local aln = (buf == left_buf) and M._left_aligned or M._right_aligned
       if not aln then return end
-      for i = cur - 1, 1, -1 do
-        if aln[i].type == "removed" or aln[i].type == "added" then
-          vim.api.nvim_win_set_cursor(0, { i, 0 })
-          return
-        end
+      local i = cur
+      -- skip backward past the current hunk (if cursor is inside one)
+      while i >= 1 and (aln[i].type == "removed" or aln[i].type == "added") do
+        i = i - 1
+      end
+      -- skip backward past context/filler/separator
+      while i >= 1 and aln[i].type ~= "removed" and aln[i].type ~= "added" do
+        i = i - 1
+      end
+      -- walk back to the first line of the previous hunk
+      while i > 1 and (aln[i - 1].type == "removed" or aln[i - 1].type == "added") do
+        i = i - 1
+      end
+      if i >= 1 and (aln[i].type == "removed" or aln[i].type == "added") then
+        vim.api.nvim_win_set_cursor(0, { i, 0 })
       end
     end, "Prev hunk")
 
