@@ -14,7 +14,9 @@ local NS = vim.api.nvim_create_namespace("diff_nvim_notes")
 M._session_path    = nil
 M._session_file_created = false
 
--- Timestamp captured once at module-load time; used to name the session file.
+-- Timestamp captured once at module-load time (= once per Neovim session, since
+-- Lua modules are cached by require).  Format: ISO-8601-like compact form without
+-- colons, e.g. "20260507T142301" — safe to use as a filename component.
 local _session_timestamp = os.date("%Y%m%dT%H%M%S")
 
 -- ---------------------------------------------------------------------------
