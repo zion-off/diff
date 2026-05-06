@@ -39,6 +39,14 @@ function M.is_open()
     and vim.api.nvim_win_is_valid(M._commit_win)
 end
 
+--- Cancel and clean up the pending debounce timer (if any).
+local function cancel_debounce_timer()
+  if M._debounce_timer then
+    pcall(function() M._debounce_timer:stop() M._debounce_timer:close() end)
+    M._debounce_timer = nil
+  end
+end
+
 --- Create a scratch buffer suitable for a sidebar panel.
 --- @param  name string
 --- @return integer
@@ -206,10 +214,7 @@ function M.close()
   end
 
   -- Cancel any pending debounce timer
-  if M._debounce_timer then
-    pcall(function() M._debounce_timer:stop() M._debounce_timer:close() end)
-    M._debounce_timer = nil
-  end
+  cancel_debounce_timer()
 
   -- Close the notes panel split if open
   if M._notes_win and vim.api.nvim_win_is_valid(M._notes_win) then
@@ -439,10 +444,7 @@ function M._start_fs_watcher()
   end
 
   -- Cancel any pending debounce timer from the old watcher
-  if M._debounce_timer then
-    pcall(function() M._debounce_timer:stop() M._debounce_timer:close() end)
-    M._debounce_timer = nil
-  end
+  cancel_debounce_timer()
 
   local root = M._repo_root
   if not root then return end
@@ -458,8 +460,7 @@ function M._start_fs_watcher()
     if err then return end
     -- Debounce: cancel any pending timer and restart it
     if M._debounce_timer then
-      pcall(function() M._debounce_timer:stop() M._debounce_timer:close() end)
-      M._debounce_timer = nil
+      cancel_debounce_timer()
     end
     M._debounce_timer = vim.defer_fn(function()
       M._debounce_timer = nil
