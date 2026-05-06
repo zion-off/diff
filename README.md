@@ -104,8 +104,13 @@ require("diff").setup({
 
 | Key | Action |
 |---|---|
-| `<leader>gs` | Toggle sidebar (full interface) |
-| `<leader>gS` | Toggle sidebar panels only (show/hide file + commit panels) |
+| `<leader>gs` | Toggle interface |
+
+### While interface is open
+
+| Key | Action |
+|---|---|
+| `<leader>gS` | Toggle sidebar panels (show/hide file + commit panels) |
 | `<leader>gy` | Copy session notes file path to clipboard |
 | `<leader>N` | Toggle notes panel |
 
@@ -153,7 +158,6 @@ require("diff").setup({
 | `:DiffNvimOpen` | Open sidebar |
 | `:DiffNvimClose` | Close sidebar |
 | `:DiffNvimToggle` | Toggle sidebar |
-| `:DiffNvimRefresh` | Refresh panels |
 | `:DiffNvimNotes` | Toggle notes panel |
 
 ---
