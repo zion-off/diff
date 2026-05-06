@@ -201,12 +201,41 @@ function M.open(repo_root)
   -- Start the filesystem watcher now that the repo root is set
   M._start_fs_watcher()
 
+  -- Register interface-scoped keymaps (removed on close)
+  local cfg = config.get()
+  local km  = cfg.keymaps or {}
+  local function nmap(key, fn, desc)
+    if key and key ~= "" then
+      vim.keymap.set("n", key, fn, { silent = true, desc = desc .. " (diff)" })
+    end
+  end
+  nmap(km.toggle_sidebar_panel or "<leader>gS", function()
+    M.toggle_sidebar_panel()
+  end, "Toggle sidebar")
+  nmap(km.copy_notes_path or "<leader>gy", function()
+    require("diff.annotations").copy_notes_path()
+  end, "Copy notes path")
+  nmap(km.toggle_notes or "<leader>N", function()
+    require("diff.annotations").toggle_notes(repo_root)
+  end, "Toggle notes panel")
+
   -- Populate
   M.refresh()
 end
 
 --- Close the diff.nvim interface, restore previous layout.
 function M.close()
+  -- Remove interface-scoped keymaps
+  local cfg = config.get()
+  local km  = cfg.keymaps or {}
+  for _, key in ipairs({
+    km.toggle_sidebar_panel or "<leader>gS",
+    km.copy_notes_path      or "<leader>gy",
+    km.toggle_notes         or "<leader>N",
+  }) do
+    pcall(vim.keymap.del, "n", key)
+  end
+
   -- Stop the filesystem watcher if running
   if M._fs_watcher then
     pcall(function() M._fs_watcher:stop() end)
