@@ -50,6 +50,26 @@ local PRIORITY_LINE_BG   = 50   -- background diff colors — below TS so syntax
 local PRIORITY_WORD_HL   = 150  -- word diff highlights — above TS so they are clearly visible
 local PRIORITY_NOTE_SIGN = 70   -- note markers — between line bg and word highlights
 
+--- Detect the filetype for a file path, trying multiple strategies.
+--- vim.filetype.match can return nil on repo-relative paths even when the
+--- extension is unambiguous, so we fall back to basename then raw extension.
+--- @param  path string  Any path form — absolute, relative, or basename only.
+--- @return string       Filetype string, or "" if undetectable.
+local function detect_ft(path)
+  if not path or path == "" then return "" end
+  local ft = vim.filetype.match({ filename = path })
+  if ft and ft ~= "" then return ft end
+  local basename = vim.fn.fnamemodify(path, ":t")
+  ft = vim.filetype.match({ filename = basename })
+  if ft and ft ~= "" then return ft end
+  local ext = vim.fn.fnamemodify(path, ":e")
+  if ext and ext ~= "" then
+    ft = vim.filetype.match({ filename = "x." .. ext })
+    if ft and ft ~= "" then return ft end
+  end
+  return ""
+end
+
 --- Create a scratch buffer for a diff pane.
 --- @param  name string
 --- @return integer
@@ -731,7 +751,7 @@ function M.open(opts)
 
     -- Set filetype and start tree-sitter; fall back to regex syntax if no TS parser
     local ft = opts.filetype or ""
-    if ft == "" then ft = vim.filetype.match({ filename = opts.file_path }) or "" end
+    if ft == "" then ft = detect_ft(opts.file_path) end
     if ft ~= "" then
       pcall(vim.api.nvim_set_option_value, "filetype", ft, { buf = pane_buf })
       local ts_ok = pcall(vim.treesitter.start, pane_buf, ft)
@@ -824,7 +844,7 @@ function M.open(opts)
   -- Set filetype and start tree-sitter for syntax highlighting; fall back to
   -- regex syntax if no TS parser exists for this filetype.
   local ft = opts.filetype or ""
-  if ft == "" then ft = vim.filetype.match({ filename = opts.file_path }) or "" end
+  if ft == "" then ft = detect_ft(opts.file_path) end
   if ft ~= "" then
     pcall(vim.api.nvim_set_option_value, "filetype", ft, { buf = left_buf })
     pcall(vim.api.nvim_set_option_value, "filetype", ft, { buf = right_buf })
@@ -1002,7 +1022,7 @@ function M.open_file_diff(repo_root, file_info)
       end
 
       local open_ok, open_err = pcall(function()
-        local ft = vim.filetype.match({ filename = file_info.path }) or ""
+        local ft = detect_ft(file_info.path)
         M.open({
           repo_root   = repo_root,
           file_path   = file_info.path,
@@ -1078,7 +1098,7 @@ function M.open_commit_diff(repo_root, hash, file_path, file_status)
 
     local function open_when_ready(fp, diff_text_val, old_lines_val, new_lines_val)
       local open_ok, open_err = pcall(function()
-        local ft = fp and (vim.filetype.match({ filename = fp }) or "") or ""
+        local ft = fp and detect_ft(fp) or ""
         local status = nil
         if file_status then
           if file_status == "A" then status = "added"
