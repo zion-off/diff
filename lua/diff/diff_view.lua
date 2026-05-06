@@ -20,7 +20,6 @@ M._right_aligned = nil
 M._scroll_aug    = nil
 M._current_repo  = nil
 M._current_file  = nil
-M._buf_aligned   = {}
 
 -- Render generation counter: incremented on each M.open() call.
 -- Scheduled callbacks check this to avoid applying stale highlights
@@ -41,7 +40,6 @@ M._current_ft       = nil
 
 -- Single-pane mode
 M._single_pane      = false
-M._single_side      = nil  -- "old" or "new"
 
 -- ---------------------------------------------------------------------------
 -- Highlight priorities (relative to tree-sitter's default of 100)
@@ -108,6 +106,39 @@ local function set_win_opts(win)
   end
 end
 
+--- Fill a diff buffer with the content from an aligned line list.
+--- @param buf integer
+--- @param aligned table[]
+local function fill_aligned_buf(buf, aligned)
+  local content = {}
+  for _, entry in ipairs(aligned) do
+    table.insert(content, entry.content)
+  end
+  vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, content)
+  vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+end
+
+--- Start tree-sitter for a buffer, falling back to regex syntax when needed.
+--- @param buf integer
+--- @param ft string
+local function start_buf_syntax(buf, ft)
+  if ft == "" then return end
+  local ts_ok = pcall(vim.treesitter.start, buf, ft)
+  if not ts_ok then
+    pcall(function() vim.bo[buf].syntax = ft end)
+  end
+end
+
+--- Set filetype and start tree-sitter for a buffer.
+--- @param buf integer
+--- @param ft string
+local function set_buf_filetype(buf, ft)
+  if ft == "" then return end
+  pcall(vim.api.nvim_set_option_value, "filetype", ft, { buf = buf })
+  start_buf_syntax(buf, ft)
+end
+
 --- Close any open diff pane windows safely.
 local function close_diff_wins()
   if M._scroll_aug then
@@ -148,9 +179,6 @@ local function close_diff_wins()
     end
   end
 
-  if M._left_buf  then M._buf_aligned[M._left_buf]  = nil end
-  if M._right_buf then M._buf_aligned[M._right_buf] = nil end
-
   M._left_win      = nil
   M._right_win     = nil
   M._left_buf      = nil
@@ -160,7 +188,6 @@ local function close_diff_wins()
   M._left_to_right = nil
   M._right_to_left = nil
   M._single_pane   = false
-  M._single_side   = nil
 end
 
 --- Build cursor alignment lookup tables from aligned lists.
@@ -191,8 +218,7 @@ end
 --- Apply line-level background highlights, gutter signs, and separator/filler styling.
 --- @param buf      integer
 --- @param aligned  table[]
---- @param side     string "old"|"new"|nil
-local function apply_line_highlights(buf, aligned, side)
+local function apply_line_highlights(buf, aligned)
   for i, entry in ipairs(aligned) do
     local row = i - 1
 
@@ -604,44 +630,22 @@ function M.rerender()
 
   M._left_aligned  = left_aln
   M._right_aligned = right_aln
-  M._buf_aligned[M._left_buf] = left_aln
-  if M._right_buf then
-    M._buf_aligned[M._right_buf] = right_aln
-  end
 
   -- Rebuild cursor alignment map
   build_cursor_map(left_aln, right_aln)
 
   -- Re-fill buffers
-  local function fill_buf(buf, aligned)
-    local content = {}
-    for _, e in ipairs(aligned) do
-      table.insert(content, e.content)
-    end
-    vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, content)
-    vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
-  end
-
-  fill_buf(M._left_buf, left_aln)
+  fill_aligned_buf(M._left_buf, left_aln)
   if M._right_buf then
-    fill_buf(M._right_buf, right_aln)
+    fill_aligned_buf(M._right_buf, right_aln)
   end
 
   -- Re-apply tree-sitter first; defer all extmark application until after
   -- tree-sitter has re-parsed the updated buffer content.
   local ft = M._current_ft or ""
-  if ft ~= "" then
-    local ts_ok_l = pcall(vim.treesitter.start, M._left_buf, ft)
-    if not ts_ok_l then
-      pcall(function() vim.bo[M._left_buf].syntax = ft end)
-    end
-    if M._right_buf then
-      local ts_ok_r = pcall(vim.treesitter.start, M._right_buf, ft)
-      if not ts_ok_r then
-        pcall(function() vim.bo[M._right_buf].syntax = ft end)
-      end
-    end
+  start_buf_syntax(M._left_buf, ft)
+  if M._right_buf then
+    start_buf_syntax(M._right_buf, ft)
   end
 
   local left_buf_ref  = M._left_buf
@@ -657,10 +661,10 @@ function M.rerender()
 
     -- Re-apply highlights
     vim.api.nvim_buf_clear_namespace(left_buf_ref, NS, 0, -1)
-    apply_line_highlights(left_buf_ref, left_aln, "old")
+    apply_line_highlights(left_buf_ref, left_aln)
     if right_buf_ref and vim.api.nvim_buf_is_valid(right_buf_ref) then
       vim.api.nvim_buf_clear_namespace(right_buf_ref, NS, 0, -1)
-      apply_line_highlights(right_buf_ref, right_aln, "new")
+      apply_line_highlights(right_buf_ref, right_aln)
       apply_word_highlights(left_buf_ref, right_buf_ref, left_aln, right_aln)
     end
 
@@ -706,7 +710,6 @@ function M.open(opts)
   end
 
   M._single_pane = single_pane
-  M._single_side = single_side
 
   -- Parse diff and build aligned line lists
   local hunks = diff_parser.parse(diff_text)
@@ -759,22 +762,12 @@ function M.open(opts)
     local aln = single_side == "new" and right_aln or left_aln
 
     -- Populate buffer
-    local content = {}
-    for _, e in ipairs(aln) do table.insert(content, e.content) end
-    vim.api.nvim_set_option_value("modifiable", true, { buf = pane_buf })
-    vim.api.nvim_buf_set_lines(pane_buf, 0, -1, false, content)
-    vim.api.nvim_set_option_value("modifiable", false, { buf = pane_buf })
+    fill_aligned_buf(pane_buf, aln)
 
     -- Set filetype and start tree-sitter; fall back to regex syntax if no TS parser
     local ft = opts.filetype or ""
     if ft == "" then ft = detect_ft(opts.file_path) end
-    if ft ~= "" then
-      pcall(vim.api.nvim_set_option_value, "filetype", ft, { buf = pane_buf })
-      local ts_ok = pcall(vim.treesitter.start, pane_buf, ft)
-      if not ts_ok then
-        pcall(function() vim.bo[pane_buf].syntax = ft end)
-      end
-    end
+    set_buf_filetype(pane_buf, ft)
 
     -- Create window
     local sidebar = require("diff.sidebar")
@@ -819,12 +812,11 @@ function M.open(opts)
       if this_gen ~= M._render_gen then return end
       if not vim.api.nvim_buf_is_valid(pane_buf_ref) then return end
       vim.api.nvim_buf_clear_namespace(pane_buf_ref, NS, 0, -1)
-      apply_line_highlights(pane_buf_ref, aln, single_side)
+      apply_line_highlights(pane_buf_ref, aln)
       apply_note_markers(pane_buf_ref, aln, single_side, repo_root_ref, file_path_ref)
     end)
 
     -- Keymaps (single buffer)
-    M._buf_aligned[pane_buf] = aln
     setup_keymaps(
       single_side == "old" and pane_buf or nil,
       single_side == "new" and pane_buf or nil,
@@ -842,34 +834,16 @@ function M.open(opts)
 
   M._left_buf  = left_buf
   M._right_buf = right_buf
-  M._buf_aligned[left_buf]  = left_aln
-  M._buf_aligned[right_buf] = right_aln
 
-  -- Populate buffers
-  local function fill_buf(buf, aligned)
-    local content = {}
-    for _, e in ipairs(aligned) do table.insert(content, e.content) end
-    vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, content)
-    vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
-  end
-
-  fill_buf(left_buf,  left_aln)
-  fill_buf(right_buf, right_aln)
+  fill_aligned_buf(left_buf,  left_aln)
+  fill_aligned_buf(right_buf, right_aln)
 
   -- Set filetype and start tree-sitter for syntax highlighting; fall back to
   -- regex syntax if no TS parser exists for this filetype.
   local ft = opts.filetype or ""
   if ft == "" then ft = detect_ft(opts.file_path) end
-  if ft ~= "" then
-    pcall(vim.api.nvim_set_option_value, "filetype", ft, { buf = left_buf })
-    pcall(vim.api.nvim_set_option_value, "filetype", ft, { buf = right_buf })
-    -- Explicitly start tree-sitter (buftype=nofile doesn't auto-attach)
-    local ts_ok_l = pcall(vim.treesitter.start, left_buf, ft)
-    local ts_ok_r = pcall(vim.treesitter.start, right_buf, ft)
-    if not ts_ok_l then pcall(function() vim.bo[left_buf].syntax  = ft end) end
-    if not ts_ok_r then pcall(function() vim.bo[right_buf].syntax = ft end) end
-  end
+  set_buf_filetype(left_buf, ft)
+  set_buf_filetype(right_buf, ft)
 
   -- ── Create windows in the main area ─────────────────────────────────────
   local sidebar = require("diff.sidebar")
@@ -952,8 +926,8 @@ function M.open(opts)
     vim.api.nvim_buf_clear_namespace(left_buf_ref,  NS, 0, -1)
     vim.api.nvim_buf_clear_namespace(right_buf_ref, NS, 0, -1)
 
-    apply_line_highlights(left_buf_ref,  left_aln,  "old")
-    apply_line_highlights(right_buf_ref, right_aln, "new")
+    apply_line_highlights(left_buf_ref,  left_aln)
+    apply_line_highlights(right_buf_ref, right_aln)
     apply_word_highlights(left_buf_ref, right_buf_ref, left_aln, right_aln)
 
     -- ── Note markers ───────────────────────────────────────────────────────

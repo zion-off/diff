@@ -26,17 +26,50 @@ M._debounce_timer = nil  -- pending debounce timer for fs_event (module-level fo
 -- Helpers
 -- ---------------------------------------------------------------------------
 
+--- @param win integer|nil
+--- @return boolean
+local function is_valid_win(win)
+  return win ~= nil and vim.api.nvim_win_is_valid(win)
+end
+
+local function clear_panel_state()
+  M._file_win   = nil
+  M._commit_win = nil
+  M._file_buf   = nil
+  M._commit_buf = nil
+end
+
+local function clear_notes_state()
+  M._notes_win = nil
+  M._notes_buf = nil
+end
+
+--- @param win integer|nil
+local function close_tracked_win(win)
+  if is_valid_win(win) then
+    pcall(vim.api.nvim_win_close, win, true)
+  end
+end
+
+--- Return the tabpage that owns any tracked diff.nvim window.
+--- @return integer|nil
+local function get_diff_tab()
+  for _, win in ipairs({ M._file_win, M._commit_win, M._notes_win, M._main_win }) do
+    if is_valid_win(win) then
+      return vim.api.nvim_win_get_tabpage(win)
+    end
+  end
+  return nil
+end
+
 --- Returns true when the plugin layout is currently open.
 --- @return boolean
 function M.is_open()
   -- When sidebar panels are hidden, check the main diff window instead
   if M._sidebar_hidden then
-    return M._main_win ~= nil and vim.api.nvim_win_is_valid(M._main_win)
+    return is_valid_win(M._main_win)
   end
-  return M._file_win ~= nil
-    and vim.api.nvim_win_is_valid(M._file_win)
-    and M._commit_win ~= nil
-    and vim.api.nvim_win_is_valid(M._commit_win)
+  return is_valid_win(M._file_win) and is_valid_win(M._commit_win)
 end
 
 --- Cancel and clean up the pending debounce timer (if any).
@@ -126,7 +159,7 @@ end
 --- @param repo_root string
 function M.open(repo_root)
   -- Clean up any partial state from a previous session
-  if M._file_win or M._commit_win or M._main_win then
+  if M._file_win or M._commit_win or M._notes_win or M._main_win then
     if not M.is_open() then
       -- Partial state — clean it up first
       M.close()
@@ -136,6 +169,7 @@ function M.open(repo_root)
   end
 
   M._repo_root = repo_root
+  M._sidebar_hidden = false
   local cfg    = config.get()
   local width  = cfg.sidebar_width or 40
 
@@ -245,29 +279,17 @@ function M.close()
   -- Cancel any pending debounce timer
   cancel_debounce_timer()
 
+  local diff_tab = get_diff_tab()
+
   -- Close the notes panel split if open
-  if M._notes_win and vim.api.nvim_win_is_valid(M._notes_win) then
-    pcall(vim.api.nvim_win_close, M._notes_win, true)
-  end
-  M._notes_win = nil
-  M._notes_buf = nil
+  close_tracked_win(M._notes_win)
+  clear_notes_state()
 
   -- Note: We intentionally do NOT delete M._aug (auto-refresh augroup) here.
   -- The callback checks M.is_open() so it's harmless when closed,
   -- and it needs to survive close/reopen cycles.
 
   -- Close the diff.nvim tab (all windows in it will be closed)
-  -- First, check if the current tab is the diff.nvim tab
-  local cur_tab = vim.api.nvim_get_current_tabpage()
-  local diff_tab = nil
-
-  -- Find the tab containing our file panel window (or main window if sidebar hidden)
-  if M._file_win and vim.api.nvim_win_is_valid(M._file_win) then
-    diff_tab = vim.api.nvim_win_get_tabpage(M._file_win)
-  elseif M._main_win and vim.api.nvim_win_is_valid(M._main_win) then
-    diff_tab = vim.api.nvim_win_get_tabpage(M._main_win)
-  end
-
   -- Restore previous layout first (switch to old tab)
   restore_layout(M._saved_layout)
   M._saved_layout = nil
@@ -279,10 +301,7 @@ function M.close()
     pcall(vim.cmd, "tabclose " .. tab_nr)
   end
 
-  M._file_win      = nil
-  M._commit_win    = nil
-  M._file_buf      = nil
-  M._commit_buf    = nil
+  clear_panel_state()
   M._main_win      = nil
   M._sidebar_hidden = false
 end
@@ -308,14 +327,9 @@ function M.toggle_sidebar_panel()
 
   if not M._sidebar_hidden then
     -- Hide: close the two sidebar windows
-    if M._file_win and vim.api.nvim_win_is_valid(M._file_win) then
-      pcall(vim.api.nvim_win_close, M._file_win, true)
-    end
-    if M._commit_win and vim.api.nvim_win_is_valid(M._commit_win) then
-      pcall(vim.api.nvim_win_close, M._commit_win, true)
-    end
-    M._file_win    = nil
-    M._commit_win  = nil
+    close_tracked_win(M._file_win)
+    close_tracked_win(M._commit_win)
+    clear_panel_state()
     M._sidebar_hidden = true
   else
     -- Show: recreate the sidebar split alongside the diff area.
@@ -422,11 +436,11 @@ function M.refresh()
   -- Only refresh panels when they are visible (skip when hidden)
   if M._sidebar_hidden then return end
 
-  if M._file_buf and vim.api.nvim_buf_is_valid(M._file_buf) then
+  if M._file_buf and vim.api.nvim_buf_is_valid(M._file_buf) and is_valid_win(M._file_win) then
     file_panel.refresh(M._file_buf, M._file_win, root)
   end
 
-  if M._commit_buf and vim.api.nvim_buf_is_valid(M._commit_buf) then
+  if M._commit_buf and vim.api.nvim_buf_is_valid(M._commit_buf) and is_valid_win(M._commit_win) then
     commit_panel.refresh(M._commit_buf, M._commit_win, root)
   end
 end
