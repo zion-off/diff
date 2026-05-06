@@ -104,19 +104,180 @@ local function filler()
   return make_entry("", nil, "filler")
 end
 
---- Emit a block of removed/added lines, padding the shorter side with fillers
---- so left and right lists grow by the same amount.
+-- ---------------------------------------------------------------------------
+-- Similarity-based line matching
+-- ---------------------------------------------------------------------------
+
+--- Bigram Jaccard similarity (whitespace-normalised).
+--- Returns a score in [0.0, 1.0]; 1.0 for identical stripped strings.
+local function similarity(a, b)
+  a = a:gsub("%s+", "")
+  b = b:gsub("%s+", "")
+  if #a == 0 and #b == 0 then return 1.0 end
+  -- Exact-match fast path: also handles strings that are too short to produce
+  -- bigrams (length 1) where the bigram loop would produce an empty table.
+  if a == b then return 1.0 end
+  if #a == 0 or  #b == 0 then return 0.0 end
+
+  local function bigrams(s)
+    local t = {}
+    for i = 1, #s - 1 do
+      local bg = s:sub(i, i + 1)
+      t[bg] = (t[bg] or 0) + 1
+    end
+    return t
+  end
+
+  local ba, bb = bigrams(a), bigrams(b)
+  local inter, union_val = 0, 0
+  local all = {}
+  for k in pairs(ba) do all[k] = true end
+  for k in pairs(bb) do all[k] = true end
+  for k in pairs(all) do
+    local ca = ba[k] or 0
+    local cb = bb[k] or 0
+    inter     = inter     + math.min(ca, cb)
+    union_val = union_val + math.max(ca, cb)
+  end
+  return union_val == 0 and 0.0 or (inter / union_val)
+end
+
+--- Minimum similarity for two lines to be considered a correspondence.
+local MATCH_THRESHOLD = 0.25
+--- Per-side cap for the DP; groups larger than this fall back to positional.
+local MATCH_MAX_DIM   = 100
+
+--- Order-preserving similarity matching via a weighted-LCS DP.
+--- Returns a sorted list of {ri, aj} index pairs (1-based), or nil to signal
+--- that the caller should fall back to positional pairing (group too large).
+local function find_matches(removed, added)
+  local nr = #removed
+  local na = #added
+  if nr == 0 or na == 0 then return {} end
+  if nr > MATCH_MAX_DIM or na > MATCH_MAX_DIM then return nil end
+
+  -- Pre-compute similarity matrix to avoid recomputing during DP.
+  local sim = {}
+  for i = 1, nr do
+    sim[i] = {}
+    for j = 1, na do
+      sim[i][j] = similarity(removed[i].content, added[j].content)
+    end
+  end
+
+  -- dp[i][j] = best total matched similarity for removed[1..i] and added[1..j].
+  local dp = {}
+  for i = 0, nr do
+    dp[i] = {}
+    for j = 0, na do
+      dp[i][j] = 0.0
+    end
+  end
+
+  for i = 1, nr do
+    for j = 1, na do
+      local best = math.max(dp[i-1][j], dp[i][j-1])
+      local s    = sim[i][j]
+      if s >= MATCH_THRESHOLD then
+        local pair_score = dp[i-1][j-1] + s
+        if pair_score > best then best = pair_score end
+      end
+      dp[i][j] = best
+    end
+  end
+
+  -- Backtrack from (nr, na) to recover matched pairs in ascending order.
+  local matched = {}
+  local i, j = nr, na
+  while i > 0 and j > 0 do
+    local s = sim[i][j]
+    -- Check whether the DP arrived here via the (i,j) pair transition.
+    -- Use 1e-6 epsilon (not 1e-9) so accumulated float sums near 100.0 don't
+    -- cause false negatives in the comparison.
+    local took_pair = s >= MATCH_THRESHOLD
+      and math.abs(dp[i][j] - (dp[i-1][j-1] + s)) < 1e-6
+    if took_pair then
+      table.insert(matched, 1, { i, j })
+      i = i - 1
+      j = j - 1
+    elseif dp[i-1][j] >= dp[i][j-1] then
+      i = i - 1
+    else
+      j = j - 1
+    end
+  end
+
+  return matched
+end
+
+--- Emit a block of removed/added lines, placing semantically similar lines
+--- on the same row (bigram Jaccard >= MATCH_THRESHOLD) so that modified
+--- lines appear side-by-side as in VSCode's diff editor.
+--- Unmatched sub-segments between matches are aligned positionally (the
+--- original behaviour).  Falls back to purely positional pairing when a side
+--- exceeds MATCH_MAX_DIM lines.
 local function emit_change_group(removed, added, left, right)
   local nr = #removed
   local na = #added
-  local len = math.max(nr, na)
 
-  for i = 1, len do
-    local l = removed[i]
-      and make_entry(removed[i].content, removed[i].old_line, "removed")
+  local matched = find_matches(removed, added)
+
+  if matched == nil then
+    -- Positional fallback for very large groups.
+    local len = math.max(nr, na)
+    for k = 1, len do
+      local l = removed[k]
+        and make_entry(removed[k].content, removed[k].old_line, "removed")
+        or filler()
+      local r = added[k]
+        and make_entry(added[k].content, added[k].new_line, "added")
+        or filler()
+      table.insert(left,  l)
+      table.insert(right, r)
+    end
+    return
+  end
+
+  -- Walk matched pairs in order, emitting unmatched sub-segments positionally.
+  local r_ptr = 1
+  local a_ptr = 1
+
+  for _, pair in ipairs(matched) do
+    local ri, aj = pair[1], pair[2]
+
+    -- Positional pairing for unmatched lines in the gap before this match.
+    local seg_r   = ri - r_ptr           -- count of unmatched removed in gap
+    local seg_a   = aj - a_ptr           -- count of unmatched added in gap
+    local seg_len = math.max(seg_r, seg_a)
+    for k = 1, seg_len do
+      local l = (k <= seg_r)
+        and make_entry(removed[r_ptr + k - 1].content, removed[r_ptr + k - 1].old_line, "removed")
+        or filler()
+      local r = (k <= seg_a)
+        and make_entry(added[a_ptr + k - 1].content, added[a_ptr + k - 1].new_line, "added")
+        or filler()
+      table.insert(left,  l)
+      table.insert(right, r)
+    end
+
+    -- Emit the matched pair on the same row.
+    table.insert(left,  make_entry(removed[ri].content, removed[ri].old_line, "removed"))
+    table.insert(right, make_entry(added[aj].content,   added[aj].new_line,   "added"))
+
+    r_ptr = ri + 1
+    a_ptr = aj + 1
+  end
+
+  -- Positional pairing for any trailing unmatched lines.
+  local tail_r   = math.max(0, nr - r_ptr + 1)
+  local tail_a   = math.max(0, na - a_ptr + 1)
+  local tail_len = math.max(tail_r, tail_a)
+  for k = 1, tail_len do
+    local l = (k <= tail_r)
+      and make_entry(removed[r_ptr + k - 1].content, removed[r_ptr + k - 1].old_line, "removed")
       or filler()
-    local r = added[i]
-      and make_entry(added[i].content, added[i].new_line, "added")
+    local r = (k <= tail_a)
+      and make_entry(added[a_ptr + k - 1].content, added[a_ptr + k - 1].new_line, "added")
       or filler()
     table.insert(left,  l)
     table.insert(right, r)
