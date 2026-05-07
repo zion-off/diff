@@ -152,8 +152,9 @@ local function layout_two_panels()
   local total_h = vim.api.nvim_win_get_height(M._file_win)
                 + vim.api.nvim_win_get_height(M._commit_win)
                 + 1
-  local file_h  = math.max(4, math.floor(total_h * 0.60))
-  vim.api.nvim_win_set_height(M._file_win, file_h)
+  local file_h  = math.max(1, math.floor(total_h * 0.60))
+  file_h = math.min(file_h, math.max(1, total_h - 1))
+  pcall(vim.api.nvim_win_set_height, M._file_win, file_h)
 end
 
 local function layout_three_panels()
@@ -162,10 +163,14 @@ local function layout_three_panels()
                 + vim.api.nvim_win_get_height(M._detail_win)
                 + vim.api.nvim_win_get_height(M._commit_win)
                 + 2
-  local file_h   = math.max(3, math.floor(total_h * 0.40))
-  local detail_h = math.max(3, math.floor(total_h * 0.20))
-  vim.api.nvim_win_set_height(M._file_win, file_h)
-  vim.api.nvim_win_set_height(M._detail_win, detail_h)
+  local usable_h = math.max(3, total_h - 2)
+  local file_h   = math.max(1, math.floor(usable_h * 0.40))
+  local detail_h = math.max(1, math.floor(usable_h * 0.20))
+  if file_h + detail_h > usable_h - 1 then
+    detail_h = math.max(1, usable_h - file_h - 1)
+  end
+  pcall(vim.api.nvim_win_set_height, M._file_win, file_h)
+  pcall(vim.api.nvim_win_set_height, M._detail_win, detail_h)
 end
 
 --- Save the current window/buffer layout so it can be restored later.
@@ -490,7 +495,6 @@ function M.show_commit_detail(hash)
       vim.notify("diff.nvim: cannot fetch commit detail: " .. (stderr or ""), vim.log.levels.WARN)
       return
     end
-    if req_id ~= M._detail_req_id then return end
     if M._repo_root ~= root then return end
     if M._sidebar_hidden then return end
     if not is_valid_win(M._file_win) or not is_valid_win(M._commit_win) then return end

@@ -586,8 +586,8 @@ local function setup_keymaps(left_buf, right_buf, opts)
 
     -- 'l': expand collapsed separator line, otherwise keep default motion
     map(buf, "n", "l", function()
-      local count = vim.v.count
-      local motion = (count and count > 0) and (tostring(count) .. "l") or "l"
+      local count = vim.v.count1
+      local motion = (count and count > 1) and (tostring(count) .. "l") or "l"
       local aln = (buf == left_buf) and M._left_aligned or M._right_aligned
       local entry = nil
       if aln then
