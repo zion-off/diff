@@ -137,6 +137,7 @@ require("diff").setup({
 | `]c` | Next change chunk |
 | `[c` | Previous change chunk |
 | `zo` | Expand context (+10 lines) |
+| `l` | Expand collapsed separator line (otherwise normal `l` motion) |
 | `zR` | Show all context |
 | `<leader>n` | Leave a note on current / visual selection |
 | `<leader>N` | Toggle notes panel |
