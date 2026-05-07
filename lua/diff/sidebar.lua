@@ -5,6 +5,8 @@ local commit_panel = require("diff.commit_panel")
 local config       = require("diff.config")
 local git          = require("diff.git")
 
+local NS_DETAIL = vim.api.nvim_create_namespace("diff_nvim_detail")
+
 -- ---------------------------------------------------------------------------
 -- Module-level state
 -- ---------------------------------------------------------------------------
@@ -477,7 +479,101 @@ function M.toggle_sidebar_panel()
   end
 end
 
+--- Render commit detail content into the detail buffer with highlights.
+--- @param meta_lines string[]  Output of `git show --no-patch --format=%an%n%ar%n%s%n%b`
+--- @param stat_lines string[]  Output of `git show --stat --format=`
+--- @param short_hash string
+local function render_commit_detail(meta_lines, stat_lines, short_hash)
+  if not M._detail_buf or not vim.api.nvim_buf_is_valid(M._detail_buf) then return end
+
+  -- Parse metadata: line 1 = author, line 2 = relative time, line 3 = subject,
+  -- remaining lines = body (may be empty).
+  local author  = meta_lines[1] or ""
+  local reltime = meta_lines[2] or ""
+  local subject = meta_lines[3] or ""
+  local body    = {}
+  for i = 4, #meta_lines do
+    table.insert(body, meta_lines[i])
+  end
+  -- Strip leading/trailing blank lines from body
+  while #body > 0 and body[1]  == "" do table.remove(body, 1) end
+  while #body > 0 and body[#body] == "" do table.remove(body) end
+
+  -- Find the summary stat line ("N files changed, ...")
+  local stat_line = ""
+  for i = #stat_lines, 1, -1 do
+    if stat_lines[i]:match("changed") then
+      stat_line = stat_lines[i]:gsub("^%s+", "")
+      break
+    end
+  end
+
+  -- Build buffer lines
+  local lines = {}
+  -- Header: "author, 2 hours ago"
+  table.insert(lines, author .. (reltime ~= "" and (", " .. reltime) or ""))
+  table.insert(lines, "")
+  -- Subject (bold via highlight)
+  table.insert(lines, subject)
+  -- Body
+  if #body > 0 then
+    table.insert(lines, "")
+    for _, l in ipairs(body) do
+      table.insert(lines, l)
+    end
+  end
+  -- Stats + hash
+  table.insert(lines, "")
+  if stat_line ~= "" then
+    table.insert(lines, stat_line)
+  end
+  table.insert(lines, short_hash)
+
+  vim.api.nvim_set_option_value("modifiable", true,  { buf = M._detail_buf })
+  vim.api.nvim_buf_clear_namespace(M._detail_buf, NS_DETAIL, 0, -1)
+  vim.api.nvim_buf_set_lines(M._detail_buf, 0, -1, false, lines)
+
+  -- Author highlight (col 0 to end of author name)
+  if #author > 0 then
+    pcall(vim.api.nvim_buf_add_highlight, M._detail_buf, NS_DETAIL,
+      "DiffNvimCommitAuthor", 0, 0, #author)
+  end
+  -- Time highlight (", <reltime>" portion of header line)
+  if #reltime > 0 then
+    local time_start = #author + 2  -- ", " separator
+    pcall(vim.api.nvim_buf_add_highlight, M._detail_buf, NS_DETAIL,
+      "DiffNvimCommitTime", 0, time_start, time_start + #reltime)
+  end
+  -- Subject bold (line index 2)
+  pcall(vim.api.nvim_buf_add_highlight, M._detail_buf, NS_DETAIL,
+    "DiffNvimCommitSubject", 2, 0, -1)
+
+  -- Stat line highlights: green insertions, red deletions
+  if stat_line ~= "" then
+    local stat_lnr = #lines - 2  -- 0-based index of the stat line
+    local ins_pat  = "%d+ insertions?%(%+%)"
+    local del_pat  = "%d+ deletions?%(%-?%)"
+    local s, e = stat_line:find(ins_pat)
+    if s then
+      pcall(vim.api.nvim_buf_add_highlight, M._detail_buf, NS_DETAIL,
+        "DiffNvimStatInserted", stat_lnr, s - 1, e)
+    end
+    s, e = stat_line:find(del_pat)
+    if s then
+      pcall(vim.api.nvim_buf_add_highlight, M._detail_buf, NS_DETAIL,
+        "DiffNvimStatDeleted", stat_lnr, s - 1, e)
+    end
+  end
+
+  -- Hash highlight (last line)
+  pcall(vim.api.nvim_buf_add_highlight, M._detail_buf, NS_DETAIL,
+    "DiffNvimCommitHash", #lines - 1, 0, #short_hash)
+
+  vim.api.nvim_set_option_value("modifiable", false, { buf = M._detail_buf })
+end
+
 --- Show commit details in a panel between file and commit panels.
+--- Makes two parallel async git calls (message + stat) then renders.
 --- @param hash string
 function M.show_commit_detail(hash)
   if not hash or hash == "" then return end
@@ -487,25 +583,25 @@ function M.show_commit_detail(hash)
   if not root or root == "" then return end
 
   M._detail_req_id = M._detail_req_id + 1
-  local req_id = M._detail_req_id
+  local req_id    = M._detail_req_id
+  local short_hash = hash:sub(1, 7)
 
-  git.run({ "show", "--no-patch", "--format=fuller", hash }, root, function(lines, stderr, code)
+  local results   = {}
+  local pending   = 2
+
+  local function on_done()
+    pending = pending - 1
+    if pending > 0 then return end
+    -- Stale or layout gone — discard
     if req_id ~= M._detail_req_id then return end
-    if code ~= 0 then
-      vim.notify("diff.nvim: cannot fetch commit detail: " .. (stderr or ""), vim.log.levels.WARN)
-      return
-    end
-    if M._repo_root ~= root then return end
-    if M._sidebar_hidden then return end
+    if M._repo_root ~= root or M._sidebar_hidden then return end
     if not is_valid_win(M._file_win) or not is_valid_win(M._commit_win) then return end
 
     if not M._detail_buf or not vim.api.nvim_buf_is_valid(M._detail_buf) then
       M._detail_buf = make_panel_buf("diff://commit-detail")
     end
 
-    vim.api.nvim_set_option_value("modifiable", true, { buf = M._detail_buf })
-    vim.api.nvim_buf_set_lines(M._detail_buf, 0, -1, false, lines)
-    vim.api.nvim_set_option_value("modifiable", false, { buf = M._detail_buf })
+    render_commit_detail(results.meta or {}, results.stat or {}, short_hash)
 
     if not is_valid_win(M._detail_win) then
       local focus = vim.api.nvim_get_current_win()
@@ -523,7 +619,21 @@ function M.show_commit_detail(hash)
       set_detail_win_opts(M._detail_win)
       layout_three_panels()
     end
-  end)
+  end
+
+  -- author, relative time, subject, body
+  git.run({ "show", "--no-patch", "--format=%an%n%ar%n%s%n%b", hash }, root,
+    function(lines, _, code)
+      if code == 0 then results.meta = lines end
+      on_done()
+    end)
+
+  -- stat summary
+  git.run({ "show", "--stat", "--format=", hash }, root,
+    function(lines, _, code)
+      if code == 0 then results.stat = lines end
+      on_done()
+    end)
 end
 
 --- Hide commit detail panel and restore two-panel sizing.

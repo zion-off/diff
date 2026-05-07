@@ -102,6 +102,10 @@ local function build_defaults()
     -- Separators (collapsed hunks)
     DiffNvimSeparator       = { fg = p.separator_fg, bg = p.separator_bg, italic = true },
 
+    -- Commit detail stat line
+    DiffNvimStatInserted    = { link = "DiffNvimStatusAdded" },
+    DiffNvimStatDeleted     = { link = "DiffNvimStatusDeleted" },
+
     -- Commit file entries
     DiffNvimCommitFileEntry = { link = "Normal" },
 
