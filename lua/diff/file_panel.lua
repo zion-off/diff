@@ -71,89 +71,130 @@ local function render(buf, status)
   vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
   line_map = {}
 
-  local lines     = {}
-  local hl_queue  = {} -- { lnr, group, col_start, col_end }
+  local lines    = {}
+  local hl_queue = {}
+  local cfg      = config.get()
+  local panel_w  = cfg.sidebar_width or 40
 
   local function push(line, meta, hl_group, hl_start, hl_end)
     table.insert(lines, line)
-    local lnr = #lines -- 1-based
+    local lnr = #lines
     line_map[lnr] = meta
     if hl_group then
       table.insert(hl_queue, { lnr - 1, hl_group, hl_start or 0, hl_end or -1 })
     end
   end
 
-  local cfg      = config.get()
-  local panel_w  = cfg.sidebar_width or 40
+  -- Build a tree from a flat list of files.
+  -- Dir nodes: { name, children={}, _dirs={} }
+  -- File nodes: { name, file=<file_info> }
+  local function build_tree(files)
+    local root = { children = {}, _dirs = {} }
+    for _, f in ipairs(files) do
+      local parts = {}
+      for part in f.path:gmatch("[^/]+") do
+        table.insert(parts, part)
+      end
+      local node = root
+      for i = 1, #parts - 1 do
+        local part = parts[i]
+        if not node._dirs[part] then
+          local dir_node = { name = part, children = {}, _dirs = {} }
+          node._dirs[part] = dir_node
+          table.insert(node.children, dir_node)
+        end
+        node = node._dirs[part]
+      end
+      table.insert(node.children, { name = parts[#parts], file = f })
+    end
+    return root
+  end
 
-  -- ── Staged section ──────────────────────────────────────────────────────
-  local staged_count = #status.staged
-  local staged_arrow = collapsed.staged and "▶" or "▼"
-  local staged_hdr   = staged_arrow .. " Staged Changes (" .. staged_count .. ")"
-  push(staged_hdr, { type = "header", section = "staged" }, "DiffNvimSectionHeader")
+  -- Sort children: directories first, then files, both alphabetically.
+  local function sorted(children)
+    local out = {}
+    for _, c in ipairs(children) do table.insert(out, c) end
+    table.sort(out, function(a, b)
+      local ad, bd = not a.file, not b.file
+      if ad ~= bd then return ad end
+      return a.name < b.name
+    end)
+    return out
+  end
 
-  if not collapsed.staged then
-    for _, f in ipairs(status.staged) do
-      local badge    = STATUS_BADGE[f.status] or "·"
-      local name     = f.path
-      -- Right-align the badge with at least one space separator.
-      -- panel_w - 2 (indent) - 1 (space) - 3 ("[X]") = available for name
-      local available = panel_w - 2 - 1 - 3
-      local display_name = #name > available and ("…" .. name:sub(-(available - 1))) or name
-      local pad      = math.max(1, panel_w - 2 - #display_name - 3)
-      local line     = "  " .. display_name .. string.rep(" ", pad) .. "[" .. badge .. "]"
-      local fhl      = file_hl(f, "staged")
-      local badge_hl = STATUS_HL[f.status] or "DiffNvimStatusUntracked"
+  local render_node  -- forward declaration for mutual recursion
 
-      table.insert(lines, line)
-      local lnr = #lines
-      line_map[lnr] = { type = "file", section = "staged", file = f }
+  local function render_dir(node, depth, section)
+    -- Compact single-child-dir chains: "src/" + "components/" → "src/components/"
+    local display = node.name
+    local cur     = node
+    while true do
+      local dir_kids, has_files = {}, false
+      for _, c in ipairs(cur.children) do
+        if c.file then has_files = true
+        else table.insert(dir_kids, c) end
+      end
+      if not has_files and #dir_kids == 1 then
+        cur     = dir_kids[1]
+        display = display .. "/" .. cur.name
+      else break end
+    end
 
-      -- filename highlight (cols 2 .. 2+#display_name)
-      table.insert(hl_queue, { lnr - 1, fhl, 2, 2 + #display_name })
-      -- badge highlight: last 3 chars "[X]"
-      local badge_col = #line - 3
-      table.insert(hl_queue, { lnr - 1, badge_hl, badge_col, badge_col + 3 })
+    local indent   = string.rep("  ", depth + 1)
+    local dir_line = indent .. display .. "/"
+    table.insert(lines, dir_line)
+    local lnr = #lines
+    line_map[lnr] = { type = "dir_node", section = section }
+    table.insert(hl_queue, { lnr - 1, "Comment", #indent, #indent + #display + 1 })
+
+    for _, child in ipairs(sorted(cur.children)) do
+      render_node(child, depth + 1, section)
     end
   end
 
-  -- blank separator
+  render_node = function(node, depth, section)
+    if node.file then
+      local f      = node.file
+      local indent = string.rep("  ", depth + 1)
+      local badge  = STATUS_BADGE[f.status] or "·"
+      local available    = math.max(1, panel_w - #indent - 1 - 3)
+      local name         = node.name
+      local display_name = #name > available and ("…" .. name:sub(-(available - 1))) or name
+      local pad          = math.max(1, panel_w - #indent - #display_name - 3)
+      local line         = indent .. display_name .. string.rep(" ", pad) .. "[" .. badge .. "]"
+      local fhl          = file_hl(f, section)
+      local badge_hl     = STATUS_HL[f.status] or "DiffNvimStatusUntracked"
+      table.insert(lines, line)
+      local lnr = #lines
+      line_map[lnr] = { type = "file", section = section, file = f }
+      table.insert(hl_queue, { lnr - 1, fhl, #indent, #indent + #display_name })
+      local badge_col = #line - 3
+      table.insert(hl_queue, { lnr - 1, badge_hl, badge_col, badge_col + 3 })
+    else
+      render_dir(node, depth, section)
+    end
+  end
+
+  local function render_section(files, section, label)
+    local arrow = collapsed[section] and "▶" or "▼"
+    push(arrow .. " " .. label .. " (" .. #files .. ")",
+      { type = "header", section = section }, "DiffNvimSectionHeader")
+    if not collapsed[section] then
+      local tree = build_tree(files)
+      for _, child in ipairs(sorted(tree.children)) do
+        render_node(child, 0, section)
+      end
+    end
+  end
+
+  render_section(status.staged,   "staged",   "Staged Changes")
   push("", { type = "blank" })
-
-  -- ── Unstaged / Changes section ──────────────────────────────────────────
-  local unstaged_count = #status.unstaged
-  local unstaged_arrow = collapsed.unstaged and "▶" or "▼"
-  local unstaged_hdr   = unstaged_arrow .. " Changes (" .. unstaged_count .. ")"
-  push(unstaged_hdr, { type = "header", section = "unstaged" }, "DiffNvimSectionHeader")
-
-  if not collapsed.unstaged then
-    for _, f in ipairs(status.unstaged) do
-      local badge    = STATUS_BADGE[f.status] or "·"
-      local name     = f.path
-      local available = panel_w - 2 - 1 - 3
-      local display_name = #name > available and ("…" .. name:sub(-(available - 1))) or name
-      local pad      = math.max(1, panel_w - 2 - #display_name - 3)
-      local line     = "  " .. display_name .. string.rep(" ", pad) .. "[" .. badge .. "]"
-      local fhl      = file_hl(f, "unstaged")
-      local badge_hl = STATUS_HL[f.status] or "DiffNvimStatusUntracked"
-
-      table.insert(lines, line)
-      local lnr = #lines
-      line_map[lnr] = { type = "file", section = "unstaged", file = f }
-
-      table.insert(hl_queue, { lnr - 1, fhl, 2, 2 + #display_name })
-      local badge_col = #line - 3
-      table.insert(hl_queue, { lnr - 1, badge_hl, badge_col, badge_col + 3 })
-    end
-  end
+  render_section(status.unstaged, "unstaged", "Changes")
 
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
 
-  -- Apply highlight extmarks
   for _, h in ipairs(hl_queue) do
-    local ok, err = pcall(
-      vim.api.nvim_buf_add_highlight, buf, NS, h[2], h[1], h[3], h[4]
-    )
+    local ok, err = pcall(vim.api.nvim_buf_add_highlight, buf, NS, h[2], h[1], h[3], h[4])
     if not ok then
       vim.notify("diff.nvim file_panel highlight error: " .. tostring(err), vim.log.levels.DEBUG)
     end
