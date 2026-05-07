@@ -191,6 +191,7 @@ function M.setup(buf, win, repo_root)
       collapsed[meta.section] = not collapsed[meta.section]
       M.refresh(buf, win, repo_root)
     elseif meta.type == "file" then
+      require("diff.sidebar").hide_commit_detail()
       local dv   = require("diff.diff_view")
       local file = vim.tbl_extend("force", meta.file, {
         staged = (meta.section == "staged"),

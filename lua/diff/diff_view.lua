@@ -584,6 +584,23 @@ local function setup_keymaps(left_buf, right_buf, opts)
       M.expand_context()
     end, "Expand context (+10 lines)")
 
+    -- 'l': expand collapsed separator line, otherwise keep default motion
+    map(buf, "n", "l", function()
+      local count = vim.v.count
+      local motion = (count and count > 0) and (tostring(count) .. "l") or "l"
+      local aln = (buf == left_buf) and M._left_aligned or M._right_aligned
+      local entry = nil
+      if aln then
+        local cur = vim.api.nvim_win_get_cursor(0)[1]
+        entry = aln[cur]
+      end
+      if entry and entry.type == "separator" then
+        M.expand_context()
+      else
+        vim.api.nvim_feedkeys(motion, "n", false)
+      end
+    end, "Expand separator / move right")
+
     -- Expand all (zR)
     map(buf, "n", km.expand_all or "zR", function()
       M.expand_all()

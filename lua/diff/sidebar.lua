@@ -3,6 +3,7 @@ local M = {}
 local file_panel   = require("diff.file_panel")
 local commit_panel = require("diff.commit_panel")
 local config       = require("diff.config")
+local git          = require("diff.git")
 
 -- ---------------------------------------------------------------------------
 -- Module-level state
@@ -10,8 +11,10 @@ local config       = require("diff.config")
 
 M._file_win      = nil
 M._commit_win    = nil
+M._detail_win    = nil
 M._file_buf      = nil
 M._commit_buf    = nil
+M._detail_buf    = nil
 M._main_win      = nil   -- the main editing area (right side) for diff panes
 M._repo_root     = nil
 M._aug           = nil   -- augroup for auto-refresh
@@ -21,6 +24,7 @@ M._notes_win     = nil   -- notes right-side split window
 M._notes_buf     = nil   -- notes buffer
 M._fs_watcher    = nil   -- libuv fs_event handle for .git/index watch
 M._debounce_timer = nil  -- pending debounce timer for fs_event (module-level for cleanup)
+M._detail_req_id = 0     -- monotonic request id for async commit-detail fetches
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -35,8 +39,10 @@ end
 local function clear_panel_state()
   M._file_win   = nil
   M._commit_win = nil
+  M._detail_win = nil
   M._file_buf   = nil
   M._commit_buf = nil
+  M._detail_buf = nil
 end
 
 local function clear_notes_state()
@@ -54,7 +60,7 @@ end
 --- Return the tabpage that owns any tracked diff.nvim window.
 --- @return integer|nil
 local function get_diff_tab()
-  for _, win in ipairs({ M._file_win, M._commit_win, M._notes_win, M._main_win }) do
+  for _, win in ipairs({ M._file_win, M._detail_win, M._commit_win, M._notes_win, M._main_win }) do
     if is_valid_win(win) then
       return vim.api.nvim_win_get_tabpage(win)
     end
@@ -77,6 +83,16 @@ local function cancel_debounce_timer()
   if M._debounce_timer then
     pcall(function() M._debounce_timer:stop() M._debounce_timer:close() end)
     M._debounce_timer = nil
+  end
+end
+
+local function stop_fs_watcher()
+  if M._fs_watcher then
+    pcall(function()
+      M._fs_watcher:stop()
+      M._fs_watcher:close()
+    end)
+    M._fs_watcher = nil
   end
 end
 
@@ -116,6 +132,40 @@ local function set_panel_win_opts(win)
   for k, v in pairs(wopts) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
+end
+
+local function set_detail_win_opts(win)
+  set_panel_win_opts(win)
+  local wopts = {
+    wrap           = true,
+    linebreak      = true,
+    number         = false,
+    relativenumber = false,
+  }
+  for k, v in pairs(wopts) do
+    pcall(vim.api.nvim_set_option_value, k, v, { win = win })
+  end
+end
+
+local function layout_two_panels()
+  if not is_valid_win(M._file_win) or not is_valid_win(M._commit_win) then return end
+  local total_h = vim.api.nvim_win_get_height(M._file_win)
+                + vim.api.nvim_win_get_height(M._commit_win)
+                + 1
+  local file_h  = math.max(4, math.floor(total_h * 0.60))
+  vim.api.nvim_win_set_height(M._file_win, file_h)
+end
+
+local function layout_three_panels()
+  if not is_valid_win(M._file_win) or not is_valid_win(M._detail_win) or not is_valid_win(M._commit_win) then return end
+  local total_h = vim.api.nvim_win_get_height(M._file_win)
+                + vim.api.nvim_win_get_height(M._detail_win)
+                + vim.api.nvim_win_get_height(M._commit_win)
+                + 2
+  local file_h   = math.max(3, math.floor(total_h * 0.40))
+  local detail_h = math.max(3, math.floor(total_h * 0.20))
+  vim.api.nvim_win_set_height(M._file_win, file_h)
+  vim.api.nvim_win_set_height(M._detail_win, detail_h)
 end
 
 --- Save the current window/buffer layout so it can be restored later.
@@ -216,11 +266,7 @@ function M.open(repo_root)
   M._commit_buf = commit_buf
 
   -- Size: file panel ≈ 60%, commit panel ≈ 40%
-  local total_h  = vim.api.nvim_win_get_height(M._file_win)
-                 + vim.api.nvim_win_get_height(commit_win)
-                 + 1  -- status line separator
-  local file_h   = math.max(4, math.floor(total_h * 0.60))
-  vim.api.nvim_win_set_height(M._file_win, file_h)
+  layout_two_panels()
 
   set_panel_win_opts(M._file_win)
   set_panel_win_opts(M._commit_win)
@@ -271,10 +317,7 @@ function M.close()
   end
 
   -- Stop the filesystem watcher if running
-  if M._fs_watcher then
-    pcall(function() M._fs_watcher:stop() end)
-    M._fs_watcher = nil
-  end
+  stop_fs_watcher()
 
   -- Cancel any pending debounce timer
   cancel_debounce_timer()
@@ -284,6 +327,8 @@ function M.close()
   -- Close the notes panel split if open
   close_tracked_win(M._notes_win)
   clear_notes_state()
+  commit_panel.close_tooltip()
+  M.hide_commit_detail()
 
   -- Note: We intentionally do NOT delete M._aug (auto-refresh augroup) here.
   -- The callback checks M.is_open() so it's harmless when closed,
@@ -324,22 +369,33 @@ function M.toggle_sidebar_panel()
 
   local cfg   = config.get()
   local width = cfg.sidebar_width or 40
+  local caller_tab = vim.api.nvim_get_current_tabpage()
+  local caller_win = vim.api.nvim_get_current_win()
 
   if not M._sidebar_hidden then
     -- Hide: close the two sidebar windows
+    M.hide_commit_detail()
     close_tracked_win(M._file_win)
     close_tracked_win(M._commit_win)
     clear_panel_state()
     M._sidebar_hidden = true
   else
     -- Show: recreate the sidebar split alongside the diff area.
+    local diff_tab = get_diff_tab()
+    if not diff_tab or not vim.api.nvim_tabpage_is_valid(diff_tab) then return end
+    if vim.api.nvim_get_current_tabpage() ~= diff_tab then
+      local ok_tab = pcall(vim.api.nvim_set_current_tabpage, diff_tab)
+      if not ok_tab then return end
+    end
+
+    local tab_wins = vim.api.nvim_tabpage_list_wins(diff_tab)
     local target_win = nil
     local position = cfg.sidebar_position == "right" and "botright" or "topleft"
 
     if cfg.sidebar_position == "right" then
       -- Sidebar goes on the right — split from the rightmost window
       local best_col = -1
-      for _, win in ipairs(vim.api.nvim_list_wins()) do
+      for _, win in ipairs(tab_wins) do
         if vim.api.nvim_win_is_valid(win) then
           local pos = vim.api.nvim_win_get_position(win)
           if pos[2] > best_col then
@@ -351,7 +407,7 @@ function M.toggle_sidebar_panel()
     else
       -- Sidebar goes on the left — split from the leftmost window
       local best_col = math.huge
-      for _, win in ipairs(vim.api.nvim_list_wins()) do
+      for _, win in ipairs(tab_wins) do
         if vim.api.nvim_win_is_valid(win) then
           local pos = vim.api.nvim_win_get_position(win)
           if pos[2] < best_col then
@@ -382,11 +438,7 @@ function M.toggle_sidebar_panel()
     M._commit_buf = commit_buf
 
     -- Size: file panel ≈ 60%
-    local total_h = vim.api.nvim_win_get_height(M._file_win)
-                  + vim.api.nvim_win_get_height(commit_win)
-                  + 1
-    local file_h  = math.max(4, math.floor(total_h * 0.60))
-    vim.api.nvim_win_set_height(M._file_win, file_h)
+    layout_two_panels()
 
     set_panel_win_opts(M._file_win)
     set_panel_win_opts(M._commit_win)
@@ -402,8 +454,81 @@ function M.toggle_sidebar_panel()
     -- Refresh using cached state
     M.refresh()
 
-    -- Restore focus to file panel
-    vim.api.nvim_set_current_win(M._file_win)
+    -- Restore caller focus when possible; otherwise focus file panel.
+    local restored = false
+    if caller_tab and vim.api.nvim_tabpage_is_valid(caller_tab) then
+      if vim.api.nvim_get_current_tabpage() ~= caller_tab then
+        restored = pcall(vim.api.nvim_set_current_tabpage, caller_tab)
+      else
+        restored = true
+      end
+      if restored and caller_win and vim.api.nvim_win_is_valid(caller_win) then
+        restored = pcall(vim.api.nvim_set_current_win, caller_win)
+      end
+    end
+    if not restored and is_valid_win(M._file_win) then
+      pcall(vim.api.nvim_set_current_win, M._file_win)
+    end
+  end
+end
+
+--- Show commit details in a panel between file and commit panels.
+--- @param hash string
+function M.show_commit_detail(hash)
+  if not hash or hash == "" then return end
+  if M._sidebar_hidden then return end
+  if not is_valid_win(M._file_win) or not is_valid_win(M._commit_win) then return end
+  local root = M._repo_root
+  if not root or root == "" then return end
+
+  M._detail_req_id = M._detail_req_id + 1
+  local req_id = M._detail_req_id
+
+  git.run({ "show", "--no-patch", "--format=fuller", hash }, root, function(lines, stderr, code)
+    if req_id ~= M._detail_req_id then return end
+    if code ~= 0 then
+      vim.notify("diff.nvim: cannot fetch commit detail: " .. (stderr or ""), vim.log.levels.WARN)
+      return
+    end
+    if req_id ~= M._detail_req_id then return end
+    if M._repo_root ~= root then return end
+    if M._sidebar_hidden then return end
+    if not is_valid_win(M._file_win) or not is_valid_win(M._commit_win) then return end
+
+    if not M._detail_buf or not vim.api.nvim_buf_is_valid(M._detail_buf) then
+      M._detail_buf = make_panel_buf("diff://commit-detail")
+    end
+
+    vim.api.nvim_set_option_value("modifiable", true, { buf = M._detail_buf })
+    vim.api.nvim_buf_set_lines(M._detail_buf, 0, -1, false, lines)
+    vim.api.nvim_set_option_value("modifiable", false, { buf = M._detail_buf })
+
+    if not is_valid_win(M._detail_win) then
+      local focus = vim.api.nvim_get_current_win()
+      if pcall(vim.api.nvim_set_current_win, M._file_win) then
+        vim.cmd("rightbelow split")
+        M._detail_win = vim.api.nvim_get_current_win()
+        vim.api.nvim_win_set_buf(M._detail_win, M._detail_buf)
+        pcall(vim.api.nvim_set_current_win, focus)
+      end
+    else
+      vim.api.nvim_win_set_buf(M._detail_win, M._detail_buf)
+    end
+
+    if is_valid_win(M._detail_win) then
+      set_detail_win_opts(M._detail_win)
+      layout_three_panels()
+    end
+  end)
+end
+
+--- Hide commit detail panel and restore two-panel sizing.
+function M.hide_commit_detail()
+  M._detail_req_id = M._detail_req_id + 1
+  close_tracked_win(M._detail_win)
+  M._detail_win = nil
+  if is_valid_win(M._file_win) and is_valid_win(M._commit_win) then
+    layout_two_panels()
   end
 end
 
@@ -481,10 +606,7 @@ end
 --- Start (or restart) the libuv filesystem watcher on .git/index.
 function M._start_fs_watcher()
   -- Stop any previous watcher
-  if M._fs_watcher then
-    pcall(function() M._fs_watcher:stop() end)
-    M._fs_watcher = nil
-  end
+  stop_fs_watcher()
 
   -- Cancel any pending debounce timer from the old watcher
   cancel_debounce_timer()
@@ -516,7 +638,10 @@ function M._start_fs_watcher()
   if started then
     M._fs_watcher = fs_event
   else
-    pcall(function() fs_event:stop() end)
+    pcall(function()
+      fs_event:stop()
+      fs_event:close()
+    end)
   end
 end
 

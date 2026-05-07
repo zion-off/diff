@@ -207,6 +207,7 @@ end
 
 --- Close any existing tooltip, cleaning up module state.
 local function close_tooltip()
+  M._tooltip_req_id = M._tooltip_req_id + 1
   if M._tooltip_win and vim.api.nvim_win_is_valid(M._tooltip_win) then
     pcall(vim.api.nvim_win_close, M._tooltip_win, true)
   end
@@ -401,6 +402,7 @@ function M.setup(buf, win, repo_root)
         end
       end
     elseif meta.type == "commit_file" then
+      require("diff.sidebar").show_commit_detail(meta.commit.hash)
       local ok, dv_err = pcall(function()
         local dv = require("diff.diff_view")
         dv.open_commit_diff(repo_root, meta.commit.hash, meta.file.path, meta.file.status_char)
@@ -448,5 +450,7 @@ function M.refresh(buf, win, repo_root)
     render(buf, _commits)
   end)
 end
+
+M.close_tooltip = close_tooltip
 
 return M
