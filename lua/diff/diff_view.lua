@@ -41,6 +41,11 @@ M._current_ft       = nil
 -- Single-pane mode
 M._single_pane      = false
 
+-- Live file-watcher state (for unstaged files open in the diff viewer)
+M._file_watcher       = nil   -- libuv fs_event handle
+M._file_watcher_timer = nil   -- pending debounce timer
+M._watched_file_info  = nil   -- {repo_root, file_info} saved for re-open on change
+
 -- ---------------------------------------------------------------------------
 -- Highlight priorities (relative to tree-sitter's default of 100)
 -- ---------------------------------------------------------------------------
@@ -139,8 +144,65 @@ local function set_buf_filetype(buf, ft)
   start_buf_syntax(buf, ft)
 end
 
---- Close any open diff pane windows safely.
+--- Stop the live file watcher and cancel any pending debounce timer.
+local function stop_file_watcher()
+  if M._file_watcher_timer then
+    pcall(function() M._file_watcher_timer:stop() end)
+    M._file_watcher_timer = nil
+  end
+  if M._file_watcher then
+    pcall(function()
+      M._file_watcher:stop()
+      M._file_watcher:close()
+    end)
+    M._file_watcher = nil
+  end
+  M._watched_file_info = nil
+end
+
+--- Start watching an absolute file path and re-open the diff on changes.
+--- Only used for unstaged working-tree files.
+--- @param abs_path  string   Absolute path to watch
+--- @param repo_root string
+--- @param file_info table    {path, status, staged, ...}
+local function start_file_watcher(abs_path, repo_root, file_info)
+  stop_file_watcher()
+
+  local uv = vim.uv or vim.loop
+  local ok, fs_event = pcall(uv.new_fs_event)
+  if not ok or not fs_event then return end
+
+  local started = fs_event:start(abs_path, {}, vim.schedule_wrap(function(err, _, _)
+    if err then return end
+    -- Cancel any pending debounce
+    if M._file_watcher_timer then
+      pcall(function() M._file_watcher_timer:stop() end)
+      M._file_watcher_timer = nil
+    end
+    M._file_watcher_timer = vim.defer_fn(function()
+      M._file_watcher_timer = nil
+      -- Only refresh if a diff view is still open
+      if M._left_buf or M._right_buf then
+        M.open_file_diff(repo_root, file_info)
+      end
+    end, 300)
+  end))
+
+  if started then
+    M._file_watcher     = fs_event
+    M._watched_file_info = { repo_root = repo_root, file_info = file_info }
+  else
+    pcall(function()
+      fs_event:stop()
+      fs_event:close()
+    end)
+  end
+end
+
 local function close_diff_wins()
+  -- Stop any live file watcher before tearing down windows/buffers
+  stop_file_watcher()
+
   if M._scroll_aug then
     pcall(vim.api.nvim_del_augroup_by_id, M._scroll_aug)
     M._scroll_aug = nil
@@ -1043,6 +1105,18 @@ function M.open_file_diff(repo_root, file_info)
       if not open_ok then
         vim.notify("diff.nvim: error rendering diff: " .. tostring(open_err), vim.log.levels.ERROR)
         close_diff_wins()
+        return
+      end
+
+      -- For unstaged working-tree files, watch the file on disk so the diff
+      -- view live-updates whenever the file is saved externally.
+      if not file_info.staged and file_info.status ~= "untracked" then
+        local abs_path = repo_root .. "/" .. file_info.path
+        start_file_watcher(abs_path, repo_root, file_info)
+      else
+        -- Staged / untracked files don't benefit from disk watching; clear any
+        -- previous watcher that may have been left over.
+        stop_file_watcher()
       end
     end
 
