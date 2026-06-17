@@ -157,6 +157,56 @@ function M.get_status(root, callback)
 end
 
 -- ---------------------------------------------------------------------------
+-- Diffstat (per-file insertions/deletions)
+-- ---------------------------------------------------------------------------
+
+--- Parse `git diff --numstat` output into a map keyed by path.
+--- Each value: { added = number|nil, deleted = number|nil, binary = boolean }.
+--- numstat reports "-" for binary files.
+--- @param lines string[]
+--- @return table<string, {added: number|nil, deleted: number|nil, binary: boolean}>
+local function parse_numstat(lines)
+  local map = {}
+  for _, line in ipairs(lines) do
+    if line ~= "" then
+      local a, d, rest = line:match("^(%S+)\t(%S+)\t(.+)$")
+      if a and d and rest then
+        -- For renames, numstat path may be "old => new" or use brace syntax.
+        -- Use the new path (last segment after " => ") when present.
+        local path = rest
+        local arrow = rest:find(" => ", 1, true)
+        if arrow then
+          path = rest:sub(arrow + 4):gsub("[}].*$", function(s) return s end)
+        end
+        local binary = (a == "-" or d == "-")
+        map[path] = {
+          added   = tonumber(a),
+          deleted = tonumber(d),
+          binary  = binary,
+        }
+      end
+    end
+  end
+  return map
+end
+
+--- Get per-file insertion/deletion counts for the working tree and index.
+--- @param root     string
+--- @param callback fun(stats: {staged: table, unstaged: table}, err: string|nil)
+---   stats.staged / stats.unstaged are maps: path -> {added, deleted, binary}
+function M.get_diffstat(root, callback)
+  M.run({ "diff", "--no-ext-diff", "--numstat", "--cached" }, root,
+    function(staged_lines, _, staged_code)
+      local staged = staged_code == 0 and parse_numstat(staged_lines) or {}
+      M.run({ "diff", "--no-ext-diff", "--numstat" }, root,
+        function(unstaged_lines, stderr, code)
+          local unstaged = code == 0 and parse_numstat(unstaged_lines) or {}
+          callback({ staged = staged, unstaged = unstaged }, code ~= 0 and stderr or nil)
+        end)
+    end)
+end
+
+-- ---------------------------------------------------------------------------
 -- Diffs
 -- ---------------------------------------------------------------------------
 
@@ -249,7 +299,15 @@ function M.get_commits(root, n, callback)
             for r in refs_str:gmatch("[^,]+") do
               local trimmed = r:gsub("^%s+", ""):gsub("%s+$", "")
               if trimmed ~= "" then
-                table.insert(refs, trimmed)
+                -- git emits the current branch as "HEAD -> main"; split it into
+                -- two distinct refs so each gets its own pill/colour.
+                local head, branch = trimmed:match("^(HEAD)%s*%->%s*(.+)$")
+                if head and branch then
+                  table.insert(refs, head)
+                  table.insert(refs, branch)
+                else
+                  table.insert(refs, trimmed)
+                end
               end
             end
           end
@@ -304,14 +362,61 @@ function M.get_commit_diff(root, hash, file_path, callback)
 end
 
 -- ---------------------------------------------------------------------------
+-- Commit message body (subject + full description)
+-- ---------------------------------------------------------------------------
+
+--- Fetch the full commit message (subject + body) for a hash.
+--- @param root     string
+--- @param hash     string
+--- @param callback fun(lines: string[]|nil, err: string|nil)
+---   lines: the raw message lines with trailing blank lines stripped.
+function M.get_commit_body(root, hash, callback)
+  M.run({ "show", "--no-patch", "--format=%B", hash }, root, function(lines, stderr, code)
+    if code ~= 0 then
+      callback(nil, stderr ~= "" and stderr or "cannot fetch commit message")
+      return
+    end
+    -- Strip trailing blank lines.
+    while #lines > 0 and lines[#lines] == "" do
+      table.remove(lines)
+    end
+    callback(lines, nil)
+  end)
+end
+
+--- Fetch the aggregate stat summary line for a commit, e.g.
+--- "3 files changed, 40 insertions(+), 12 deletions(-)".
+--- @param root     string
+--- @param hash     string
+--- @param callback fun(summary: string|nil, err: string|nil)
+function M.get_commit_stat(root, hash, callback)
+  M.run({ "show", "--stat", "--format=", hash }, root, function(lines, stderr, code)
+    if code ~= 0 then
+      callback(nil, stderr ~= "" and stderr or "cannot fetch commit stat")
+      return
+    end
+    -- The summary is the last non-empty line containing "changed".
+    local summary = ""
+    for i = #lines, 1, -1 do
+      if lines[i]:match("changed") then
+        summary = lines[i]:gsub("^%s+", ""):gsub("%s+$", "")
+        break
+      end
+    end
+    callback(summary, nil)
+  end)
+end
+
+-- ---------------------------------------------------------------------------
 -- Commit file list
 -- ---------------------------------------------------------------------------
 
---- Get the list of files changed in a commit.
+--- Get the list of files changed in a commit, with per-file diffstat counts.
 --- @param root     string
 --- @param hash     string
 --- @param callback fun(files: table[]|nil, err: string|nil)
----   Each file entry: { path = string, old_path = string|nil, status = string, status_char = string }
+---   Each file entry: { path, old_path|nil, status, status_char,
+---                      stat = { added, deleted, binary } | nil }
 function M.get_commit_files(root, hash, callback)
   M.run(
     { "diff-tree", "--no-commit-id", "-r", "--name-status", hash },
@@ -349,7 +454,21 @@ function M.get_commit_files(root, hash, callback)
         ::next::
       end
 
-      callback(files, nil)
+      -- Fetch per-file numstat and merge counts onto each entry by path.
+      -- Best-effort: if it fails, return the files without stats.
+      M.run(
+        { "diff-tree", "--no-commit-id", "-r", "--numstat", hash },
+        root,
+        function(ns_lines, _, ns_code)
+          if ns_code == 0 then
+            local stats = parse_numstat(ns_lines)
+            for _, f in ipairs(files) do
+              f.stat = stats[f.path]
+            end
+          end
+          callback(files, nil)
+        end
+      )
     end
   )
 end

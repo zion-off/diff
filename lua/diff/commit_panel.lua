@@ -2,6 +2,7 @@ local M = {}
 
 local git    = require("diff.git")
 local config = require("diff.config")
+local util   = require("diff.util")
 
 local NS = vim.api.nvim_create_namespace("diff_nvim_commit_panel")
 
@@ -18,6 +19,13 @@ local expanded = {}
 
 -- cached file lists per commit hash
 local file_cache = {}
+
+-- cached full commit message bodies per commit hash (string[])
+local body_cache = {}
+
+-- cached aggregate stat summary per commit hash (string, e.g.
+-- "3 files changed, 40 insertions(+), 12 deletions(-)")
+local stat_cache = {}
 
 -- Track the currently open tooltip window so rapid K presses don't stack
 -- multiple tooltips and so cleanup is always possible.
@@ -49,20 +57,8 @@ end
 -- Render
 -- ---------------------------------------------------------------------------
 
---- Truncate a string to max_len display columns, appending "..." if truncated.
---- Handles multibyte characters correctly.
---- @param s       string
---- @param max_len integer
---- @return string
-local function trunc(s, max_len)
-  local display_w = vim.fn.strdisplaywidth(s)
-  if display_w <= max_len then return s end
-  local result = vim.fn.strcharpart(s, 0, max_len - 1)
-  while vim.fn.strdisplaywidth(result) >= max_len and #result > 0 do
-    result = vim.fn.strcharpart(result, 0, vim.fn.strchars(result) - 1)
-  end
-  return result .. "…"
-end
+-- Multibyte-safe truncation (head-keeping). Provided by the shared util module.
+local trunc = util.trunc
 
 local STATUS_BADGE = {
   modified  = "M",
@@ -74,6 +70,41 @@ local STATUS_BADGE = {
   untracked = "?",
   unknown   = "·",
 }
+
+local STATUS_HL = {
+  modified  = "DiffNvimStatusModified",
+  added     = "DiffNvimStatusAdded",
+  deleted   = "DiffNvimStatusDeleted",
+  renamed   = "DiffNvimStatusRenamed",
+  copied    = "DiffNvimStatusRenamed",
+  unmerged  = "DiffNvimStatusModified",
+  untracked = "DiffNvimStatusUntracked",
+  unknown   = "DiffNvimStatusUntracked",
+}
+
+--- Build the right-aligned diffstat segment for a commit file, e.g. "  +12 -3".
+--- Returns: text, add_range {s,e}|nil, del_range {s,e}|nil (byte offsets within text).
+local function commit_diffstat_segment(f)
+  local st = f.stat
+  if not st then return "", nil, nil end
+  if st.binary then return "  bin", nil, nil end
+  local added, deleted = st.added or 0, st.deleted or 0
+  if added == 0 and deleted == 0 then return "", nil, nil end
+  local text = "  "
+  local add_range, del_range
+  if added > 0 then
+    local s = #text
+    text = text .. "+" .. added
+    add_range = { s, #text }
+  end
+  if deleted > 0 then
+    if added > 0 then text = text .. " " end
+    local s = #text
+    text = text .. "-" .. deleted
+    del_range = { s, #text }
+  end
+  return text, add_range, del_range
+end
 
 --- Render commits into buf and populate line_map.
 --- @param buf     integer
@@ -89,100 +120,198 @@ local function render(buf, commits)
   local cfg     = config.get()
   local panel_w = cfg.sidebar_width or 40
 
-  local HASH_W   = 7
-  local AUTHOR_W = 12
-  local TIME_W   = 10
+  local HASH_W = 7
+  -- Indentation for the dim metadata line beneath each subject. Aligns roughly
+  -- under the subject text (arrow "▸ " + hash + space).
+  local META_INDENT = "  "
 
   for _, commit in ipairs(commits) do
-    -- Build ref badges string
-    local ref_parts  = {}
-    local refs_plain = ""
-
-    for _, r in ipairs(commit.refs or {}) do
-      local badge = " [" .. r .. "]"
-      table.insert(ref_parts, { text = badge, hl = ref_hl(r) })
-      refs_plain = refs_plain .. badge
-    end
-
-    -- Compute available width for the subject
-    local prefix_w  = 2 + HASH_W + 1
-    local suffix_w  = 2 + AUTHOR_W + 2 + TIME_W
-    local refs_w    = #refs_plain
-    local subject_w = math.max(4, panel_w - prefix_w - refs_w - suffix_w - 2)
-
-    local hash_str    = commit.short_hash or commit.hash:sub(1, HASH_W)
-    local author_str  = trunc(commit.author or "", AUTHOR_W)
-    local time_str    = trunc(commit.time   or "", TIME_W)
-    local subject_str = trunc(commit.subject or "", subject_w)
-
     -- Expand/collapse indicator
     local is_expanded = expanded[commit.hash] or false
     local arrow = is_expanded and "▾ " or "▸ "
 
-    -- Build full line
-    local seg_hash    = arrow .. hash_str .. " "
-    local seg_refs    = refs_plain
-    local seg_subject = subject_str
-    local fixed_w = #seg_hash + #seg_refs + #seg_subject + #author_str + 2 + #time_str
-    local pad     = math.max(1, panel_w - fixed_w)
-    local line = seg_hash .. seg_refs .. seg_subject
-                 .. string.rep(" ", pad)
-                 .. author_str .. "  " .. time_str
+    local hash_str = commit.short_hash or commit.hash:sub(1, HASH_W)
 
-    table.insert(lines, line)
-    local lnr   = #lines
-    local lnr_0 = lnr - 1
-    line_map[lnr] = { type = "commit", commit = commit }
+    -- ----- Line 1: arrow + hash + full-width subject -----
+    local seg_hash    = arrow .. hash_str .. "  "
+    local subject_w   = math.max(8, panel_w - #seg_hash)
+    local subject_str = trunc(commit.subject or "", subject_w)
+    local line1       = seg_hash .. subject_str
 
-    -- Highlight hash
+    table.insert(lines, line1)
+    local l1   = #lines
+    local l1_0 = l1 - 1
+    line_map[l1] = { type = "commit", commit = commit }
+
+    -- Highlight hash (after the arrow) and subject.
     local hash_col_s = #arrow
-    local hash_col_e = hash_col_s + #hash_str
-    table.insert(hl_queue, { lnr_0, "DiffNvimCommitHash", hash_col_s, hash_col_e })
+    table.insert(hl_queue, { l1_0, "DiffNvimCommitHash", hash_col_s, hash_col_s + #hash_str })
+    table.insert(hl_queue, { l1_0, "DiffNvimCommitSubject", #seg_hash, #line1 })
 
-    -- Highlight ref badges
-    local ref_cursor = #seg_hash
-    for _, rp in ipairs(ref_parts) do
-      table.insert(hl_queue, { lnr_0, rp.hl, ref_cursor, ref_cursor + #rp.text })
-      ref_cursor = ref_cursor + #rp.text
+    -- ----- Line 2: dim "author · time" + ref pills -----
+    local author = trunc(commit.author or "", math.max(8, math.floor(panel_w / 2)))
+    local time   = commit.time or ""
+    local meta   = META_INDENT .. author
+    if time ~= "" then
+      meta = meta .. " · " .. time
     end
 
-    -- Highlight subject
-    local subj_col_s = #seg_hash + #seg_refs
-    local subj_col_e = subj_col_s + #seg_subject
-    table.insert(hl_queue, { lnr_0, "DiffNvimCommitSubject", subj_col_s, subj_col_e })
+    -- Append ref pills (e.g. [HEAD] [main]) if they fit.
+    local ref_segments = {}
+    for _, r in ipairs(commit.refs or {}) do
+      local pill = " [" .. r .. "]"
+      if vim.fn.strdisplaywidth(meta .. pill) <= panel_w then
+        local start_col = #meta
+        meta = meta .. pill
+        table.insert(ref_segments, { s = start_col, e = #meta, hl = ref_hl(r) })
+      end
+    end
 
-    -- Highlight author
-    local author_col_s = #line - #time_str - 2 - #author_str
-    local author_col_e = author_col_s + #author_str
-    table.insert(hl_queue, { lnr_0, "DiffNvimCommitAuthor", author_col_s, author_col_e })
+    table.insert(lines, meta)
+    local l2   = #lines
+    local l2_0 = l2 - 1
+    -- The metadata line belongs to the same commit so clicking it still works.
+    line_map[l2] = { type = "commit", commit = commit }
 
-    -- Highlight time
-    local time_col_s = #line - #time_str
-    table.insert(hl_queue, { lnr_0, "DiffNvimCommitTime", time_col_s, #line })
+    -- Dim the whole author/time portion.
+    local meta_end = #META_INDENT + #author + (time ~= "" and (#" · " + #time) or 0)
+    table.insert(hl_queue, { l2_0, "DiffNvimCommitMeta", 0, meta_end })
+    -- Color the ref pills.
+    for _, seg in ipairs(ref_segments) do
+      table.insert(hl_queue, { l2_0, seg.hl, seg.s, seg.e })
+    end
 
-    -- Expanded file list beneath this commit
-    if is_expanded and file_cache[commit.hash] then
-      for _, f in ipairs(file_cache[commit.hash]) do
-        local badge = STATUS_BADGE[f.status] or "·"
-        local fname = f.path
-        local available = panel_w - 6 - 4
-        local fname_w = vim.fn.strdisplaywidth(fname)
-        local display_name = fname_w > available
-          and ("…" .. fname:sub(-(available - 1)))
-          or fname
-        local display_w = vim.fn.strdisplaywidth(display_name)
-        local fpad = math.max(1, panel_w - 4 - display_w - 4)
-        local fline = "    " .. display_name .. string.rep(" ", fpad) .. " [" .. badge .. "]"
+    -- ----- Expanded: full commit message body, then the file list -----
+    if is_expanded then
+      -- Expanded content is flush with the metadata (author) line beneath each
+      -- commit subject, so it reads as a continuation of that commit block.
+      local indent = META_INDENT
 
-        table.insert(lines, fline)
-        local flnr = #lines
-        line_map[flnr] = { type = "commit_file", commit = commit, file = f }
+      -- Full commit message, untruncated. The collapsed row only shows a
+      -- truncated subject, so render the entire message here starting at line 1
+      -- (the subject) followed by the description. The subject line(s) get the
+      -- subject highlight; the rest get the dim body highlight.
+      local body = body_cache[commit.hash]
+      if body and #body > 0 then
+        local avail = math.max(8, panel_w - #indent)
+        for i = 1, #body do
+          local raw = body[i]
+          local hl  = (i == 1) and "DiffNvimCommitSubject" or "DiffNvimCommitBody"
+          if raw == "" then
+            table.insert(lines, "")
+            line_map[#lines] = { type = "commit_body", commit = commit }
+          else
+            -- Word-wrap at space boundaries; long words are hard-broken.
+            for _, chunk in ipairs(util.wrap(raw, avail)) do
+              local bline = indent .. chunk
+              table.insert(lines, bline)
+              local bl = #lines
+              line_map[bl] = { type = "commit_body", commit = commit }
+              table.insert(hl_queue, { bl - 1, hl, #indent, #bline })
+            end
+          end
+        end
+        -- Blank spacer between message and stat/file list.
+        table.insert(lines, "")
+        line_map[#lines] = { type = "commit_body", commit = commit }
+      end
 
-        -- Highlight filename
-        table.insert(hl_queue, { flnr - 1, "DiffNvimCommitFileEntry", 4, 4 + #display_name })
-        -- Highlight badge
-        local badge_col = #fline - 3
-        table.insert(hl_queue, { flnr - 1, "DiffNvimStatusModified", badge_col, badge_col + 3 })
+      -- Aggregate stat summary, rendered compactly as "+N -M" (green / red).
+      local stat = stat_cache[commit.hash]
+      if stat and stat ~= "" then
+        local ins = tonumber(stat:match("(%d+) insertions?%(%+%)")) or 0
+        local del = tonumber(stat:match("(%d+) deletions?%(%-?%)")) or 0
+        if ins > 0 or del > 0 then
+          local stat_line = indent
+          local add_range, del_range
+          if ins > 0 then
+            local s = #stat_line
+            stat_line = stat_line .. "+" .. ins
+            add_range = { s, #stat_line }
+          end
+          if del > 0 then
+            if ins > 0 then stat_line = stat_line .. " " end
+            local s = #stat_line
+            stat_line = stat_line .. "-" .. del
+            del_range = { s, #stat_line }
+          end
+
+          table.insert(lines, stat_line)
+          local sl_0 = #lines - 1
+          line_map[#lines] = { type = "commit_body", commit = commit }
+          if add_range then
+            table.insert(hl_queue, { sl_0, "DiffNvimStatAdded", add_range[1], add_range[2] })
+          end
+          if del_range then
+            table.insert(hl_queue, { sl_0, "DiffNvimStatRemoved", del_range[1], del_range[2] })
+          end
+        end
+      end
+
+      -- Changed-file list, rendered as a directory tree (same structure as the
+      -- file panel). Base indent is META_INDENT; each tree depth nests further.
+      if file_cache[commit.hash] then
+        local tree = util.build_file_tree(file_cache[commit.hash])
+
+        local render_tree_node  -- forward declaration for mutual recursion
+
+        local function render_tree_dir(node, depth)
+          local display, cur = util.compact_dir_chain(node)
+          local pad   = indent .. string.rep("  ", depth)
+          local avail = math.max(1, panel_w - #pad - 1)
+          local name  = util.trunc_middle(display, avail)
+          local dline = pad .. name .. "/"
+          table.insert(lines, dline)
+          local dl = #lines
+          line_map[dl] = { type = "commit_dir", commit = commit }
+          table.insert(hl_queue, { dl - 1, "Comment", #pad, #pad + #name + 1 })
+          for _, child in ipairs(util.sort_tree_children(cur.children)) do
+            render_tree_node(child, depth + 1)
+          end
+        end
+
+        render_tree_node = function(node, depth)
+          if not node.file then
+            render_tree_dir(node, depth)
+            return
+          end
+          local f     = node.file
+          local pad   = indent .. string.rep("  ", depth)
+          local badge = STATUS_BADGE[f.status] or "·"
+
+          local stat_text, add_range, del_range = commit_diffstat_segment(f)
+          local right_w = 3 + #stat_text  -- "[X]" is 3 cols
+
+          local avail = math.max(1, panel_w - #pad - right_w - 1)
+          local name  = util.trunc_middle(node.name, avail)
+          local name_w = vim.fn.strdisplaywidth(name)
+          local gap   = math.max(1, panel_w - #pad - name_w - right_w)
+          local fline = pad .. name .. string.rep(" ", gap) .. "[" .. badge .. "]" .. stat_text
+
+          table.insert(lines, fline)
+          local flnr   = #lines
+          local flnr_0 = flnr - 1
+          line_map[flnr] = { type = "commit_file", commit = commit, file = f }
+
+          table.insert(hl_queue, { flnr_0, "DiffNvimCommitFileEntry", #pad, #pad + #name })
+          local badge_hl  = STATUS_HL[f.status] or "DiffNvimStatusUntracked"
+          local badge_col = #fline - #stat_text - 3
+          table.insert(hl_queue, { flnr_0, badge_hl, badge_col, badge_col + 3 })
+
+          local stat_base = #fline - #stat_text
+          if add_range then
+            table.insert(hl_queue, { flnr_0, "DiffNvimStatAdded",
+              stat_base + add_range[1], stat_base + add_range[2] })
+          end
+          if del_range then
+            table.insert(hl_queue, { flnr_0, "DiffNvimStatRemoved",
+              stat_base + del_range[1], stat_base + del_range[2] })
+          end
+        end
+
+        for _, child in ipairs(util.sort_tree_children(tree.children)) do
+          render_tree_node(child, 0)
+        end
       end
     end
   end
@@ -362,6 +491,8 @@ function M.setup(buf, win, repo_root)
   -- Reset state on each setup (prevents leaks between open/close cycles)
   expanded = {}
   file_cache = {}
+  body_cache = {}
+  stat_cache = {}
   line_map = {}
   _commits = nil
   -- Close any open tooltip from previous session and reset the request counter
@@ -379,30 +510,74 @@ function M.setup(buf, win, repo_root)
     local meta = line_map[lnr]
     if not meta then return end
 
-    if meta.type == "commit" then
+    if meta.type == "commit" or meta.type == "commit_body" then
       local hash = meta.commit.hash
       if expanded[hash] then
         expanded[hash] = false
         render(buf, _commits or {})
+      elseif file_cache[hash] and body_cache[hash] and stat_cache[hash] ~= nil then
+        expanded[hash] = true
+        render(buf, _commits or {})
       else
-        if file_cache[hash] then
+        -- Fetch the changed-file list, full commit message, and stat summary in
+        -- parallel; expand once all have arrived so everything renders together.
+        local pending = 3
+        local failed  = false
+        local function done()
+          pending = pending - 1
+          if pending > 0 or failed then return end
+          if not vim.api.nvim_buf_is_valid(buf) then return end
           expanded[hash] = true
           render(buf, _commits or {})
+        end
+
+        if file_cache[hash] then
+          pending = pending - 1
         else
           git.get_commit_files(repo_root, hash, function(files, err)
             if err then
               vim.notify("diff.nvim: " .. err, vim.log.levels.WARN)
+              failed = true
               return
             end
-            if not vim.api.nvim_buf_is_valid(buf) then return end
             file_cache[hash] = files or {}
+            done()
+          end)
+        end
+
+        if body_cache[hash] then
+          pending = pending - 1
+        else
+          git.get_commit_body(repo_root, hash, function(body, err)
+            if err then
+              -- Body is non-critical; degrade gracefully to file list only.
+              body_cache[hash] = {}
+            else
+              body_cache[hash] = body or {}
+            end
+            done()
+          end)
+        end
+
+        if stat_cache[hash] ~= nil then
+          pending = pending - 1
+        else
+          git.get_commit_stat(repo_root, hash, function(summary, _)
+            -- Stat is non-critical; cache empty string on failure.
+            stat_cache[hash] = summary or ""
+            done()
+          end)
+        end
+
+        -- If everything was already cached above, render immediately.
+        if pending == 0 and not failed then
+          if vim.api.nvim_buf_is_valid(buf) then
             expanded[hash] = true
             render(buf, _commits or {})
-          end)
+          end
         end
       end
     elseif meta.type == "commit_file" then
-      require("diff.sidebar").show_commit_detail(meta.commit.hash)
       local ok, dv_err = pcall(function()
         local dv = require("diff.diff_view")
         dv.open_commit_diff(repo_root, meta.commit.hash, meta.file.path, meta.file.status_char)

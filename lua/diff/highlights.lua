@@ -81,11 +81,19 @@ local function build_defaults()
     DiffNvimUnstagedFile    = { link = "Normal" },
     DiffNvimDeletedFile     = { link = "Error" },
 
+    -- File panel diffstat counts
+    DiffNvimStatAdded       = { fg = p.gutter_added,   bold = false },
+    DiffNvimStatRemoved     = { fg = p.gutter_removed, bold = false },
+
     -- Commit panel
     DiffNvimCommitHash      = { link = "Identifier" },
-    DiffNvimCommitAuthor    = { link = "Special" },
+    DiffNvimCommitAuthor    = { link = "Comment" },
     DiffNvimCommitTime      = { link = "Comment" },
     DiffNvimCommitSubject   = { link = "Normal" },
+    -- Dim metadata line beneath a commit subject (two-line layout)
+    DiffNvimCommitMeta      = { link = "Comment" },
+    -- Full commit message body shown when a commit is expanded inline
+    DiffNvimCommitBody      = { link = "Comment" },
 
     -- Ref badges
     DiffNvimRefHead         = { fg = p.ref_head, bold = true },
@@ -101,10 +109,6 @@ local function build_defaults()
 
     -- Separators (collapsed hunks)
     DiffNvimSeparator       = { fg = p.separator_fg, bg = p.separator_bg, italic = true },
-
-    -- Commit detail stat line
-    DiffNvimStatInserted    = { link = "DiffNvimStatusAdded" },
-    DiffNvimStatDeleted     = { link = "DiffNvimStatusDeleted" },
 
     -- Commit file entries
     DiffNvimCommitFileEntry = { link = "Normal" },

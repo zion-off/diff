@@ -2,6 +2,7 @@ local M = {}
 
 local git    = require("diff.git")
 local config = require("diff.config")
+local util   = require("diff.util")
 
 local NS = vim.api.nvim_create_namespace("diff_nvim_file_panel")
 
@@ -85,71 +86,59 @@ local function render(buf, status)
     end
   end
 
-  -- Build a tree from a flat list of files.
-  -- Dir nodes: { name, children={}, _dirs={} }
-  -- File nodes: { name, file=<file_info> }
-  local function build_tree(files)
-    local root = { children = {}, _dirs = {} }
-    for _, f in ipairs(files) do
-      local parts = {}
-      for part in f.path:gmatch("[^/]+") do
-        table.insert(parts, part)
-      end
-      local node = root
-      for i = 1, #parts - 1 do
-        local part = parts[i]
-        if not node._dirs[part] then
-          local dir_node = { name = part, children = {}, _dirs = {} }
-          node._dirs[part] = dir_node
-          table.insert(node.children, dir_node)
-        end
-        node = node._dirs[part]
-      end
-      table.insert(node.children, { name = parts[#parts], file = f })
-    end
-    return root
-  end
-
-  -- Sort children: directories first, then files, both alphabetically.
-  local function sorted(children)
-    local out = {}
-    for _, c in ipairs(children) do table.insert(out, c) end
-    table.sort(out, function(a, b)
-      local ad, bd = not a.file, not b.file
-      if ad ~= bd then return ad end
-      return a.name < b.name
-    end)
-    return out
-  end
+  -- Tree construction/sorting are shared via the util module.
+  local build_tree = util.build_file_tree
+  local sorted     = util.sort_tree_children
 
   local render_node  -- forward declaration for mutual recursion
 
   local function render_dir(node, depth, section)
     -- Compact single-child-dir chains: "src/" + "components/" → "src/components/"
-    local display = node.name
-    local cur     = node
-    while true do
-      local dir_kids, has_files = {}, false
-      for _, c in ipairs(cur.children) do
-        if c.file then has_files = true
-        else table.insert(dir_kids, c) end
-      end
-      if not has_files and #dir_kids == 1 then
-        cur     = dir_kids[1]
-        display = display .. "/" .. cur.name
-      else break end
-    end
+    local display, cur = util.compact_dir_chain(node)
 
-    local indent   = string.rep("  ", depth + 1)
-    local dir_line = indent .. display .. "/"
+    local indent = string.rep("  ", depth + 1)
+    -- Middle-ellipsize the (possibly long, compacted) dir path; reserve 1 col
+    -- for the trailing "/".
+    local avail        = math.max(1, panel_w - #indent - 1)
+    local display_name = util.trunc_middle(display, avail)
+    local dir_line     = indent .. display_name .. "/"
     table.insert(lines, dir_line)
     local lnr = #lines
     line_map[lnr] = { type = "dir_node", section = section }
-    table.insert(hl_queue, { lnr - 1, "Comment", #indent, #indent + #display + 1 })
+    table.insert(hl_queue, { lnr - 1, "Comment", #indent, #indent + #display_name + 1 })
 
     for _, child in ipairs(sorted(cur.children)) do
       render_node(child, depth + 1, section)
     end
+  end
+
+  -- Build the right-aligned diffstat segment for a file, e.g. " +12 -3".
+  -- Returns: text (string), add_range {s,e} | nil, del_range {s,e} | nil
+  -- Ranges are byte offsets relative to the start of the returned text.
+  local function diffstat_segment(f)
+    local st = f.stat
+    if not st then return "", nil, nil end
+    if st.binary then
+      return "  bin", nil, nil
+    end
+    local added   = st.added or 0
+    local deleted = st.deleted or 0
+    if added == 0 and deleted == 0 then return "", nil, nil end
+
+    local text = "  "
+    local add_range, del_range
+    if added > 0 then
+      local s = #text
+      text = text .. "+" .. tostring(added)
+      add_range = { s, #text }
+    end
+    if deleted > 0 then
+      if added > 0 then text = text .. " " end
+      local s = #text
+      text = text .. "-" .. tostring(deleted)
+      del_range = { s, #text }
+    end
+    return text, add_range, del_range
   end
 
   render_node = function(node, depth, section)
@@ -157,19 +146,44 @@ local function render(buf, status)
       local f      = node.file
       local indent = string.rep("  ", depth + 1)
       local badge  = STATUS_BADGE[f.status] or "·"
-      local available    = math.max(1, panel_w - #indent - 1 - 3)
-      local name         = node.name
-      local display_name = #name > available and ("…" .. name:sub(-(available - 1))) or name
-      local pad          = math.max(1, panel_w - #indent - #display_name - 3)
-      local line         = indent .. display_name .. string.rep(" ", pad) .. "[" .. badge .. "]"
-      local fhl          = file_hl(f, section)
-      local badge_hl     = STATUS_HL[f.status] or "DiffNvimStatusUntracked"
+
+      -- Right side: "[X]" badge + optional diffstat segment.
+      local stat_text, add_range, del_range = diffstat_segment(f)
+      local right_w = 3 + #stat_text  -- "[X]" is 3 bytes/cols
+
+      -- Space available for the (middle-ellipsized) name, leaving 1 col gap.
+      local available    = math.max(1, panel_w - #indent - right_w - 1)
+      local display_name = util.trunc_middle(node.name, available)
+      local name_w       = vim.fn.strdisplaywidth(display_name)
+      local pad          = math.max(1, panel_w - #indent - name_w - right_w)
+
+      local line     = indent .. display_name .. string.rep(" ", pad)
+                       .. "[" .. badge .. "]" .. stat_text
+      local fhl      = file_hl(f, section)
+      local badge_hl = STATUS_HL[f.status] or "DiffNvimStatusUntracked"
+
       table.insert(lines, line)
-      local lnr = #lines
+      local lnr   = #lines
+      local lnr_0 = lnr - 1
       line_map[lnr] = { type = "file", section = section, file = f }
-      table.insert(hl_queue, { lnr - 1, fhl, #indent, #indent + #display_name })
-      local badge_col = #line - 3
-      table.insert(hl_queue, { lnr - 1, badge_hl, badge_col, badge_col + 3 })
+
+      -- Name highlight (use display byte length, not char count).
+      table.insert(hl_queue, { lnr_0, fhl, #indent, #indent + #display_name })
+
+      -- Badge highlight: locate "[X]" which sits right before stat_text.
+      local badge_col = #line - #stat_text - 3
+      table.insert(hl_queue, { lnr_0, badge_hl, badge_col, badge_col + 3 })
+
+      -- Diffstat highlights, offset by where stat_text begins.
+      local stat_base = #line - #stat_text
+      if add_range then
+        table.insert(hl_queue, { lnr_0, "DiffNvimStatAdded",
+          stat_base + add_range[1], stat_base + add_range[2] })
+      end
+      if del_range then
+        table.insert(hl_queue, { lnr_0, "DiffNvimStatRemoved",
+          stat_base + del_range[1], stat_base + del_range[2] })
+      end
     else
       render_dir(node, depth, section)
     end
@@ -232,7 +246,6 @@ function M.setup(buf, win, repo_root)
       collapsed[meta.section] = not collapsed[meta.section]
       M.refresh(buf, win, repo_root)
     elseif meta.type == "file" then
-      require("diff.sidebar").hide_commit_detail()
       local dv   = require("diff.diff_view")
       local file = vim.tbl_extend("force", meta.file, {
         staged = (meta.section == "staged"),
@@ -298,7 +311,21 @@ function M.refresh(buf, win, repo_root)
       vim.notify("diff.nvim: status error: " .. err, vim.log.levels.WARN)
     end
     if not vim.api.nvim_buf_is_valid(buf) then return end
-    render(buf, status or { staged = {}, unstaged = {} })
+    status = status or { staged = {}, unstaged = {} }
+
+    -- Enrich files with per-file diffstat counts, then render. The diffstat
+    -- call is best-effort: if it fails we still render without counts.
+    git.get_diffstat(repo_root, function(stats)
+      if not vim.api.nvim_buf_is_valid(buf) then return end
+      stats = stats or { staged = {}, unstaged = {} }
+      for _, f in ipairs(status.staged or {}) do
+        f.stat = stats.staged[f.path]
+      end
+      for _, f in ipairs(status.unstaged or {}) do
+        f.stat = stats.unstaged[f.path]
+      end
+      render(buf, status)
+    end)
   end)
 end
 
