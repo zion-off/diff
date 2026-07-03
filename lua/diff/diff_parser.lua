@@ -109,12 +109,20 @@ end
 -- mid-file turns the whole parse tree into an ERROR node, which silently
 -- disables syntax highlighting). The human-readable marker is stored in
 -- `label` and rendered as virtual text by the view layer.
-local function separator(hidden)
+--
+-- `hidden_old` / `hidden_new` record the 1-based line span (inclusive) of the
+-- collapsed region in the old and new file respectively. The view layer uses
+-- these to resolve the enclosing declaration via tree-sitter (GitHub-style
+-- "@@ ... function foo()" heading).
+local function separator(hidden, span)
+  span = span or {}
   return {
-    content  = "",
-    line_num = nil,
-    type     = "separator",
-    label    = string.format("··· %d hidden lines ···", hidden),
+    content    = "",
+    line_num   = nil,
+    type       = "separator",
+    label      = string.format("··· %d hidden lines ···", hidden),
+    hidden_old = span.old,  -- { first, last } in old-file coords, or nil
+    hidden_new = span.new,  -- { first, last } in new-file coords, or nil
   }
 end
 
@@ -383,8 +391,12 @@ function M.build_aligned_lines(hunks, old_lines, new_lines, context_lines)
       local hidden_old = range.start_old - old_cursor
       local hidden_new = range.start_new - new_cursor
       local hidden = math.max(hidden_old, hidden_new)
-      table.insert(left,  separator(hidden))
-      table.insert(right, separator(hidden))
+      local span = {
+        old = hidden_old > 0 and { old_cursor, range.start_old - 1 } or nil,
+        new = hidden_new > 0 and { new_cursor, range.start_new - 1 } or nil,
+      }
+      table.insert(left,  separator(hidden, span))
+      table.insert(right, separator(hidden, span))
       old_cursor = range.start_old
       new_cursor = range.start_new
     end
@@ -449,8 +461,12 @@ function M.build_aligned_lines(hunks, old_lines, new_lines, context_lines)
   if old_cursor <= #old_lines or new_cursor <= #new_lines then
     local remaining = math.max(#old_lines - old_cursor + 1, #new_lines - new_cursor + 1)
     if remaining > 0 then
-      table.insert(left,  separator(remaining))
-      table.insert(right, separator(remaining))
+      local span = {
+        old = old_cursor <= #old_lines and { old_cursor, #old_lines } or nil,
+        new = new_cursor <= #new_lines and { new_cursor, #new_lines } or nil,
+      }
+      table.insert(left,  separator(remaining, span))
+      table.insert(right, separator(remaining, span))
     end
   end
 

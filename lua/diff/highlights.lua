@@ -109,6 +109,8 @@ local function build_defaults()
 
     -- Separators (collapsed hunks)
     DiffNvimSeparator       = { fg = p.separator_fg, bg = p.separator_bg, italic = true },
+    -- Enclosing-declaration heading shown next to a collapsed separator
+    DiffNvimSeparatorDecl   = { fg = p.separator_fg, bg = p.separator_bg, italic = true, bold = true },
 
     -- Commit file entries
     DiffNvimCommitFileEntry = { link = "Normal" },

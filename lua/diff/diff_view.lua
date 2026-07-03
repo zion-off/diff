@@ -153,6 +153,81 @@ local function set_buf_filetype(buf, ft)
   start_buf_syntax(buf, ft)
 end
 
+-- ---------------------------------------------------------------------------
+-- Enclosing-declaration resolution (GitHub-style collapsed-section headings)
+-- ---------------------------------------------------------------------------
+
+-- Node-type substrings that qualify as a "section heading" (function, class,
+-- etc.). Deliberately excludes variable declarations / assignments so we don't
+-- label a collapsed region with an unrelated `local x = ...` line.
+local DECL_INCLUDE = {
+  "function", "method", "class", "struct", "interface", "impl",
+  "module", "namespace", "constructor", "enum", "trait", "def",
+}
+local DECL_EXCLUDE = {
+  "variable", "field", "assignment", "call", "parameter", "argument",
+}
+
+local function node_is_decl(t)
+  for _, x in ipairs(DECL_EXCLUDE) do
+    if t:find(x, 1, true) then return false end
+  end
+  for _, x in ipairs(DECL_INCLUDE) do
+    if t:find(x, 1, true) then return true end
+  end
+  return false
+end
+
+--- Build a scratch tree-sitter parse of full file `lines` for `ft`.
+--- Returns { root, lines } or nil if no parser is available.
+--- The scratch buffer is wiped immediately; the parsed tree stays valid.
+local function parse_full_file(lines, ft)
+  if ft == "" or not lines or #lines == 0 then return nil end
+  local buf = vim.api.nvim_create_buf(false, true)
+  local ok_lines = pcall(vim.api.nvim_buf_set_lines, buf, 0, -1, false, lines)
+  if not ok_lines then
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    return nil
+  end
+  local ok, parser = pcall(vim.treesitter.get_parser, buf, ft)
+  if not ok or not parser then
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    return nil
+  end
+  local ok_parse = pcall(function() parser:parse(true) end)
+  local trees = ok_parse and parser:trees() or nil
+  local root = trees and trees[1] and trees[1]:root() or nil
+  pcall(vim.api.nvim_buf_delete, buf, { force = true })
+  if not root then return nil end
+  return { root = root, lines = lines }
+end
+
+--- Resolve the enclosing declaration heading for a 1-based `line_num` within a
+--- parsed file. Returns a trimmed signature string (e.g. "function M.open")
+--- or nil when there is no enclosing declaration.
+local function enclosing_decl(parsed, line_num)
+  if not parsed or not line_num then return nil end
+  local row = line_num - 1  -- tree-sitter is 0-based
+  if row < 0 then return nil end
+  local ok, node = pcall(function()
+    return parsed.root:descendant_for_range(row, 0, row, 0)
+  end)
+  if not ok or not node then return nil end
+  while node do
+    if node_is_decl(node:type()) then
+      local sr = select(1, node:range())
+      local line = parsed.lines[sr + 1] or ""
+      line = line:gsub("^%s+", ""):gsub("%s+$", "")
+      -- Drop a trailing block-opening brace/paren for a cleaner heading.
+      line = line:gsub("%s*[{(]%s*$", "")
+      if line ~= "" then return line end
+      return nil
+    end
+    node = node:parent()
+  end
+  return nil
+end
+
 --- Stop the live file watcher and cancel any pending debounce timer.
 local function stop_file_watcher()
   if M._file_watcher_timer then
@@ -289,7 +364,9 @@ end
 --- Apply line-level background highlights, gutter signs, and separator/filler styling.
 --- @param buf      integer
 --- @param aligned  table[]
-local function apply_line_highlights(buf, aligned)
+--- @param parsed   table|nil  full-file tree-sitter parse (from parse_full_file)
+--- @param side     string|nil "old" or "new" — which coord space to resolve in
+local function apply_line_highlights(buf, aligned, parsed, side)
   for i, entry in ipairs(aligned) do
     local row = i - 1
 
@@ -325,10 +402,25 @@ local function apply_line_highlights(buf, aligned)
       -- Separator rows carry no real line number. The buffer line itself is
       -- empty (to keep tree-sitter's parse valid); the "··· N hidden lines ···"
       -- marker is drawn as overlay virtual text instead of real buffer text.
+      --
+      -- GitHub-style: append the enclosing declaration (function/class/etc.) of
+      -- the collapsed region, resolved from the full-file tree-sitter parse.
+      local virt = { { entry.label or "··· hidden lines ···", "DiffNvimSeparator" } }
+
+      local span = side == "old" and entry.hidden_old or entry.hidden_new
+      if parsed and span then
+        -- Use the last hidden line: it sits deepest inside the enclosing scope,
+        -- giving the most specific heading (matches GitHub's behavior).
+        local heading = enclosing_decl(parsed, span[2])
+        if heading then
+          table.insert(virt, { "  " .. heading, "DiffNvimSeparatorDecl" })
+        end
+      end
+
       vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
         line_hl_group   = "DiffNvimSeparator",
         number_hl_group = "Conceal",
-        virt_text       = { { entry.label or "··· hidden lines ···", "DiffNvimSeparator" } },
+        virt_text       = virt,
         virt_text_pos   = "overlay",
         priority        = PRIORITY_LINE_BG,
       })
@@ -743,6 +835,11 @@ function M.rerender()
   local left_buf_ref  = M._left_buf
   local right_buf_ref = M._right_buf
 
+  -- Parse the full old/new file once so collapsed separators can be labelled
+  -- with their enclosing declaration (GitHub-style headings).
+  local parsed_old = parse_full_file(M._current_old, ft)
+  local parsed_new = parse_full_file(M._current_new, ft)
+
   -- Increment render generation for rerender as well
   M._render_gen = M._render_gen + 1
   local this_rerender_gen = M._render_gen
@@ -753,10 +850,10 @@ function M.rerender()
 
     -- Re-apply highlights
     vim.api.nvim_buf_clear_namespace(left_buf_ref, NS, 0, -1)
-    apply_line_highlights(left_buf_ref, left_aln)
+    apply_line_highlights(left_buf_ref, left_aln, parsed_old, "old")
     if right_buf_ref and vim.api.nvim_buf_is_valid(right_buf_ref) then
       vim.api.nvim_buf_clear_namespace(right_buf_ref, NS, 0, -1)
-      apply_line_highlights(right_buf_ref, right_aln)
+      apply_line_highlights(right_buf_ref, right_aln, parsed_new, "new")
       apply_word_highlights(left_buf_ref, right_buf_ref, left_aln, right_aln)
     end
 
@@ -1010,6 +1107,11 @@ function M.open(opts)
   local repo_root_ref = opts.repo_root
   local file_path_ref = opts.file_path
 
+  -- Parse the full old/new file so collapsed separators can be labelled with
+  -- their enclosing declaration (GitHub-style headings).
+  local parsed_old = parse_full_file(old_lines, ft)
+  local parsed_new = parse_full_file(new_lines, ft)
+
   vim.schedule(function()
     if this_gen ~= M._render_gen then return end
     if not vim.api.nvim_buf_is_valid(left_buf_ref)  then return end
@@ -1018,8 +1120,8 @@ function M.open(opts)
     vim.api.nvim_buf_clear_namespace(left_buf_ref,  NS, 0, -1)
     vim.api.nvim_buf_clear_namespace(right_buf_ref, NS, 0, -1)
 
-    apply_line_highlights(left_buf_ref,  left_aln)
-    apply_line_highlights(right_buf_ref, right_aln)
+    apply_line_highlights(left_buf_ref,  left_aln,  parsed_old, "old")
+    apply_line_highlights(right_buf_ref, right_aln, parsed_new, "new")
     apply_word_highlights(left_buf_ref, right_buf_ref, left_aln, right_aln)
 
     -- ── Note markers ───────────────────────────────────────────────────────
