@@ -132,7 +132,16 @@ local function start_buf_syntax(buf, ft)
   local ts_ok = pcall(vim.treesitter.start, buf, ft)
   if not ts_ok then
     pcall(function() vim.bo[buf].syntax = ft end)
+    return
   end
+  -- Force a full-buffer parse. Tree-sitter's highlighter parses lazily by
+  -- viewport (via its on_win decoration callback), so lines that start off
+  -- screen can render unhighlighted until scrolled into view and redrawn.
+  -- Parsing the whole buffer up front makes highlighting deterministic.
+  pcall(function()
+    local parser = vim.treesitter.get_parser(buf, ft)
+    if parser then parser:parse(true) end
+  end)
 end
 
 --- Set filetype and start tree-sitter for a buffer.
@@ -313,10 +322,14 @@ local function apply_line_highlights(buf, aligned)
       })
 
     elseif entry.type == "separator" then
-      -- Separator rows also carry no real line number.
+      -- Separator rows carry no real line number. The buffer line itself is
+      -- empty (to keep tree-sitter's parse valid); the "··· N hidden lines ···"
+      -- marker is drawn as overlay virtual text instead of real buffer text.
       vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
         line_hl_group   = "DiffNvimSeparator",
         number_hl_group = "Conceal",
+        virt_text       = { { entry.label or "··· hidden lines ···", "DiffNvimSeparator" } },
+        virt_text_pos   = "overlay",
         priority        = PRIORITY_LINE_BG,
       })
     end

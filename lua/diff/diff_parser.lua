@@ -104,6 +104,20 @@ local function filler()
   return make_entry("", nil, "filler")
 end
 
+-- A separator collapses hidden context. Its buffer `content` is kept EMPTY so
+-- that tree-sitter still sees syntactically-valid code (a text marker inserted
+-- mid-file turns the whole parse tree into an ERROR node, which silently
+-- disables syntax highlighting). The human-readable marker is stored in
+-- `label` and rendered as virtual text by the view layer.
+local function separator(hidden)
+  return {
+    content  = "",
+    line_num = nil,
+    type     = "separator",
+    label    = string.format("··· %d hidden lines ···", hidden),
+  }
+end
+
 -- ---------------------------------------------------------------------------
 -- Similarity-based line matching
 -- ---------------------------------------------------------------------------
@@ -369,9 +383,8 @@ function M.build_aligned_lines(hunks, old_lines, new_lines, context_lines)
       local hidden_old = range.start_old - old_cursor
       local hidden_new = range.start_new - new_cursor
       local hidden = math.max(hidden_old, hidden_new)
-      local sep_text = string.format("··· %d hidden lines ···", hidden)
-      table.insert(left,  make_entry(sep_text, nil, "separator"))
-      table.insert(right, make_entry(sep_text, nil, "separator"))
+      table.insert(left,  separator(hidden))
+      table.insert(right, separator(hidden))
       old_cursor = range.start_old
       new_cursor = range.start_new
     end
@@ -436,9 +449,8 @@ function M.build_aligned_lines(hunks, old_lines, new_lines, context_lines)
   if old_cursor <= #old_lines or new_cursor <= #new_lines then
     local remaining = math.max(#old_lines - old_cursor + 1, #new_lines - new_cursor + 1)
     if remaining > 0 then
-      local sep_text = string.format("··· %d hidden lines ···", remaining)
-      table.insert(left,  make_entry(sep_text, nil, "separator"))
-      table.insert(right, make_entry(sep_text, nil, "separator"))
+      table.insert(left,  separator(remaining))
+      table.insert(right, separator(remaining))
     end
   end
 
