@@ -203,6 +203,11 @@ function M.open(repo_root)
   -- The new tab has one window — this becomes the main area (right side)
   M._main_win = vim.api.nvim_get_current_win()
 
+  -- `:tabnew` creates an empty, *listed* [No Name] buffer for the new window.
+  -- Remember it so we can wipe it after swapping in our scratch buffer;
+  -- otherwise it leaks into the buffer list on every open/close cycle.
+  local tabnew_buf = vim.api.nvim_win_get_buf(M._main_win)
+
   -- Create a scratch buffer for the main area (placeholder)
   local main_buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_set_option_value("buftype", "nofile", { buf = main_buf })
@@ -216,6 +221,16 @@ function M.open(repo_root)
     "",
   })
   vim.api.nvim_win_set_buf(M._main_win, main_buf)
+
+  -- Wipe the orphaned [No Name] buffer left behind by `:tabnew`.
+  if tabnew_buf ~= main_buf
+    and vim.api.nvim_buf_is_valid(tabnew_buf)
+    and vim.api.nvim_buf_get_name(tabnew_buf) == ""
+    and vim.api.nvim_buf_line_count(tabnew_buf) == 1
+    and vim.api.nvim_buf_get_lines(tabnew_buf, 0, 1, false)[1] == ""
+  then
+    pcall(vim.api.nvim_buf_delete, tabnew_buf, { force = true })
+  end
 
   -- Create sidebar split (respects sidebar_position config)
   local position = cfg.sidebar_position == "right" and "botright" or "topleft"
