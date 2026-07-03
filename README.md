@@ -74,6 +74,12 @@ require("diff").setup({
   -- Also watches .git/index via libuv fs_event for immediate refresh.
   auto_refresh = true,
 
+  -- Mouse interactivity in the sidebar (default: true). Clicking a file opens
+  -- its diff; clicking a commit expands/collapses it; clicking a section header
+  -- toggles it. Only enables Neovim's 'mouse' option while the interface is
+  -- open (if not already enabled) and restores it on close.
+  mouse = true,
+
   -- Keybinding overrides (set any to false/"" to disable)
   keymaps = {
     toggle_sidebar       = "<leader>gs",
@@ -118,7 +124,7 @@ require("diff").setup({
 
 | Key | Action |
 |---|---|
-| `<CR>` | Open diff for file / toggle section collapse |
+| `<CR>` / click | Open diff for file / toggle section collapse |
 | `s` | Stage file |
 | `u` | Unstage file |
 | `z` | Toggle section collapse |
@@ -127,7 +133,7 @@ require("diff").setup({
 
 | Key | Action |
 |---|---|
-| `<CR>` | Open diff for commit |
+| `<CR>` / click | Expand/collapse commit / open commit file diff |
 | `K` | Show full commit message tooltip |
 
 ### Diff View

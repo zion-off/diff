@@ -7,6 +7,7 @@ M.defaults = {
   context_lines = 3, -- lines of context around each hunk (nil = show all)
   notes_path = nil, -- nil = XDG default (ignored; kept for backward compat)
   auto_refresh = true,
+  mouse = true, -- enable mouse interactivity in the sidebar (clicks open/toggle)
   keymaps = {
     toggle_sidebar       = "<leader>gs",
     toggle_sidebar_panel = "<leader>gS",

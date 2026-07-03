@@ -503,10 +503,9 @@ function M.setup(buf, win, repo_root)
   local km   = cfg.keymaps or {}
   local opts = { buffer = buf, nowait = true, silent = true }
 
-  -- <CR>: toggle commit expansion or open file diff
-  vim.keymap.set("n", km.open_diff or "<CR>", function()
-    if not _win or not vim.api.nvim_win_is_valid(_win) then return end
-    local lnr  = vim.api.nvim_win_get_cursor(_win)[1]
+  -- Activate the entry on line `lnr`: expand/collapse a commit, or open a
+  -- commit file's diff. Shared by <CR> and mouse clicks.
+  local function activate_line(lnr)
     local meta = line_map[lnr]
     if not meta then return end
 
@@ -586,7 +585,25 @@ function M.setup(buf, win, repo_root)
         vim.notify("diff.nvim: error opening commit diff: " .. tostring(dv_err), vim.log.levels.ERROR)
       end
     end
+  end
+
+  -- <CR>: toggle commit expansion or open file diff
+  vim.keymap.set("n", km.open_diff or "<CR>", function()
+    if not _win or not vim.api.nvim_win_is_valid(_win) then return end
+    activate_line(vim.api.nvim_win_get_cursor(_win)[1])
   end, vim.tbl_extend("force", opts, { desc = "Expand commit / open file diff (diff)" }))
+
+  -- Mouse: clicking a row activates it (same as <CR>). getmousepos() gives the
+  -- exact clicked window + line, so this works regardless of cursor position.
+  local function on_mouse_click()
+    local mp = vim.fn.getmousepos()
+    if mp.winid ~= _win then return end
+    if mp.line < 1 then return end
+    pcall(vim.api.nvim_win_set_cursor, _win, { mp.line, 0 })
+    activate_line(mp.line)
+  end
+  vim.keymap.set("n", "<LeftMouse>", on_mouse_click,
+    vim.tbl_extend("force", opts, { desc = "Activate row (diff)" }))
 
   -- K: show full commit message tooltip
   vim.keymap.set("n", km.commit_tooltip or "K", function()

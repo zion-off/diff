@@ -235,10 +235,9 @@ function M.setup(buf, win, repo_root)
 
   local opts = { buffer = buf, nowait = true, silent = true }
 
-  -- <CR>: open diff or toggle section collapse
-  vim.keymap.set("n", km.open_diff or "<CR>", function()
-    if not vim.api.nvim_win_is_valid(win) then return end
-    local lnr  = vim.api.nvim_win_get_cursor(win)[1]
+  -- Activate the entry on line `lnr`: toggle a section header, or open a file's
+  -- diff. Shared by <CR> and mouse clicks.
+  local function activate_line(lnr)
     local meta = line_map[lnr]
     if not meta then return end
 
@@ -255,7 +254,25 @@ function M.setup(buf, win, repo_root)
         vim.notify("diff.nvim: error opening diff: " .. tostring(err), vim.log.levels.ERROR)
       end
     end
+  end
+
+  -- <CR>: open diff or toggle section collapse
+  vim.keymap.set("n", km.open_diff or "<CR>", function()
+    if not vim.api.nvim_win_is_valid(win) then return end
+    activate_line(vim.api.nvim_win_get_cursor(win)[1])
   end, vim.tbl_extend("force", opts, { desc = "Open diff / toggle section (diff)" }))
+
+  -- Mouse: clicking a row activates it (same as <CR>). getmousepos() gives the
+  -- exact clicked window + line, so this works regardless of cursor position.
+  local function on_mouse_click()
+    local mp = vim.fn.getmousepos()
+    if mp.winid ~= win then return end
+    if mp.line < 1 then return end
+    pcall(vim.api.nvim_win_set_cursor, win, { mp.line, 0 })
+    activate_line(mp.line)
+  end
+  vim.keymap.set("n", "<LeftMouse>", on_mouse_click,
+    vim.tbl_extend("force", opts, { desc = "Activate row (diff)" }))
 
   -- 's': stage file (unstaged section only)
   vim.keymap.set("n", km.stage_file or "s", function()

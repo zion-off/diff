@@ -22,6 +22,7 @@ M._notes_win     = nil   -- notes right-side split window
 M._notes_buf     = nil   -- notes buffer
 M._fs_watcher    = nil   -- libuv fs_event handle for .git/index watch
 M._debounce_timer = nil  -- pending debounce timer for fs_event (module-level for cleanup)
+M._saved_mouse   = nil   -- previous global 'mouse' value (restored on close)
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -194,6 +195,18 @@ function M.open(repo_root)
   local cfg    = config.get()
   local width  = cfg.sidebar_width or 40
 
+  -- Enable mouse interactivity while the interface is open. Only touch the
+  -- global 'mouse' option if it doesn't already cover normal mode, and remember
+  -- the previous value so it can be restored on close.
+  M._saved_mouse = nil
+  if cfg.mouse then
+    local cur = vim.o.mouse
+    if not (cur:find("n") or cur:find("a")) then
+      M._saved_mouse = cur
+      vim.o.mouse = "a"
+    end
+  end
+
   -- Save the current layout before taking over
   M._saved_layout = save_layout()
 
@@ -334,6 +347,12 @@ function M.close()
   clear_panel_state()
   M._main_win      = nil
   M._sidebar_hidden = false
+
+  -- Restore the global 'mouse' option if we changed it on open.
+  if M._saved_mouse ~= nil then
+    vim.o.mouse = M._saved_mouse
+    M._saved_mouse = nil
+  end
 end
 
 --- Toggle the interface open/closed.
