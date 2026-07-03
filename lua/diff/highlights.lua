@@ -117,6 +117,8 @@ local function build_defaults()
 
     -- Winbar for diff panes
     DiffNvimWinbar          = { bold = true, link = "StatusLine" },
+    -- Full-width filename header bar spanning both diff panes
+    DiffNvimHeader          = { bold = true, link = "StatusLine" },
   }
 end
 

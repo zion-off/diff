@@ -15,6 +15,8 @@ M._left_win      = nil
 M._right_win     = nil
 M._left_buf      = nil
 M._right_buf     = nil
+M._header_win    = nil   -- full-width filename bar spanning both diff panes
+M._header_buf    = nil
 M._left_aligned  = nil
 M._right_aligned = nil
 M._scroll_aug    = nil
@@ -111,6 +113,30 @@ local function set_win_opts(win)
   end
 end
 
+--- Apply per-window options for the full-width filename header window.
+--- @param win integer
+local function set_header_win_opts(win)
+  local wopts = {
+    number         = false,
+    relativenumber = false,
+    wrap           = false,
+    foldcolumn     = "0",
+    signcolumn     = "no",
+    cursorline     = false,
+    cursorcolumn   = false,
+    winfixheight   = true,
+    list           = false,
+    winbar         = "",
+  }
+  for k, v in pairs(wopts) do
+    pcall(vim.api.nvim_set_option_value, k, v, { win = win })
+  end
+  -- Give the header its own muted background via winhighlight so it reads as a bar.
+  pcall(vim.api.nvim_set_option_value, "winhighlight",
+    "Normal:DiffNvimHeader,NormalNC:DiffNvimHeader,EndOfLine:DiffNvimHeader",
+    { win = win })
+end
+
 --- Fill a diff buffer with the content from an aligned line list.
 --- @param buf integer
 --- @param aligned table[]
@@ -122,6 +148,48 @@ local function fill_aligned_buf(buf, aligned)
   vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, content)
   vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+end
+
+--- Create (or update) the full-width filename header that spans the diff panes.
+--- Splits a 1-line window above `anchor_win`. The anchor window remains the
+--- bottom window (i.e. the diff pane), so the header sits above the OLD/NEW
+--- vertical split and therefore spans its full width.
+--- @param anchor_win integer  window the diff pane lives in (becomes bottom)
+--- @param text       string   filename / heading text to display
+--- @return integer|nil        the header window, or nil on failure
+local function create_header(anchor_win, text)
+  if not (anchor_win and vim.api.nvim_win_is_valid(anchor_win)) then return nil end
+
+  -- Reuse an existing header window if still valid (e.g. on rerender).
+  local header_win = M._header_win
+  if not (header_win and vim.api.nvim_win_is_valid(header_win)) then
+    vim.api.nvim_set_current_win(anchor_win)
+    -- `aboveleft split` opens the new window above and keeps `anchor_win` below.
+    local ok = pcall(vim.cmd, "aboveleft split")
+    if not ok then return nil end
+    header_win = vim.api.nvim_get_current_win()
+  end
+
+  -- Header buffer (scratch, single line).
+  local header_buf = M._header_buf
+  if not (header_buf and vim.api.nvim_buf_is_valid(header_buf)) then
+    header_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("buftype", "nofile", { buf = header_buf })
+    vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = header_buf })
+    vim.api.nvim_set_option_value("swapfile", false, { buf = header_buf })
+  end
+
+  vim.api.nvim_set_option_value("modifiable", true, { buf = header_buf })
+  vim.api.nvim_buf_set_lines(header_buf, 0, -1, false, { "  " .. text })
+  vim.api.nvim_set_option_value("modifiable", false, { buf = header_buf })
+
+  vim.api.nvim_win_set_buf(header_win, header_buf)
+  pcall(vim.api.nvim_win_set_height, header_win, 1)
+  set_header_win_opts(header_win)
+
+  M._header_win = header_win
+  M._header_buf = header_buf
+  return header_win
 end
 
 --- Start tree-sitter for a buffer, falling back to regex syntax when needed.
@@ -296,6 +364,13 @@ local function close_diff_wins()
   M._render_gen = (M._render_gen or 0) + 1
 
   -- Reset scroll guard to prevent permanent lockout (no longer a boolean — kept for compat)
+
+  -- Close the full-width filename header window (never the main area window).
+  if M._header_win and vim.api.nvim_win_is_valid(M._header_win) then
+    pcall(vim.api.nvim_win_close, M._header_win, true)
+  end
+  M._header_win = nil
+  M._header_buf = nil
 
   -- Determine if we need to restore the main area window
   local sidebar = require("diff.sidebar")
@@ -972,6 +1047,13 @@ function M.open(opts)
 
     vim.api.nvim_set_current_win(target_win)
     vim.api.nvim_win_set_buf(target_win, pane_buf)
+
+    -- Full-width filename header above the single pane. Since one side is
+    -- absent, note whether this is a new or deleted file right in the header.
+    local suffix = single_side == "new" and "  (new file)" or "  (deleted)"
+    create_header(target_win, opts.file_path .. suffix)
+    vim.api.nvim_set_current_win(target_win)
+
     if single_side == "new" then
       M._right_win = target_win
       M._right_buf = pane_buf
@@ -985,12 +1067,7 @@ function M.open(opts)
     end
 
     set_win_opts(target_win)
-
-    -- Winbar
-    local label = single_side == "new" and "NEW: " or "DELETED: "
-    pcall(vim.api.nvim_set_option_value, "winbar",
-      "%#DiffNvimWinbar#  " .. label .. opts.file_path .. "  ",
-      { win = target_win })
+    pcall(vim.api.nvim_set_option_value, "winbar", "", { win = target_win })
 
     -- Apply highlights — deferred so tree-sitter completes its first parse first.
     -- Guard with generation counter to skip stale callbacks from rapid re-opens.
@@ -1043,6 +1120,10 @@ function M.open(opts)
     vim.api.nvim_win_set_buf(main_win, right_buf)
     local right_win = main_win
 
+    -- Full-width filename header above the (still un-split) main window.
+    create_header(right_win, opts.file_path)
+
+    vim.api.nvim_set_current_win(right_win)
     vim.cmd("leftabove vsplit")
     local left_win = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_buf(left_win, left_buf)
@@ -1071,6 +1152,8 @@ function M.open(opts)
     if best_win then
       vim.api.nvim_set_current_win(best_win)
       vim.api.nvim_win_set_buf(best_win, right_buf)
+      create_header(best_win, opts.file_path)
+      vim.api.nvim_set_current_win(best_win)
       vim.cmd("leftabove vsplit")
       local left_win = vim.api.nvim_get_current_win()
       vim.api.nvim_win_set_buf(left_win, left_buf)
@@ -1080,6 +1163,8 @@ function M.open(opts)
       vim.cmd("vsplit")
       M._right_win = vim.api.nvim_get_current_win()
       vim.api.nvim_win_set_buf(M._right_win, right_buf)
+      create_header(M._right_win, opts.file_path)
+      vim.api.nvim_set_current_win(M._right_win)
       vim.cmd("leftabove vsplit")
       M._left_win = vim.api.nvim_get_current_win()
       vim.api.nvim_win_set_buf(M._left_win, left_buf)
@@ -1089,14 +1174,10 @@ function M.open(opts)
   set_win_opts(M._left_win)
   set_win_opts(M._right_win)
 
-  -- ── Winbar (shows filename + side) ───────────────────────────────────────
-  local short_path = opts.file_path
-  pcall(vim.api.nvim_set_option_value, "winbar",
-    "%#DiffNvimWinbar#  OLD: " .. short_path .. "  ",
-    { win = M._left_win })
-  pcall(vim.api.nvim_set_option_value, "winbar",
-    "%#DiffNvimWinbar#  NEW: " .. short_path .. "  ",
-    { win = M._right_win })
+  -- The filename is shown once in the full-width header window (create_header),
+  -- so the per-pane winbars are cleared. The left/right split conveys OLD/NEW.
+  pcall(vim.api.nvim_set_option_value, "winbar", "", { win = M._left_win })
+  pcall(vim.api.nvim_set_option_value, "winbar", "", { win = M._right_win })
 
   -- ── Apply highlights ─────────────────────────────────────────────────────
   -- Deferred via vim.schedule so tree-sitter completes its first parse before
