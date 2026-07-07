@@ -124,6 +124,8 @@ local function set_panel_win_opts(win)
     winfixwidth    = true,
     spell          = false,
     list           = false,
+    sidescroll     = 0,
+    sidescrolloff  = 0,
   }
   for k, v in pairs(wopts) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })

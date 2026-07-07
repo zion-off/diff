@@ -605,6 +605,14 @@ function M.setup(buf, win, repo_root)
   vim.keymap.set("n", "<LeftMouse>", on_mouse_click,
     vim.tbl_extend("force", opts, { desc = "Activate row (diff)" }))
 
+  -- Block horizontal scrolling: content is truncated to fit the panel width,
+  -- so scrolling right only reveals blank space. Disable the horizontal mouse
+  -- wheel and horizontal-scroll keys to keep the view pinned to column 1.
+  for _, key in ipairs({ "<ScrollWheelRight>", "<ScrollWheelLeft>", "zh", "zl", "zH", "zL" }) do
+    vim.keymap.set("n", key, "<Nop>",
+      vim.tbl_extend("force", opts, { desc = "(disabled) (diff)" }))
+  end
+
   -- K: show full commit message tooltip
   vim.keymap.set("n", km.commit_tooltip or "K", function()
     if not _win or not vim.api.nvim_win_is_valid(_win) then return end
