@@ -94,6 +94,9 @@ local function build_defaults()
     DiffNvimCommitMeta      = { link = "Comment" },
     -- Full commit message body shown when a commit is expanded inline
     DiffNvimCommitBody      = { link = "Comment" },
+    -- Cursor highlight spanning both header lines (subject + author/date) of
+    -- the commit the cursor is on.
+    DiffNvimCommitCursor    = { link = "CursorLine" },
 
     -- Ref badges
     DiffNvimRefHead         = { fg = p.ref_head, bold = true },

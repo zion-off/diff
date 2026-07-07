@@ -5,6 +5,9 @@ local config = require("diff.config")
 local util   = require("diff.util")
 
 local NS = vim.api.nvim_create_namespace("diff_nvim_commit_panel")
+-- Separate namespace for the cursor highlight so it can be cleared/redrawn on
+-- every cursor move without disturbing the content highlights in NS.
+local CURSOR_NS = vim.api.nvim_create_namespace("diff_nvim_commit_cursor")
 
 -- ---------------------------------------------------------------------------
 -- Module-level state
@@ -13,6 +16,11 @@ local NS = vim.api.nvim_create_namespace("diff_nvim_commit_panel")
 -- line_map[lnr] = { type = "commit"|"commit_file", commit = <commit>,
 --                   file = <file_info> (for commit_file type) }
 local line_map = {}
+
+-- header_pair[lnr] = { l1, l2 } — for any line belonging to a commit, the two
+-- header line numbers (subject + author/date) of that commit. Used to highlight
+-- both header lines when the cursor lands anywhere in the commit block.
+local header_pair = {}
 
 -- expanded[hash] = true/false
 local expanded = {}
@@ -113,6 +121,7 @@ local function render(buf, commits)
   vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
   vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
   line_map = {}
+  header_pair = {}
 
   local lines    = {}
   local hl_queue = {}
@@ -172,6 +181,12 @@ local function render(buf, commits)
     local l2_0 = l2 - 1
     -- The metadata line belongs to the same commit so clicking it still works.
     line_map[l2] = { type = "commit", commit = commit }
+
+    -- Both header lines highlight together when the cursor is on either one
+    -- (or anywhere in this commit's expanded block).
+    local pair = { l1, l2 }
+    header_pair[l1] = pair
+    header_pair[l2] = pair
 
     -- Dim the whole author/time portion.
     local meta_end = #META_INDENT + #author + (time ~= "" and (#" · " + #time) or 0)
@@ -314,6 +329,12 @@ local function render(buf, commits)
         end
       end
     end
+
+    -- Map every line of this commit (header + any expanded body/file lines)
+    -- back to the two header lines so the cursor highlight spans them together.
+    for ln = l1, #lines do
+      header_pair[ln] = pair
+    end
   end
 
   if #lines == 0 then
@@ -328,6 +349,27 @@ local function render(buf, commits)
   end
 
   vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+
+  -- Re-apply the cursor highlight: header_pair was just rebuilt, so the spanned
+  -- lines may have shifted (e.g. a commit was expanded/collapsed).
+  if M._redraw_cursor then M._redraw_cursor() end
+end
+
+-- Highlight both header lines (subject + author/date) of the commit the cursor
+-- is currently on. Redraws into CURSOR_NS on every cursor move.
+local function highlight_cursor_commit(buf, win)
+  if not (buf and vim.api.nvim_buf_is_valid(buf)) then return end
+  if not (win and vim.api.nvim_win_is_valid(win)) then return end
+  vim.api.nvim_buf_clear_namespace(buf, CURSOR_NS, 0, -1)
+  local lnr  = vim.api.nvim_win_get_cursor(win)[1]
+  local pair = header_pair[lnr]
+  if not pair then return end
+  for _, l in ipairs(pair) do
+    pcall(vim.api.nvim_buf_set_extmark, buf, CURSOR_NS, l - 1, 0, {
+      line_hl_group = "DiffNvimCommitCursor",
+      priority = 10,
+    })
+  end
 end
 
 -- ---------------------------------------------------------------------------
@@ -503,6 +545,23 @@ function M.setup(buf, win, repo_root)
   local km   = cfg.keymaps or {}
   local opts = { buffer = buf, nowait = true, silent = true }
 
+  -- The commit cursor highlight spans two lines (subject + author/date), so the
+  -- single-line built-in 'cursorline' would be redundant/conflicting here.
+  pcall(vim.api.nvim_set_option_value, "cursorline", false, { win = win })
+
+  -- Highlight both header lines of the commit under the cursor as it moves.
+  M._redraw_cursor = function()
+    highlight_cursor_commit(_buf, _win)
+  end
+  local aug = vim.api.nvim_create_augroup("DiffNvimCommitCursor", { clear = true })
+  vim.api.nvim_create_autocmd({ "CursorMoved", "BufEnter" }, {
+    group  = aug,
+    buffer = buf,
+    callback = function()
+      highlight_cursor_commit(buf, win)
+    end,
+  })
+
   -- Activate the entry on line `lnr`: expand/collapse a commit, or open a
   -- commit file's diff. Shared by <CR> and mouse clicks.
   local function activate_line(lnr)
@@ -595,6 +654,8 @@ function M.setup(buf, win, repo_root)
 
   -- Mouse: clicking a row activates it (same as <CR>). getmousepos() gives the
   -- exact clicked window + line, so this works regardless of cursor position.
+  -- The buffer-local map handles clicks while the panel is focused; the global
+  -- dispatcher in sidebar.lua handles single clicks arriving from other windows.
   local function on_mouse_click()
     local mp = vim.fn.getmousepos()
     if mp.winid ~= _win then return end
@@ -605,10 +666,42 @@ function M.setup(buf, win, repo_root)
   vim.keymap.set("n", "<LeftMouse>", on_mouse_click,
     vim.tbl_extend("force", opts, { desc = "Activate row (diff)" }))
 
-  -- Block horizontal scrolling: content is truncated to fit the panel width,
-  -- so scrolling right only reveals blank space. Disable the horizontal mouse
-  -- wheel and horizontal-scroll keys to keep the view pinned to column 1.
-  for _, key in ipairs({ "<ScrollWheelRight>", "<ScrollWheelLeft>", "zh", "zl", "zH", "zL" }) do
+  -- Expose the row activator so the global click dispatcher can reach it.
+  M.activate_line = activate_line
+
+  -- j/k: the author/date line is part of the same two-line header as the subject
+  -- above it (and highlights together with it), so stopping the cursor there is
+  -- redundant. Skip it when moving vertically. Other rows (subject, expanded
+  -- body, file entries) remain individually navigable.
+  local function is_meta_line(lnr)
+    -- A meta line is the second entry of a header pair (pair[2] == lnr).
+    local pair = header_pair[lnr]
+    return pair and pair[2] == lnr and pair[1] ~= lnr
+  end
+  local function move(dir)
+    if not _win or not vim.api.nvim_win_is_valid(_win) then return end
+    local last = vim.api.nvim_buf_line_count(_buf)
+    local cur  = vim.api.nvim_win_get_cursor(_win)[1]
+    local target = cur + dir
+    if is_meta_line(target) then target = target + dir end
+    if target < 1 or target > last then return end
+    pcall(vim.api.nvim_win_set_cursor, _win, { target, 0 })
+  end
+  vim.keymap.set("n", "j", function() move(1) end,
+    vim.tbl_extend("force", opts, { desc = "Next row, skip meta line (diff)" }))
+  vim.keymap.set("n", "k", function() move(-1) end,
+    vim.tbl_extend("force", opts, { desc = "Prev row, skip meta line (diff)" }))
+  vim.keymap.set("n", "<Down>", function() move(1) end,
+    vim.tbl_extend("force", opts, { desc = "Next row, skip meta line (diff)" }))
+  vim.keymap.set("n", "<Up>", function() move(-1) end,
+    vim.tbl_extend("force", opts, { desc = "Prev row, skip meta line (diff)" }))
+
+  -- Block horizontal-scroll KEYS (keyboard). The horizontal mouse wheel is
+  -- handled globally in sidebar.lua because wheel events act on the window under
+  -- the cursor regardless of focus, which a buffer-local map cannot catch.
+  -- Content is truncated to the panel width, so scrolling right only reveals
+  -- blank space; keep the view pinned to column 1.
+  for _, key in ipairs({ "zh", "zl", "zH", "zL" }) do
     vim.keymap.set("n", key, "<Nop>",
       vim.tbl_extend("force", opts, { desc = "(disabled) (diff)" }))
   end

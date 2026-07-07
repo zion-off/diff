@@ -46,6 +46,67 @@ local function clear_notes_state()
   M._notes_buf = nil
 end
 
+-- Install a single global <LeftMouse> map that activates the clicked row in a
+-- diff.nvim panel regardless of which window currently has focus. See the call
+-- site in M.open() for the rationale. Idempotent.
+function M._install_click_dispatcher()
+  if M._click_dispatcher_installed then return end
+  M._click_dispatcher_installed = true
+
+  vim.keymap.set("n", "<LeftMouse>", function()
+    local mp = vim.fn.getmousepos()
+    -- Replay the real click first so Neovim focuses the target window and moves
+    -- the cursor. Mode "n" (noremap) prevents this from re-triggering our map.
+    vim.api.nvim_feedkeys(
+      vim.api.nvim_replace_termcodes("<LeftMouse>", true, false, true), "n", false)
+
+    local target
+    if mp.winid == M._commit_win then
+      target = commit_panel
+    elseif mp.winid == M._file_win then
+      target = file_panel
+    end
+    if not target or mp.line < 1 then return end
+
+    -- Defer activation until after the fed click has been processed so the
+    -- cursor/window state is settled.
+    vim.schedule(function()
+      if not is_valid_win(mp.winid) then return end
+      pcall(vim.api.nvim_win_set_cursor, mp.winid, { mp.line, 0 })
+      if target.activate_line then
+        pcall(target.activate_line, mp.line)
+      end
+    end)
+  end, { silent = true, desc = "Activate diff.nvim panel row (global)" })
+
+  -- Block horizontal mouse-wheel scrolling over the panels. Like clicks, wheel
+  -- events act on the window under the cursor regardless of focus, so a
+  -- buffer-local map only suppresses them while the panel is focused. These
+  -- global maps swallow horizontal scroll when the mouse is over a diff.nvim
+  -- panel (content is truncated to width, so it only reveals blank space) and
+  -- otherwise replay the event so scrolling works normally elsewhere.
+  local function block_hscroll(key)
+    vim.keymap.set("n", key, function()
+      local mp = vim.fn.getmousepos()
+      if mp.winid == M._commit_win or mp.winid == M._file_win then
+        return  -- swallow: no horizontal scroll in the panels
+      end
+      vim.api.nvim_feedkeys(
+        vim.api.nvim_replace_termcodes(key, true, false, true), "n", false)
+    end, { silent = true, desc = "Block panel horizontal scroll (global)" })
+  end
+  block_hscroll("<ScrollWheelLeft>")
+  block_hscroll("<ScrollWheelRight>")
+end
+
+function M._remove_click_dispatcher()
+  if not M._click_dispatcher_installed then return end
+  M._click_dispatcher_installed = false
+  pcall(vim.keymap.del, "n", "<LeftMouse>")
+  pcall(vim.keymap.del, "n", "<ScrollWheelLeft>")
+  pcall(vim.keymap.del, "n", "<ScrollWheelRight>")
+end
+
 --- @param win integer|nil
 local function close_tracked_win(win)
   if is_valid_win(win) then
@@ -276,6 +337,15 @@ function M.open(repo_root)
   file_panel.setup(file_buf, M._file_win, repo_root)
   commit_panel.setup(commit_buf, M._commit_win, repo_root)
 
+  -- Global click dispatcher: a buffer-local <LeftMouse> map only fires when its
+  -- buffer is already the current one, so clicking a panel from another window
+  -- would merely focus it (requiring a second click to activate). This global
+  -- map runs from any window: it first replays the default <LeftMouse> so Neovim
+  -- moves focus + cursor to the clicked window, then activates the clicked row
+  -- in whichever diff.nvim panel received the click. Clicks elsewhere fall
+  -- through to the default behavior. Installed once; removed on close().
+  M._install_click_dispatcher()
+
   -- Focus the file panel to start
   vim.api.nvim_set_current_win(M._file_win)
 
@@ -349,6 +419,9 @@ function M.close()
   clear_panel_state()
   M._main_win      = nil
   M._sidebar_hidden = false
+
+  -- Remove the global click dispatcher installed on open.
+  M._remove_click_dispatcher()
 
   -- Restore the global 'mouse' option if we changed it on open.
   if M._saved_mouse ~= nil then

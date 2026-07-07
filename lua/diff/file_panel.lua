@@ -274,6 +274,9 @@ function M.setup(buf, win, repo_root)
   vim.keymap.set("n", "<LeftMouse>", on_mouse_click,
     vim.tbl_extend("force", opts, { desc = "Activate row (diff)" }))
 
+  -- Expose the row activator so the global click dispatcher can reach it.
+  M.activate_line = activate_line
+
   -- 's': stage file (unstaged section only)
   vim.keymap.set("n", km.stage_file or "s", function()
     local lnr  = vim.api.nvim_win_get_cursor(win)[1]
