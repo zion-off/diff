@@ -20,6 +20,7 @@ M.defaults = {
     prev_hunk            = "[c",
     leave_note           = "<leader>n",
     toggle_notes         = "<leader>N",
+    preview_branch       = "<leader>gb",
     expand_context       = "zo",
     expand_all           = "zR",
     commit_tooltip       = "K",

@@ -67,15 +67,30 @@ end
 --- Build display lines and line_map from status data, write into buf.
 --- @param buf     integer
 --- @param status  table   {staged: table[], unstaged: table[]}
-local function render(buf, status)
+--- @param preview string|nil  Branch being previewed; when set the working-tree
+---   status is not applicable, so the panel shows only a preview header.
+local function render(buf, status, preview)
   vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
   vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
   line_map = {}
 
-  local lines    = {}
-  local hl_queue = {}
   local cfg      = config.get()
   local panel_w  = cfg.sidebar_width or 40
+
+  -- Preview mode: working-tree changes belong only to the live HEAD, so there is
+  -- nothing meaningful to show here. Render just a header naming the branch.
+  if preview then
+    local label = util.trunc("Preview: " .. preview, math.max(8, panel_w - 1))
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { label, "" })
+    line_map[1] = { type = "preview_header" }
+    line_map[2] = { type = "blank" }
+    pcall(vim.api.nvim_buf_add_highlight, buf, NS, "DiffNvimSectionHeader", 0, 0, -1)
+    vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+    return
+  end
+
+  local lines    = {}
+  local hl_queue = {}
 
   local function push(line, meta, hl_group, hl_start, hl_end)
     table.insert(lines, line)
@@ -325,7 +340,15 @@ end
 --- @param buf       integer
 --- @param win       integer
 --- @param repo_root string
-function M.refresh(buf, win, repo_root)
+--- @param preview   string|nil  Branch being previewed; when set the panel shows
+---   a header only (no working-tree status is fetched).
+function M.refresh(buf, win, repo_root, preview)
+  if preview then
+    if not vim.api.nvim_buf_is_valid(buf) then return end
+    render(buf, { staged = {}, unstaged = {} }, preview)
+    return
+  end
+
   git.get_status(repo_root, function(status, err)
     if err then
       vim.notify("diff.nvim: status error: " .. err, vim.log.levels.WARN)

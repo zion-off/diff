@@ -83,6 +83,22 @@ function M.refresh()
   sidebar.refresh()
 end
 
+--- Open the branch picker to preview another branch's history without checking
+--- it out. In preview mode the commit panel is sourced from the chosen branch
+--- and the file panel shows only a "Preview: <branch>" header (working-tree
+--- changes belong to the live HEAD only). Selecting the current branch returns
+--- to normal live mode. Opens the interface first if it is closed.
+function M.preview_branch()
+  if not sidebar.is_open() then
+    M._with_root(function(root)
+      sidebar.open(root)
+      vim.schedule(function() sidebar.pick_preview_branch() end)
+    end)
+  else
+    sidebar.pick_preview_branch()
+  end
+end
+
 --- Open the diff view for a file programmatically.
 --- @param file_path string  Path relative to the repo root.
 --- @param staged    boolean  true to diff against the staged (index) version.

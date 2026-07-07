@@ -23,6 +23,7 @@ M._notes_buf     = nil   -- notes buffer
 M._fs_watcher    = nil   -- libuv fs_event handle for .git/index watch
 M._debounce_timer = nil  -- pending debounce timer for fs_event (module-level for cleanup)
 M._saved_mouse   = nil   -- previous global 'mouse' value (restored on close)
+M._preview_branch = nil  -- when set, panels source data from this branch (read-only preview)
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -369,6 +370,9 @@ function M.open(repo_root)
   nmap(km.toggle_notes or "<leader>N", function()
     require("diff.annotations").toggle_notes(repo_root)
   end, "Toggle notes panel")
+  nmap(km.preview_branch or "<leader>gb", function()
+    M.pick_preview_branch()
+  end, "Preview branch")
 
   -- Populate
   M.refresh()
@@ -383,9 +387,14 @@ function M.close()
     km.toggle_sidebar_panel or "<leader>gS",
     km.copy_notes_path      or "<leader>gy",
     km.toggle_notes         or "<leader>N",
+    km.preview_branch       or "<leader>gb",
   }) do
     pcall(vim.keymap.del, "n", key)
   end
+
+  -- Leaving preview mode when the interface closes so a fresh open starts live.
+  M._preview_branch = nil
+  pcall(function() require("diff.branch_picker").close() end)
 
   -- Stop the filesystem watcher if running
   stop_fs_watcher()
@@ -579,13 +588,38 @@ function M.refresh()
   -- Only refresh panels when they are visible (skip when hidden)
   if M._sidebar_hidden then return end
 
+  local preview = M._preview_branch
+
   if M._file_buf and vim.api.nvim_buf_is_valid(M._file_buf) and is_valid_win(M._file_win) then
-    file_panel.refresh(M._file_buf, M._file_win, root)
+    file_panel.refresh(M._file_buf, M._file_win, root, preview)
   end
 
   if M._commit_buf and vim.api.nvim_buf_is_valid(M._commit_buf) and is_valid_win(M._commit_win) then
-    commit_panel.refresh(M._commit_buf, M._commit_win, root)
+    commit_panel.refresh(M._commit_buf, M._commit_win, root, preview)
   end
+end
+
+-- ---------------------------------------------------------------------------
+-- Branch preview
+-- ---------------------------------------------------------------------------
+
+--- Enter (or leave) branch-preview mode.
+--- In preview mode the commit panel sources its history from `branch` and the
+--- file panel is emptied (working-tree changes belong only to the live HEAD).
+--- @param branch string|nil  Branch to preview, or nil to return to live mode.
+function M.set_preview_branch(branch)
+  M._preview_branch = branch
+  M.refresh()
+end
+
+--- Open the branch picker and switch preview mode based on the selection.
+function M.pick_preview_branch()
+  if not M.is_open() then return end
+  local root = M._repo_root
+  if not root then return end
+  require("diff.branch_picker").open(root, function(branch)
+    M.set_preview_branch(branch)
+  end)
 end
 
 -- ---------------------------------------------------------------------------

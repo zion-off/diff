@@ -23,6 +23,10 @@ vim.api.nvim_create_user_command("DiffNvimRefresh", function()
   require("diff").refresh()
 end, { desc = "Refresh diff.nvim file and commit panels" })
 
+vim.api.nvim_create_user_command("DiffNvimPreviewBranch", function()
+  require("diff").preview_branch()
+end, { desc = "Preview another branch's commits without checking it out" })
+
 vim.api.nvim_create_user_command("DiffNvimNotes", function()
   local git = require("diff.git")
   local cwd = vim.fn.getcwd()

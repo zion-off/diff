@@ -10,6 +10,7 @@ A NeoVim plugin that replicates the Git source-control UX of VSCode's SCM sideba
 |---|---|
 | **File Status Panel** | Staged & unstaged changes with collapsible sections, status badges, right-aligned |
 | **Commit Graph Panel** | Recent commit history with `HEAD`, branch, remote, and tag ref badges |
+| **Branch preview** | Browse another branch's commits without checking it out — pick from a floating list with `<leader>gb` |
 | **Split Diff View** | Side-by-side old/new diff with syntax highlighting preserved via Tree-sitter/LSP |
 | **Line-level colours** | Subtle red for removed, green for added — layered on top of syntax colours |
 | **Word-level highlights** | Darker red/green marks the exact tokens that changed within a line |
@@ -93,6 +94,7 @@ require("diff").setup({
     prev_hunk            = "[c",
     leave_note           = "<leader>n",
     toggle_notes         = "<leader>N",
+    preview_branch       = "<leader>gb",
   },
 
   -- Highlight colour overrides — any valid :hi attribute table
@@ -119,6 +121,7 @@ require("diff").setup({
 | `<leader>gS` | Toggle sidebar panels (show/hide file + commit panels) |
 | `<leader>gy` | Copy session notes file path to clipboard |
 | `<leader>N` | Toggle notes panel |
+| `<leader>gb` | Preview another branch (open branch picker) |
 
 ### File Status Panel
 
@@ -135,6 +138,19 @@ require("diff").setup({
 |---|---|
 | `<CR>` / click | Expand/collapse commit / open commit file diff |
 | `K` | Show full commit message tooltip |
+
+### Branch Picker
+
+Opened with `<leader>gb` (or `:DiffNvimPreviewBranch`).
+
+| Key | Action |
+|---|---|
+| `<any char>` | Filter the branch list (substring match) |
+| `<BS>` / `<C-h>` | Delete last filter character |
+| `<Down>` / `<C-n>` / `<Tab>` | Next branch |
+| `<Up>` / `<C-p>` / `<S-Tab>` | Previous branch |
+| `<CR>` | Preview the selected branch |
+| `<Esc>` / `q` / `<C-c>` | Cancel |
 
 ### Diff View
 
@@ -165,7 +181,27 @@ require("diff").setup({
 | `:DiffNvimOpen` | Open sidebar |
 | `:DiffNvimClose` | Close sidebar |
 | `:DiffNvimToggle` | Toggle sidebar |
+| `:DiffNvimPreviewBranch` | Preview another branch's commits without checking it out |
 | `:DiffNvimNotes` | Toggle notes panel |
+
+---
+
+## Branch Preview
+
+Press `<leader>gb` (or run `:DiffNvimPreviewBranch`) to open a floating picker
+listing all local and remote branches, sorted by most recent commit. Selecting a
+branch puts the interface into **preview mode**:
+
+- The commit panel is re-sourced from the chosen branch (`git log <branch>`), so
+  you can browse its history and open per-file diffs — all **without checking it
+  out** and without touching your working tree.
+- The file status panel shows a `Preview: <branch>` header instead of changes,
+  since uncommitted working-tree changes belong only to the branch you actually
+  have checked out.
+
+The picker marks your current branch with `(current)`; selecting it returns to
+normal live mode. Preview mode is read-only and is cleared when the interface is
+closed.
 
 ---
 

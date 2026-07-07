@@ -729,7 +729,9 @@ end
 --- @param buf       integer
 --- @param win       integer
 --- @param repo_root string
-function M.refresh(buf, win, repo_root)
+--- @param ref       string|nil  Branch to source commits from (preview mode);
+---   nil sources from HEAD (live mode).
+function M.refresh(buf, win, repo_root, ref)
   _buf = buf
   _win = win
   _repo_root = repo_root
@@ -741,7 +743,7 @@ function M.refresh(buf, win, repo_root)
     if not vim.api.nvim_buf_is_valid(buf) then return end
     _commits = commits or {}
     render(buf, _commits)
-  end)
+  end, ref)
 end
 
 M.close_tooltip = close_tooltip

@@ -1,5 +1,10 @@
 local M = {}
 
+-- Unit Separator (0x1F) used as a field delimiter in --format outputs to avoid
+-- clashes with commit content. Declared at module scope so every helper (log,
+-- for-each-ref, …) can reference it regardless of definition order.
+local SEP = string.char(0x1F)
+
 -- ---------------------------------------------------------------------------
 -- Core runner
 -- ---------------------------------------------------------------------------
@@ -67,6 +72,70 @@ function M.get_repo_root(cwd, callback)
       callback(lines[1]:gsub("%s+$", ""), nil)
     end
   end)
+end
+
+-- ---------------------------------------------------------------------------
+-- Branches
+-- ---------------------------------------------------------------------------
+
+--- Get the name of the currently checked-out branch.
+--- @param root     string
+--- @param callback fun(branch: string|nil, err: string|nil)
+---   branch is nil when in a detached-HEAD state.
+function M.get_current_branch(root, callback)
+  M.run({ "rev-parse", "--abbrev-ref", "HEAD" }, root, function(lines, stderr, code)
+    if code ~= 0 or #lines == 0 then
+      callback(nil, stderr ~= "" and stderr or "cannot determine current branch")
+      return
+    end
+    local name = lines[1]:gsub("%s+$", "")
+    -- Detached HEAD reports the literal string "HEAD".
+    if name == "HEAD" or name == "" then
+      callback(nil, nil)
+    else
+      callback(name, nil)
+    end
+  end)
+end
+
+--- List local and remote branches, sorted by most-recent commit.
+--- @param root     string
+--- @param callback fun(branches: table[], err: string|nil)
+---   Each entry: { name = string, is_head = boolean, is_remote = boolean }
+function M.list_branches(root, callback)
+  -- Fields: %(HEAD) "*" for current branch; full %(refname) to reliably tell
+  -- local (refs/heads/…) from remote (refs/remotes/…); short name for display.
+  local fmt = "%(HEAD)" .. SEP .. "%(refname)" .. SEP .. "%(refname:short)"
+  M.run(
+    { "for-each-ref", "--sort=-committerdate", "--format=" .. fmt,
+      "refs/heads", "refs/remotes" },
+    root,
+    function(lines, stderr, code)
+      if code ~= 0 then
+        callback(nil, stderr ~= "" and stderr or "cannot list branches")
+        return
+      end
+
+      local branches = {}
+      for _, line in ipairs(lines) do
+        if line ~= "" then
+          local head_mark, full, name = line:match("^(.-)" .. SEP .. "(.-)" .. SEP .. "(.+)$")
+          if name and name ~= "" then
+            local is_remote = full:match("^refs/remotes/") ~= nil
+            -- Skip the symbolic "origin/HEAD -> origin/main" pointer.
+            if not (is_remote and name:match("/HEAD$")) then
+              table.insert(branches, {
+                name      = name,
+                is_head   = (head_mark == "*"),
+                is_remote = is_remote,
+              })
+            end
+          end
+        end
+      end
+      callback(branches, nil)
+    end
+  )
 end
 
 -- ---------------------------------------------------------------------------
@@ -257,16 +326,21 @@ end
 -- Log — uses Unit Separator (0x1F) as field delimiter to avoid NUL byte issues
 -- ---------------------------------------------------------------------------
 
-local SEP = string.char(0x1F)
 local LOG_FMT = "%H" .. SEP .. "%h" .. SEP .. "%an" .. SEP .. "%ar" .. SEP .. "%s" .. SEP .. "%D"
 
 --- Fetch recent commits.
 --- @param root     string
 --- @param n        number    Max number of commits.
 --- @param callback fun(commits: table[], err: string|nil)
-function M.get_commits(root, n, callback)
+--- @param ref      string|nil Optional ref/branch to read history from
+---   (defaults to HEAD when nil). Used by branch-preview mode.
+function M.get_commits(root, n, callback, ref)
+  local args = { "log", "--format=" .. LOG_FMT, "-n", tostring(n) }
+  if ref and ref ~= "" then
+    table.insert(args, ref)
+  end
   M.run(
-    { "log", "--format=" .. LOG_FMT, "-n", tostring(n) },
+    args,
     root,
     function(lines, stderr, code)
       if code ~= 0 then
