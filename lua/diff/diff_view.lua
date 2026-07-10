@@ -48,6 +48,11 @@ M._file_watcher       = nil   -- libuv fs_event handle
 M._file_watcher_timer = nil   -- pending debounce timer
 M._watched_file_info  = nil   -- {repo_root, file_info} saved for re-open on change
 
+-- View state captured just before a watcher-triggered reopen, so the rebuilt
+-- panes can restore the user's cursor/scroll position instead of jumping to
+-- the top of the buffer. Consumed (and cleared) by the next M.open() call.
+M._pending_restore = nil
+
 -- ---------------------------------------------------------------------------
 -- Highlight priorities (relative to tree-sitter's default of 100)
 -- ---------------------------------------------------------------------------
@@ -312,6 +317,60 @@ local function stop_file_watcher()
   M._watched_file_info = nil
 end
 
+--- Capture the current cursor/scroll position of whichever diff pane is
+--- focused, so a watcher-triggered reopen can restore it afterward instead
+--- of resetting the view to the top of the buffer.
+--- @return table|nil  {side="left"|"right", row, col, topline}
+local function capture_view_state()
+  local cur_win = vim.api.nvim_get_current_win()
+  local side
+  if cur_win == M._left_win then
+    side = "left"
+  elseif cur_win == M._right_win then
+    side = "right"
+  else
+    return nil
+  end
+
+  local ok_cursor, cursor = pcall(vim.api.nvim_win_get_cursor, cur_win)
+  if not ok_cursor then return nil end
+
+  local info = vim.fn.getwininfo(cur_win)
+  local topline = (info and #info > 0) and info[1].topline or nil
+
+  return { side = side, row = cursor[1], col = cursor[2], topline = topline }
+end
+
+--- Apply a view state captured by capture_view_state() to the freshly rebuilt
+--- panes, clamping to the new buffer's line count. Consumes (clears)
+--- M._pending_restore. Returns true if a restore was applied.
+--- @return boolean
+local function apply_pending_restore()
+  local restore = M._pending_restore
+  M._pending_restore = nil
+  if not restore then return false end
+
+  local win = restore.side == "left" and M._left_win or M._right_win
+  if not win or not vim.api.nvim_win_is_valid(win) then return false end
+
+  local buf = vim.api.nvim_win_get_buf(win)
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  local row = math.min(math.max(restore.row, 1), line_count)
+
+  vim.api.nvim_set_current_win(win)
+  pcall(vim.api.nvim_win_set_cursor, win, { row, restore.col })
+  if restore.topline then
+    vim.api.nvim_win_call(win, function()
+      vim.fn.winrestview({ topline = math.min(restore.topline, line_count) })
+    end)
+  end
+  vim.notify(
+    string.format("diff.nvim: restored %s pane cursor to row %d (requested %d) after live reload",
+      restore.side, row, restore.row),
+    vim.log.levels.DEBUG)
+  return true
+end
+
 --- Start watching an absolute file path and re-open the diff on changes.
 --- Only used for unstaged working-tree files.
 --- @param abs_path  string   Absolute path to watch
@@ -324,8 +383,12 @@ local function start_file_watcher(abs_path, repo_root, file_info)
   local ok, fs_event = pcall(uv.new_fs_event)
   if not ok or not fs_event then return end
 
-  local started = fs_event:start(abs_path, {}, vim.schedule_wrap(function(err, _, _)
+  local started = fs_event:start(abs_path, {}, vim.schedule_wrap(function(err, fname, status)
     if err then return end
+    vim.notify(
+      string.format("diff.nvim: fs_event fired for %s (fname=%s, status=%s)",
+        abs_path, tostring(fname), vim.inspect(status)),
+      vim.log.levels.DEBUG)
     -- Cancel any pending debounce
     if M._file_watcher_timer then
       pcall(function() M._file_watcher_timer:stop() end)
@@ -335,6 +398,7 @@ local function start_file_watcher(abs_path, repo_root, file_info)
       M._file_watcher_timer = nil
       -- Only refresh if a diff view is still open
       if M._left_buf or M._right_buf then
+        M._pending_restore = capture_view_state()
         M.open_file_diff(repo_root, file_info)
       end
     end, 300)
@@ -1089,6 +1153,9 @@ function M.open(opts)
       { file_path = opts.file_path, repo_root = opts.repo_root }
     )
 
+    -- Restore cursor/scroll from before a watcher-triggered reopen, if any.
+    apply_pending_restore()
+
     return
   end
 
@@ -1219,8 +1286,11 @@ function M.open(opts)
     repo_root = opts.repo_root,
   })
 
-  -- Focus the right (new) pane
-  vim.api.nvim_set_current_win(M._right_win)
+  -- Restore cursor/scroll from before a watcher-triggered reopen, if any;
+  -- otherwise default to focusing the right (new) pane.
+  if not apply_pending_restore() then
+    vim.api.nvim_set_current_win(M._right_win)
+  end
 end
 
 -- ---------------------------------------------------------------------------
@@ -1283,6 +1353,7 @@ function M.open_file_diff(repo_root, file_info)
 
       if is_bin then
         vim.notify("diff.nvim: binary file — " .. file_info.path, vim.log.levels.INFO)
+        M._pending_restore = nil
         return
       end
 
@@ -1346,6 +1417,7 @@ function M.open_file_diff(repo_root, file_info)
 
   if not ok then
     vim.notify("diff.nvim: unexpected error: " .. tostring(err), vim.log.levels.ERROR)
+    M._pending_restore = nil
     close_diff_wins()
   end
 end
