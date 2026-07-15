@@ -385,10 +385,6 @@ local function start_file_watcher(abs_path, repo_root, file_info)
 
   local started = fs_event:start(abs_path, {}, vim.schedule_wrap(function(err, fname, status)
     if err then return end
-    vim.notify(
-      string.format("diff.nvim: fs_event fired for %s (fname=%s, status=%s)",
-        abs_path, tostring(fname), vim.inspect(status)),
-      vim.log.levels.DEBUG)
     -- Cancel any pending debounce
     if M._file_watcher_timer then
       pcall(function() M._file_watcher_timer:stop() end)
