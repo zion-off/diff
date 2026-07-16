@@ -364,10 +364,6 @@ local function apply_pending_restore()
       vim.fn.winrestview({ topline = math.min(restore.topline, line_count) })
     end)
   end
-  vim.notify(
-    string.format("diff.nvim: restored %s pane cursor to row %d (requested %d) after live reload",
-      restore.side, row, restore.row),
-    vim.log.levels.DEBUG)
   return true
 end
 
