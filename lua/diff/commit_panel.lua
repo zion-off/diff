@@ -683,14 +683,33 @@ function M.setup(buf, win, repo_root)
     local pair = header_pair[lnr]
     return pair and pair[2] == lnr and pair[1] ~= lnr
   end
+  -- A row is skippable when it carries no information of its own: the meta line
+  -- (highlighted together with the subject above it) and the blank spacers
+  -- inside an expanded commit body.
+  local function is_skippable(lnr, lines)
+    if is_meta_line(lnr) then return true end
+    return (lines[lnr] or ""):match("^%s*$") ~= nil
+  end
+
   local function move(dir)
     if not _win or not vim.api.nvim_win_is_valid(_win) then return end
-    local last = vim.api.nvim_buf_line_count(_buf)
-    local cur  = vim.api.nvim_win_get_cursor(_win)[1]
-    local target = cur + dir
-    if is_meta_line(target) then target = target + dir end
-    if target < 1 or target > last then return end
-    pcall(vim.api.nvim_win_set_cursor, _win, { target, 0 })
+    if not _buf or not vim.api.nvim_buf_is_valid(_buf) then return end
+    local lines = vim.api.nvim_buf_get_lines(_buf, 0, -1, false)
+    local last  = #lines
+    local row   = vim.api.nvim_win_get_cursor(_win)[1]
+
+    -- Honour a count prefix: `10j` must move ten rows, not one. Each step
+    -- skips over non-informative rows before landing.
+    for _ = 1, vim.v.count1 do
+      local target = row + dir
+      while target >= 1 and target <= last and is_skippable(target, lines) do
+        target = target + dir
+      end
+      if target < 1 or target > last then break end
+      row = target
+    end
+
+    pcall(vim.api.nvim_win_set_cursor, _win, { row, 0 })
   end
   vim.keymap.set("n", "j", function() move(1) end,
     vim.tbl_extend("force", opts, { desc = "Next row, skip meta line (diff)" }))

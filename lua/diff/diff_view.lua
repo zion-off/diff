@@ -921,6 +921,42 @@ local function setup_keymaps(left_buf, right_buf, opts)
       end
     end, "Prev hunk")
 
+    -- j/k: step over filler rows.
+    --
+    -- Fillers are structural padding that exists only to keep this pane aligned
+    -- with the other side's added/removed lines. They hold no file content, so
+    -- stopping on them while moving vertically is never useful, and a large
+    -- one-sided change produces a long run of them to walk through.
+    --
+    -- Collapsed separators are deliberately NOT skipped: they are actionable
+    -- (l / zo expand the region they stand for), so the cursor must reach them.
+    local function vmove(dir)
+      local win  = vim.api.nvim_get_current_win()
+      local aln  = (buf == left_buf) and M._left_aligned or M._right_aligned
+      local last = vim.api.nvim_buf_line_count(buf)
+      local pos  = vim.api.nvim_win_get_cursor(win)
+      local row, col = pos[1], pos[2]
+
+      for _ = 1, vim.v.count1 do
+        local next_row = row + dir
+        while next_row >= 1 and next_row <= last
+          and aln and aln[next_row] and aln[next_row].type == "filler" do
+          next_row = next_row + dir
+        end
+        -- Out of bounds means only fillers remain in this direction; stop on
+        -- the last real row reached rather than jumping into the padding.
+        if next_row < 1 or next_row > last then break end
+        row = next_row
+      end
+
+      pcall(vim.api.nvim_win_set_cursor, win, { row, col })
+    end
+
+    map(buf, "n", "j",      function() vmove(1)  end, "Down, skip filler rows")
+    map(buf, "n", "k",      function() vmove(-1) end, "Up, skip filler rows")
+    map(buf, "n", "<Down>", function() vmove(1)  end, "Down, skip filler rows")
+    map(buf, "n", "<Up>",   function() vmove(-1) end, "Up, skip filler rows")
+
     -- Expand context (zo)
     map(buf, "n", km.expand_context or "zo", function()
       M.expand_context()

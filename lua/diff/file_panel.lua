@@ -19,6 +19,14 @@ local collapsed = {
   unstaged = false,
 }
 
+-- Per-directory collapse state, keyed "<section>:<dir path>" so the same path
+-- in the staged and unstaged trees collapses independently.
+local collapsed_dirs = {}
+
+local function dir_key(section, path)
+  return section .. ":" .. path
+end
+
 -- ---------------------------------------------------------------------------
 -- Status badge helpers
 -- ---------------------------------------------------------------------------
@@ -107,23 +115,33 @@ local function render(buf, status, preview)
 
   local render_node  -- forward declaration for mutual recursion
 
-  local function render_dir(node, depth, section)
+  local function render_dir(node, depth, section, prefix)
     -- Compact single-child-dir chains: "src/" + "components/" → "src/components/"
     local display, cur = util.compact_dir_chain(node)
 
+    -- Path key covers the whole compacted chain, so collapsing "src/components"
+    -- stays stable even as the chain shortens when sibling dirs appear.
+    local dir_path     = prefix .. display
+    local key          = dir_key(section, dir_path)
+    local is_collapsed = collapsed_dirs[key] or false
+
     local indent = string.rep("  ", depth + 1)
     -- Middle-ellipsize the (possibly long, compacted) dir path; reserve 1 col
-    -- for the trailing "/".
-    local avail        = math.max(1, panel_w - #indent - 1)
+    -- for the trailing "/" and 1 more for the collapsed marker.
+    local avail        = math.max(1, panel_w - #indent - 2)
     local display_name = util.trunc_middle(display, avail)
-    local dir_line     = indent .. display_name .. "/"
+    -- Trailing "…" marks a collapsed directory. It is appended rather than
+    -- prefixed so expanding and collapsing never shifts the name's column.
+    local dir_line     = indent .. display_name .. "/" .. (is_collapsed and "…" or "")
     table.insert(lines, dir_line)
     local lnr = #lines
-    line_map[lnr] = { type = "dir_node", section = section }
-    table.insert(hl_queue, { lnr - 1, "Comment", #indent, #indent + #display_name + 1 })
+    line_map[lnr] = { type = "dir_node", section = section, dir_key = key }
+    table.insert(hl_queue, { lnr - 1, "Comment", #indent, #dir_line })
+
+    if is_collapsed then return end
 
     for _, child in ipairs(sorted(cur.children)) do
-      render_node(child, depth + 1, section)
+      render_node(child, depth + 1, section, dir_path .. "/")
     end
   end
 
@@ -156,7 +174,7 @@ local function render(buf, status, preview)
     return text, add_range, del_range
   end
 
-  render_node = function(node, depth, section)
+  render_node = function(node, depth, section, prefix)
     if node.file then
       local f      = node.file
       local indent = string.rep("  ", depth + 1)
@@ -200,7 +218,7 @@ local function render(buf, status, preview)
           stat_base + del_range[1], stat_base + del_range[2] })
       end
     else
-      render_dir(node, depth, section)
+      render_dir(node, depth, section, prefix)
     end
   end
 
@@ -211,7 +229,7 @@ local function render(buf, status, preview)
     if not collapsed[section] then
       local tree = build_tree(files)
       for _, child in ipairs(sorted(tree.children)) do
-        render_node(child, 0, section)
+        render_node(child, 0, section, "")
       end
     end
   end
@@ -244,6 +262,7 @@ function M.setup(buf, win, repo_root)
   -- Reset state on each setup (prevents leaks between open/close cycles)
   line_map = {}
   collapsed = { staged = false, unstaged = false }
+  collapsed_dirs = {}
 
   local cfg = config.get()
   local km  = cfg.keymaps or {}
@@ -258,6 +277,9 @@ function M.setup(buf, win, repo_root)
 
     if meta.type == "header" then
       collapsed[meta.section] = not collapsed[meta.section]
+      M.refresh(buf, win, repo_root)
+    elseif meta.type == "dir_node" then
+      collapsed_dirs[meta.dir_key] = not collapsed_dirs[meta.dir_key]
       M.refresh(buf, win, repo_root)
     elseif meta.type == "file" then
       local dv   = require("diff.diff_view")
@@ -318,17 +340,46 @@ function M.setup(buf, win, repo_root)
     end)
   end, vim.tbl_extend("force", opts, { desc = "Unstage file (diff)" }))
 
-  -- 'z': toggle collapse of the section the cursor is in
+  -- 'z': collapse the directory under the cursor, or the whole section when the
+  -- cursor is not on a directory row.
   vim.keymap.set("n", km.collapse or "z", function()
+    if not vim.api.nvim_win_is_valid(win) then return end
     local lnr  = vim.api.nvim_win_get_cursor(win)[1]
     local meta = line_map[lnr]
     if not meta then return end
+    if meta.type == "dir_node" then
+      collapsed_dirs[meta.dir_key] = not collapsed_dirs[meta.dir_key]
+      M.refresh(buf, win, repo_root)
+      return
+    end
     local section = meta.section
     if section then
       collapsed[section] = not collapsed[section]
       M.refresh(buf, win, repo_root)
     end
-  end, vim.tbl_extend("force", opts, { desc = "Toggle section (diff)" }))
+  end, vim.tbl_extend("force", opts, { desc = "Toggle directory / section (diff)" }))
+
+  -- j/k: step over the blank spacer between the two sections. Every other row
+  -- (header, directory, file) is actionable, so those remain individual stops.
+  local function move(dir)
+    if not vim.api.nvim_win_is_valid(win) then return end
+    local last = vim.api.nvim_buf_line_count(buf)
+    local row  = vim.api.nvim_win_get_cursor(win)[1]
+    for _ = 1, vim.v.count1 do
+      local target = row + dir
+      while target >= 1 and target <= last
+        and line_map[target] and line_map[target].type == "blank" do
+        target = target + dir
+      end
+      if target < 1 or target > last then break end
+      row = target
+    end
+    pcall(vim.api.nvim_win_set_cursor, win, { row, 0 })
+  end
+  for key, dir in pairs({ j = 1, k = -1, ["<Down>"] = 1, ["<Up>"] = -1 }) do
+    vim.keymap.set("n", key, function() move(dir) end,
+      vim.tbl_extend("force", opts, { desc = "Move, skip blank rows (diff)" }))
+  end
 
   -- 'q': close the entire diff.nvim interface
   vim.keymap.set("n", "q", function()
