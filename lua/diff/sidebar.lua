@@ -35,6 +35,69 @@ local function is_valid_win(win)
   return win ~= nil and vim.api.nvim_win_is_valid(win)
 end
 
+-- ---------------------------------------------------------------------------
+-- Global keymaps installed while the interface is open
+-- ---------------------------------------------------------------------------
+
+-- Records every global mapping we install, together with whatever it shadowed.
+-- close() used to vim.keymap.del these unconditionally, which silently threw
+-- away the user's own mapping on those keys -- including <LeftMouse>, where
+-- losing it breaks mouse use editor-wide.
+-- Entries: { mode = string, lhs = string, prev = <keymap table>|false }
+M._installed_maps = {}
+
+local function normalize_lhs(lhs)
+  return vim.api.nvim_replace_termcodes(lhs, true, true, true)
+end
+
+--- Find an existing global mapping for `lhs` in `mode`.
+--- nvim_get_keymap reports lhs in termcode-translated form, so both sides are
+--- normalized before comparing.
+--- @return table|nil
+local function find_global_map(mode, lhs)
+  local target = normalize_lhs(lhs)
+  for _, m in ipairs(vim.api.nvim_get_keymap(mode)) do
+    if normalize_lhs(m.lhs) == target then return m end
+  end
+  return nil
+end
+
+--- Install a global mapping, remembering what it replaced.
+local function set_global_map(mode, lhs, rhs, desc)
+  if not lhs or lhs == "" then return end
+  table.insert(M._installed_maps, {
+    mode = mode,
+    lhs  = lhs,
+    prev = find_global_map(mode, lhs) or false,
+  })
+  vim.keymap.set(mode, lhs, rhs, { silent = true, desc = desc })
+end
+
+--- Remove every mapping installed by set_global_map and put back whatever each
+--- one shadowed. Restores in reverse install order so nesting is preserved.
+local function restore_global_maps()
+  for i = #M._installed_maps, 1, -1 do
+    local entry = M._installed_maps[i]
+    pcall(vim.keymap.del, entry.mode, entry.lhs)
+
+    local prev = entry.prev
+    if prev then
+      local opts = {
+        silent  = prev.silent  == 1,
+        noremap = prev.noremap == 1,
+        expr    = prev.expr    == 1,
+        nowait  = prev.nowait  == 1,
+        desc    = prev.desc,
+      }
+      local rhs = prev.callback or prev.rhs
+      if rhs then
+        pcall(vim.keymap.set, entry.mode, entry.lhs, rhs, opts)
+      end
+    end
+  end
+  M._installed_maps = {}
+end
+
 local function clear_panel_state()
   M._file_win   = nil
   M._commit_win = nil
@@ -54,7 +117,7 @@ function M._install_click_dispatcher()
   if M._click_dispatcher_installed then return end
   M._click_dispatcher_installed = true
 
-  vim.keymap.set("n", "<LeftMouse>", function()
+  set_global_map("n", "<LeftMouse>", function()
     local mp = vim.fn.getmousepos()
     -- Replay the real click first so Neovim focuses the target window and moves
     -- the cursor. Mode "n" (noremap) prevents this from re-triggering our map.
@@ -78,7 +141,7 @@ function M._install_click_dispatcher()
         pcall(target.activate_line, mp.line)
       end
     end)
-  end, { silent = true, desc = "Activate diff.nvim panel row (global)" })
+  end, "Activate diff.nvim panel row (global)")
 
   -- Block horizontal mouse-wheel scrolling over the panels. Like clicks, wheel
   -- events act on the window under the cursor regardless of focus, so a
@@ -87,14 +150,14 @@ function M._install_click_dispatcher()
   -- panel (content is truncated to width, so it only reveals blank space) and
   -- otherwise replay the event so scrolling works normally elsewhere.
   local function block_hscroll(key)
-    vim.keymap.set("n", key, function()
+    set_global_map("n", key, function()
       local mp = vim.fn.getmousepos()
       if mp.winid == M._commit_win or mp.winid == M._file_win then
         return  -- swallow: no horizontal scroll in the panels
       end
       vim.api.nvim_feedkeys(
         vim.api.nvim_replace_termcodes(key, true, false, true), "n", false)
-    end, { silent = true, desc = "Block panel horizontal scroll (global)" })
+    end, "Block panel horizontal scroll (global)")
   end
   block_hscroll("<ScrollWheelLeft>")
   block_hscroll("<ScrollWheelRight>")
@@ -103,9 +166,8 @@ end
 function M._remove_click_dispatcher()
   if not M._click_dispatcher_installed then return end
   M._click_dispatcher_installed = false
-  pcall(vim.keymap.del, "n", "<LeftMouse>")
-  pcall(vim.keymap.del, "n", "<ScrollWheelLeft>")
-  pcall(vim.keymap.del, "n", "<ScrollWheelRight>")
+  -- The mappings themselves are removed by restore_global_maps() in close(),
+  -- which also puts back anything they shadowed.
 end
 
 --- @param win integer|nil
@@ -360,13 +422,10 @@ function M.open(repo_root)
   -- Start the filesystem watcher now that the repo root is set
   M._start_fs_watcher()
 
-  -- Register interface-scoped keymaps (removed on close)
-  local cfg = config.get()
+  -- Register interface-scoped keymaps (restored on close)
   local km  = cfg.keymaps or {}
   local function nmap(key, fn, desc)
-    if key and key ~= "" then
-      vim.keymap.set("n", key, fn, { silent = true, desc = desc .. " (diff)" })
-    end
+    set_global_map("n", key, fn, desc .. " (diff)")
   end
   nmap(km.toggle_sidebar_panel or "<leader>gS", function()
     M.toggle_sidebar_panel()
@@ -387,17 +446,9 @@ end
 
 --- Close the diff.nvim interface, restore previous layout.
 function M.close()
-  -- Remove interface-scoped keymaps
-  local cfg = config.get()
-  local km  = cfg.keymaps or {}
-  for _, key in ipairs({
-    km.toggle_sidebar_panel or "<leader>gS",
-    km.copy_notes_path      or "<leader>gy",
-    km.toggle_notes         or "<leader>N",
-    km.preview_branch       or "<leader>gb",
-  }) do
-    pcall(vim.keymap.del, "n", key)
-  end
+  -- Remove the global mappings installed on open, putting back anything they
+  -- shadowed. This covers both the <leader> maps and the mouse dispatcher.
+  restore_global_maps()
 
   -- Leaving preview mode when the interface closes so a fresh open starts live.
   M._preview_branch = nil

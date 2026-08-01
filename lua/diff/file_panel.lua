@@ -316,6 +316,9 @@ function M.setup(buf, win, repo_root)
 
   -- 's': stage file (unstaged section only)
   vim.keymap.set("n", km.stage_file or "s", function()
+    -- `win` is captured at setup time; it can be gone by the time the key is
+    -- pressed (close/reopen cycle), and nvim_win_get_cursor raises on a dead id.
+    if not vim.api.nvim_win_is_valid(win) then return end
     local lnr  = vim.api.nvim_win_get_cursor(win)[1]
     local meta = line_map[lnr]
     if not meta or meta.type ~= "file" or meta.section ~= "unstaged" then return end
@@ -329,6 +332,7 @@ function M.setup(buf, win, repo_root)
 
   -- 'u': unstage file (staged section only)
   vim.keymap.set("n", km.unstage_file or "u", function()
+    if not vim.api.nvim_win_is_valid(win) then return end
     local lnr  = vim.api.nvim_win_get_cursor(win)[1]
     local meta = line_map[lnr]
     if not meta or meta.type ~= "file" or meta.section ~= "staged" then return end
