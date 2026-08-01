@@ -140,6 +140,30 @@ end
 
 --- Apply per-window options appropriate for a diff pane.
 --- @param win integer
+--- Open a pane to the left of `anchor_win` and show `buf` in it.
+--- Returns the new window, or nil when the split could not be made.
+---
+--- `:vsplit` throws E36 when there is not enough room — a narrow terminal
+--- alongside the sidebar and an open notes panel is enough. That must not
+--- propagate: the error path in the callers responds by closing the whole
+--- view, turning a recoverable layout constraint into a vanished diff.
+--- @param  anchor_win integer
+--- @param  buf        integer
+--- @return integer|nil
+local function split_left_pane(anchor_win, buf)
+  if not (anchor_win and vim.api.nvim_win_is_valid(anchor_win)) then return nil end
+  if not pcall(vim.api.nvim_set_current_win, anchor_win) then return nil end
+  if not pcall(vim.cmd, "leftabove vsplit") then return nil end
+
+  local win = vim.api.nvim_get_current_win()
+  if win == anchor_win then return nil end
+  if not pcall(vim.api.nvim_win_set_buf, win, buf) then
+    pcall(vim.api.nvim_win_close, win, true)
+    return nil
+  end
+  return win
+end
+
 local function set_win_opts(win)
   local wopts = {
     number         = true,
@@ -1203,26 +1227,12 @@ function M.open(opts)
   local sidebar = require("diff.sidebar")
   local main_win = sidebar.get_main_win()
 
-  if main_win and vim.api.nvim_win_is_valid(main_win) then
-    vim.api.nvim_set_current_win(main_win)
-    vim.api.nvim_win_set_buf(main_win, right_buf)
-    local right_win = main_win
+  -- Pick the window the NEW side goes in: the sidebar's main area when it is
+  -- available, otherwise the widest window that is not one of our panels.
+  local host_win = (main_win and vim.api.nvim_win_is_valid(main_win)) and main_win or nil
 
-    -- Full-width filename header above the (still un-split) main window.
-    create_header(right_win, opts.file_path)
-
-    vim.api.nvim_set_current_win(right_win)
-    vim.cmd("leftabove vsplit")
-    local left_win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(left_win, left_buf)
-
-    M._left_win  = left_win
-    M._right_win = right_win
-
-    sidebar.set_main_win(right_win)
-  else
-    -- Fallback: find the widest non-panel window
-    local best_win, best_width = nil, 0
+  if not host_win then
+    local best_width = 0
     for _, win in ipairs(vim.api.nvim_list_wins()) do
       if vim.api.nvim_win_is_valid(win) then
         local buf = vim.api.nvim_win_get_buf(win)
@@ -1231,78 +1241,94 @@ function M.open(opts)
           local w = vim.api.nvim_win_get_width(win)
           if w > best_width then
             best_width = w
-            best_win   = win
+            host_win   = win
           end
         end
       end
     end
-
-    if best_win then
-      vim.api.nvim_set_current_win(best_win)
-      vim.api.nvim_win_set_buf(best_win, right_buf)
-      create_header(best_win, opts.file_path)
-      vim.api.nvim_set_current_win(best_win)
-      vim.cmd("leftabove vsplit")
-      local left_win = vim.api.nvim_get_current_win()
-      vim.api.nvim_win_set_buf(left_win, left_buf)
-      M._left_win  = left_win
-      M._right_win = best_win
-    else
-      vim.cmd("vsplit")
-      M._right_win = vim.api.nvim_get_current_win()
-      vim.api.nvim_win_set_buf(M._right_win, right_buf)
-      create_header(M._right_win, opts.file_path)
-      vim.api.nvim_set_current_win(M._right_win)
-      vim.cmd("leftabove vsplit")
-      M._left_win = vim.api.nvim_get_current_win()
-      vim.api.nvim_win_set_buf(M._left_win, left_buf)
-    end
   end
 
-  set_win_opts(M._left_win)
+  if not host_win then
+    if not pcall(vim.cmd, "vsplit") then
+      vim.notify("diff.nvim: no room to open a diff window", vim.log.levels.ERROR)
+      return
+    end
+    host_win = vim.api.nvim_get_current_win()
+  end
+
+  pcall(vim.api.nvim_set_current_win, host_win)
+  pcall(vim.api.nvim_win_set_buf, host_win, right_buf)
+  M._right_win = host_win
+
+  -- Full-width filename header above the (still un-split) host window.
+  create_header(host_win, opts.file_path)
+
+  M._left_win = split_left_pane(host_win, left_buf)
+
+  if main_win and host_win == main_win then
+    sidebar.set_main_win(host_win)
+  end
+
+  -- The split can legitimately fail for want of width. Degrade to showing the
+  -- new side alone rather than letting the caller's error path tear the view
+  -- down; everything below guards on M._left_win being present.
+  if not M._left_win then
+    M._single_pane = true
+    M._left_buf    = nil
+    -- The OLD-side buffer was built before the split was attempted; without a
+    -- window to show it, drop it rather than leaking it into the buffer list.
+    pcall(vim.api.nvim_buf_delete, left_buf, { force = true })
+    vim.notify("diff.nvim: not enough width for a split diff — showing the new side only",
+      vim.log.levels.WARN)
+  end
+
+  if M._left_win then set_win_opts(M._left_win) end
   set_win_opts(M._right_win)
 
   -- The filename is shown once in the full-width header window (create_header),
   -- so the per-pane winbars are cleared. The left/right split conveys OLD/NEW.
-  pcall(vim.api.nvim_set_option_value, "winbar", "", { win = M._left_win })
+  if M._left_win then
+    pcall(vim.api.nvim_set_option_value, "winbar", "", { win = M._left_win })
+  end
   pcall(vim.api.nvim_set_option_value, "winbar", "", { win = M._right_win })
 
   -- ── Apply highlights ─────────────────────────────────────────────────────
   -- Deferred via vim.schedule so tree-sitter completes its first parse before
   -- our extmarks are applied. This prevents TS from overwriting word highlights.
   -- Guard with generation counter to skip stale callbacks from rapid re-opens.
-  local left_buf_ref  = left_buf
+  local left_buf_ref  = M._left_buf
   local right_buf_ref = right_buf
   local repo_root_ref = opts.repo_root
   local file_path_ref = opts.file_path
 
   -- Parse the full old/new file so collapsed separators can be labelled with
   -- their enclosing declaration (GitHub-style headings).
-  local parsed_old = parse_full_file(old_lines, ft)
+  local parsed_old = left_buf_ref and parse_full_file(old_lines, ft) or nil
   local parsed_new = parse_full_file(new_lines, ft)
 
   vim.schedule(function()
     if this_gen ~= M._render_gen then return end
-    if not vim.api.nvim_buf_is_valid(left_buf_ref)  then return end
     if not vim.api.nvim_buf_is_valid(right_buf_ref) then return end
 
-    vim.api.nvim_buf_clear_namespace(left_buf_ref,  NS, 0, -1)
     vim.api.nvim_buf_clear_namespace(right_buf_ref, NS, 0, -1)
-
-    apply_line_highlights(left_buf_ref,  left_aln,  parsed_old, "old")
     apply_line_highlights(right_buf_ref, right_aln, parsed_new, "new")
-    apply_word_highlights(left_buf_ref, right_buf_ref, left_aln, right_aln)
-
-    -- ── Note markers ───────────────────────────────────────────────────────
-    apply_note_markers(left_buf_ref,  left_aln,  "old", repo_root_ref, file_path_ref)
     apply_note_markers(right_buf_ref, right_aln, "new", repo_root_ref, file_path_ref)
+
+    if left_buf_ref and vim.api.nvim_buf_is_valid(left_buf_ref) then
+      vim.api.nvim_buf_clear_namespace(left_buf_ref, NS, 0, -1)
+      apply_line_highlights(left_buf_ref, left_aln, parsed_old, "old")
+      apply_word_highlights(left_buf_ref, right_buf_ref, left_aln, right_aln)
+      apply_note_markers(left_buf_ref, left_aln, "old", repo_root_ref, file_path_ref)
+    end
   end)
 
   -- ── Scroll sync ──────────────────────────────────────────────────────────
-  setup_scroll_sync(M._left_win, M._right_win)
+  if M._left_win then
+    setup_scroll_sync(M._left_win, M._right_win)
+  end
 
   -- ── Keymaps ──────────────────────────────────────────────────────────────
-  setup_keymaps(left_buf, right_buf, {
+  setup_keymaps(M._left_buf, right_buf, {
     file_path = opts.file_path,
     repo_root = opts.repo_root,
   })
