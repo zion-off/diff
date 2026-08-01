@@ -28,6 +28,13 @@ M._current_file  = nil
 -- if M.open() is called again before the first schedule fires.
 M._render_gen    = 0
 
+-- Request generation counter: incremented on each open_file_diff() /
+-- open_commit_diff() call. This guards the *fetch* phase, which _render_gen
+-- does not: git jobs for two files run concurrently and can complete out of
+-- order, so without this a slow fetch for the previously-selected file renders
+-- on top of the file the user just clicked.
+M._request_gen   = 0
+
 -- Cursor alignment lookup tables (built at render time)
 -- Maps: left_to_right[left_buf_line] = right_buf_line (and vice-versa)
 M._left_to_right = nil
@@ -1374,6 +1381,9 @@ end
 --- @param repo_root string
 --- @param file_info table   {path, status, staged}
 function M.open_file_diff(repo_root, file_info)
+  M._request_gen = M._request_gen + 1
+  local this_request = M._request_gen
+
   local ok, err = pcall(function()
     -- Fire all 4 operations in parallel.  We only render when all 4 complete.
     -- If binary is detected we notify and bail (the other results are discarded).
@@ -1381,6 +1391,10 @@ function M.open_file_diff(repo_root, file_info)
     local old_lines, new_lines, diff_text, is_bin
 
     local function done()
+      -- A newer file was selected while these jobs were in flight; drop the
+      -- results rather than rendering them over the current view.
+      if this_request ~= M._request_gen then return end
+
       pending = pending - 1
       if pending > 0 then return end
 
@@ -1467,7 +1481,13 @@ end
 --- @param file_path    string|nil
 --- @param file_status  string|nil  "A","M","D" etc.
 function M.open_commit_diff(repo_root, hash, file_path, file_status)
+  M._request_gen = M._request_gen + 1
+  local this_request = M._request_gen
+
   local ok, err = pcall(function()
+    --- True while this request is still the most recent one issued.
+    local function is_current() return this_request == M._request_gen end
+
     local function fetch_side(ref, path, cb)
       if not path or path:match("%(all files%)") then
         cb({})
@@ -1509,7 +1529,7 @@ function M.open_commit_diff(repo_root, hash, file_path, file_status)
       local aborted = false  -- set on error to prevent open_when_ready on partial data
 
       local function done()
-        if aborted then return end
+        if aborted or not is_current() then return end
         pending = pending - 1
         if pending > 0 then return end
         open_when_ready(file_path, diff_text, old_lines, new_lines)
@@ -1529,6 +1549,7 @@ function M.open_commit_diff(repo_root, hash, file_path, file_status)
     else
       -- No file path known: need diff text first to extract it
       git.get_commit_diff(repo_root, hash, nil, function(diff_text, cb_err)
+        if not is_current() then return end
         if cb_err then
           vim.notify("diff.nvim: commit diff error: " .. cb_err, vim.log.levels.ERROR)
           return
@@ -1546,6 +1567,7 @@ function M.open_commit_diff(repo_root, hash, file_path, file_status)
         local old_lines, new_lines
 
         local function done()
+          if not is_current() then return end
           pending = pending - 1
           if pending > 0 then return end
           open_when_ready(fp, diff_text, old_lines, new_lines)

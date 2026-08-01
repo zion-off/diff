@@ -596,6 +596,11 @@ function M.setup(buf, win, repo_root)
             if err then
               vim.notify("diff.nvim: " .. err, vim.log.levels.WARN)
               failed = true
+              -- Still count this fetch as settled. Returning early here used to
+              -- strand `pending` above zero, and because the caller only reaches
+              -- this branch when the caches are empty, the commit could never be
+              -- expanded again for the rest of the session.
+              done()
               return
             end
             file_cache[hash] = files or {}
