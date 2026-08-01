@@ -60,18 +60,55 @@ local PRIORITY_LINE_BG   = 50   -- background diff colors — below TS so syntax
 local PRIORITY_WORD_HL   = 150  -- word diff highlights — above TS so they are clearly visible
 local PRIORITY_NOTE_SIGN = 70   -- note markers — between line bg and word highlights
 
+--- Match a filetype against a scratch buffer holding `lines`.
+--- Neovim resolves several common extensions with detection functions that read
+--- the buffer rather than the name — .h (c vs cpp), .ts (typescript vs xml),
+--- .m (objc vs matlab), .r, .env, and every extensionless script identified by
+--- its shebang. Those functions call vim.filetype.getlines(bufnr), so
+--- vim.filetype.match returns nil for them unless it is given a real `buf`.
+--- Passing `contents` is not enough.
+--- @param  path  string
+--- @param  lines string[]
+--- @return string  Filetype, or "" when still undetectable.
+local function match_ft_with_content(path, lines)
+  local buf = vim.api.nvim_create_buf(false, true)
+  local ok_lines = pcall(vim.api.nvim_buf_set_lines, buf, 0, -1, false, lines)
+  local ft = ""
+  if ok_lines then
+    for _, name in ipairs({ path, vim.fn.fnamemodify(path, ":t") }) do
+      if name ~= "" then
+        local ok, matched = pcall(vim.filetype.match, { buf = buf, filename = name })
+        if ok and matched and matched ~= "" then
+          ft = matched
+          break
+        end
+      end
+    end
+  end
+  pcall(vim.api.nvim_buf_delete, buf, { force = true })
+  return ft
+end
+
 --- Detect the filetype for a file path, trying multiple strategies.
 --- vim.filetype.match can return nil on repo-relative paths even when the
---- extension is unambiguous, so we fall back to basename then raw extension.
---- @param  path string  Any path form — absolute, relative, or basename only.
---- @return string       Filetype string, or "" if undetectable.
-local function detect_ft(path)
+--- extension is unambiguous, so we fall back to basename, then to
+--- content-aware matching, then to the raw extension.
+--- @param  path  string        Any path form — absolute, relative, or basename only.
+--- @param  lines string[]|nil  Real file content, used for content-dependent
+---   extensions. Pass the original file lines, not the aligned diff lines: the
+---   aligned list can start with a collapsed separator, which hides the shebang.
+--- @return string              Filetype string, or "" if undetectable.
+local function detect_ft(path, lines)
   if not path or path == "" then return "" end
   local ft = vim.filetype.match({ filename = path })
   if ft and ft ~= "" then return ft end
   local basename = vim.fn.fnamemodify(path, ":t")
   ft = vim.filetype.match({ filename = basename })
   if ft and ft ~= "" then return ft end
+  if lines and #lines > 0 then
+    ft = match_ft_with_content(path, lines)
+    if ft ~= "" then return ft end
+  end
   local ext = vim.fn.fnamemodify(path, ":e")
   if ext and ext ~= "" then
     ft = vim.filetype.match({ filename = "x." .. ext })
@@ -1017,6 +1054,14 @@ function M.open(opts)
   local diff_text = opts.diff_text or ""
   local file_status = opts.file_status or nil
 
+  -- Resolve the filetype once, here, so every pane and any later rerender agree.
+  -- Content-aware detection reads the real file lines: prefer the new side, and
+  -- fall back to the old side for deleted files where the new side is empty.
+  local ft = opts.filetype or ""
+  if ft == "" then
+    ft = detect_ft(opts.file_path, #new_lines > 0 and new_lines or old_lines)
+  end
+
   -- Detect single-pane mode: added/untracked files (no old) or deleted files (no new)
   local single_pane = false
   local single_side = nil
@@ -1066,7 +1111,7 @@ function M.open(opts)
   M._current_old     = old_lines
   M._current_new     = new_lines
   M._current_ctx     = ctx
-  M._current_ft      = opts.filetype
+  M._current_ft      = ft
 
   -- Build cursor alignment map
   if not single_pane then
@@ -1085,8 +1130,6 @@ function M.open(opts)
     fill_aligned_buf(pane_buf, aln)
 
     -- Set filetype and start tree-sitter; fall back to regex syntax if no TS parser
-    local ft = opts.filetype or ""
-    if ft == "" then ft = detect_ft(opts.file_path) end
     set_buf_filetype(pane_buf, ft)
 
     -- Create window
@@ -1165,8 +1208,6 @@ function M.open(opts)
 
   -- Set filetype and start tree-sitter for syntax highlighting; fall back to
   -- regex syntax if no TS parser exists for this filetype.
-  local ft = opts.filetype or ""
-  if ft == "" then ft = detect_ft(opts.file_path) end
   set_buf_filetype(left_buf, ft)
   set_buf_filetype(right_buf, ft)
 
@@ -1350,14 +1391,14 @@ function M.open_file_diff(repo_root, file_info)
       end
 
       local open_ok, open_err = pcall(function()
-        local ft = detect_ft(file_info.path)
+        -- Filetype is resolved inside M.open, which has the file content needed
+        -- for content-dependent extensions (.ts, .h, shebang scripts).
         M.open({
           repo_root   = repo_root,
           file_path   = file_info.path,
           old_lines   = old_lines  or {},
           new_lines   = new_lines  or {},
           diff_text   = diff_text  or "",
-          filetype    = ft,
           file_status = file_info.status,
         })
       end)
@@ -1439,7 +1480,6 @@ function M.open_commit_diff(repo_root, hash, file_path, file_status)
 
     local function open_when_ready(fp, diff_text_val, old_lines_val, new_lines_val)
       local open_ok, open_err = pcall(function()
-        local ft = fp and detect_ft(fp) or ""
         local status = nil
         if file_status then
           if file_status == "A" then status = "added"
@@ -1452,7 +1492,6 @@ function M.open_commit_diff(repo_root, hash, file_path, file_status)
           old_lines   = old_lines_val  or {},
           new_lines   = new_lines_val  or {},
           diff_text   = diff_text_val  or "",
-          filetype    = ft,
           file_status = status,
         })
       end)
