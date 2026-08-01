@@ -24,15 +24,19 @@ function M.run(args, cwd, callback)
     stdout_buffered = true,
     stderr_buffered = true,
 
+    -- Append rather than assign. `stdout_buffered` delivers everything in a
+    -- single callback today, so this is behaviour-preserving, but assigning
+    -- meant that a second callback would silently discard everything received
+    -- before it — a truncated diff rendered as if it were complete.
     on_stdout = function(_, data)
       if data then
-        stdout_chunks = data
+        vim.list_extend(stdout_chunks, data)
       end
     end,
 
     on_stderr = function(_, data)
       if data then
-        stderr_chunks = data
+        vim.list_extend(stderr_chunks, data)
       end
     end,
 

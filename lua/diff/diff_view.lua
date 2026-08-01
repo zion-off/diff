@@ -349,6 +349,32 @@ local function parse_full_file(lines, ft)
   return { root = root, lines = lines }
 end
 
+-- Memoises parse_full_file. Parsing a whole file is synchronous and scales
+-- with file size, not with how much of the diff is on screen, and both sides
+-- were re-parsed on every render — so each zo/zR press and every live refresh
+-- paid the full cost again for content that had not changed.
+--
+-- Keyed by the identity of the lines table, which is replaced exactly when the
+-- content is re-fetched. Weak keys so a cached parse never keeps a stale file's
+-- lines alive.
+local parse_cache = setmetatable({}, { __mode = "k" })
+
+--- @param lines string[]|nil
+--- @param ft    string
+--- @return table|nil
+local function parse_full_file_cached(lines, ft)
+  if not lines or ft == "" then return nil end
+
+  local hit = parse_cache[lines]
+  if hit and hit.ft == ft then return hit.parsed end
+
+  local parsed = parse_full_file(lines, ft)
+  -- Stored even when nil (no parser for this filetype) so the miss is not
+  -- retried on every render.
+  parse_cache[lines] = { ft = ft, parsed = parsed }
+  return parsed
+end
+
 --- Resolve the enclosing declaration heading for a 1-based `line_num` within a
 --- parsed file. Returns a trimmed signature string (e.g. "function M.open")
 --- or nil when there is no enclosing declaration.
@@ -707,17 +733,24 @@ local function setup_scroll_sync(left_win, right_win)
   local aug = vim.api.nvim_create_augroup("DiffNvimScroll", { clear = true })
   M._scroll_aug = aug
 
-  -- Suppress scroll/cursor events on target window while syncing, preventing
-  -- cascading callbacks (e.g. rapid <C-u>/<C-d> firing multiple WinScrolled).
-  -- Always restores eventignore even if fn() throws (exception-safe).
-  -- Sets to exactly "WinScrolled,CursorMoved" (no concatenation) to avoid
-  -- duplicate event names; the original value is always restored afterward.
-  local function with_eventignore(fn)
-    local saved = vim.o.eventignore
-    vim.o.eventignore = "WinScrolled,CursorMoved"
+  -- Re-entrancy guard. Syncing one pane moves the cursor or view in the other,
+  -- which fires the very same autocmds again; without a guard the two panes
+  -- ping-pong.
+  --
+  -- A plain flag rather than 'eventignore': eventignore is a global option, so
+  -- the previous approach suppressed WinScrolled and CursorMoved editor-wide
+  -- for the duration, silently dropping them for every other plugin. It also
+  -- rethrew with error() from inside an autocmd callback, which turns one
+  -- failure into an error message on every subsequent scroll.
+  local syncing = false
+  local function with_sync_guard(fn)
+    if syncing then return end
+    syncing = true
     local ok, err = pcall(fn)
-    vim.o.eventignore = saved
-    if not ok then error(err, 0) end
+    syncing = false   -- cleared unconditionally, so a throw cannot wedge sync
+    if not ok then
+      vim.notify("diff.nvim: scroll sync error: " .. tostring(err), vim.log.levels.DEBUG)
+    end
   end
 
   -- Sync topline: both buffers have identical line count (aligned), so syncing
@@ -726,6 +759,7 @@ local function setup_scroll_sync(left_win, right_win)
   vim.api.nvim_create_autocmd("WinScrolled", {
     group    = aug,
     callback = function(ev)
+      if syncing then return end
       -- args.match contains the ID of the window that scrolled
       local scrolled_win = tonumber(ev.match)
       local target_win
@@ -746,7 +780,7 @@ local function setup_scroll_sync(left_win, right_win)
       local topline = info[1].topline
       local leftcol = info[1].leftcol or 0
 
-      with_eventignore(function()
+      with_sync_guard(function()
         vim.api.nvim_win_call(target_win, function()
           vim.fn.winrestview({ topline = topline, leftcol = leftcol })
         end)
@@ -761,6 +795,7 @@ local function setup_scroll_sync(left_win, right_win)
   vim.api.nvim_create_autocmd("CursorMoved", {
     group    = aug,
     callback = function()
+      if syncing then return end
       local cur_win = vim.api.nvim_get_current_win()
       local target_win, lookup
 
@@ -789,7 +824,7 @@ local function setup_scroll_sync(left_win, right_win)
       local info = vim.fn.getwininfo(cur_win)
       local topline = (info and #info > 0) and info[1].topline or nil
 
-      with_eventignore(function()
+      with_sync_guard(function()
         pcall(vim.api.nvim_win_set_cursor, target_win, { target_line, cursor[2] })
         if topline then
           vim.api.nvim_win_call(target_win, function()
@@ -1056,8 +1091,8 @@ function M.rerender()
 
   -- Parse the full old/new file once so collapsed separators can be labelled
   -- with their enclosing declaration (GitHub-style headings).
-  local parsed_old = parse_full_file(M._current_old, ft)
-  local parsed_new = parse_full_file(M._current_new, ft)
+  local parsed_old = parse_full_file_cached(M._current_old, ft)
+  local parsed_new = parse_full_file_cached(M._current_new, ft)
 
   -- Increment render generation for rerender as well
   M._render_gen = M._render_gen + 1
@@ -1339,8 +1374,8 @@ function M.open(opts)
 
   -- Parse the full old/new file so collapsed separators can be labelled with
   -- their enclosing declaration (GitHub-style headings).
-  local parsed_old = left_buf_ref and parse_full_file(old_lines, ft) or nil
-  local parsed_new = parse_full_file(new_lines, ft)
+  local parsed_old = left_buf_ref and parse_full_file_cached(old_lines, ft) or nil
+  local parsed_new = parse_full_file_cached(new_lines, ft)
 
   vim.schedule(function()
     if this_gen ~= M._render_gen then return end
