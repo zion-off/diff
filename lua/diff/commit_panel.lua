@@ -657,19 +657,11 @@ function M.setup(buf, win, repo_root)
     activate_line(vim.api.nvim_win_get_cursor(_win)[1])
   end, vim.tbl_extend("force", opts, { desc = "Expand commit / open file diff (diff)" }))
 
-  -- Mouse: clicking a row activates it (same as <CR>). getmousepos() gives the
-  -- exact clicked window + line, so this works regardless of cursor position.
-  -- The buffer-local map handles clicks while the panel is focused; the global
-  -- dispatcher in sidebar.lua handles single clicks arriving from other windows.
-  local function on_mouse_click()
-    local mp = vim.fn.getmousepos()
-    if mp.winid ~= _win then return end
-    if mp.line < 1 then return end
-    pcall(vim.api.nvim_win_set_cursor, _win, { mp.line, 0 })
-    activate_line(mp.line)
-  end
-  vim.keymap.set("n", "<LeftMouse>", on_mouse_click,
-    vim.tbl_extend("force", opts, { desc = "Activate row (diff)" }))
+  -- Mouse clicks are handled by the single global dispatcher in sidebar.lua.
+  -- A buffer-local <LeftMouse> map used to live here, and because it returned
+  -- early for any click outside this window it swallowed the event entirely:
+  -- while the panel had focus you could not click into another window or grab
+  -- a window separator to resize.
 
   -- Expose the row activator so the global click dispatcher can reach it.
   M.activate_line = activate_line

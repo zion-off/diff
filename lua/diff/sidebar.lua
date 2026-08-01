@@ -23,6 +23,7 @@ M._notes_buf     = nil   -- notes buffer
 M._fs_watcher    = nil   -- libuv fs_event handle for .git/index watch
 M._debounce_timer = nil  -- pending debounce timer for fs_event (module-level for cleanup)
 M._saved_mouse   = nil   -- previous global 'mouse' value (restored on close)
+M._panel_sizes   = nil   -- {width, file_height} kept across a hide/show toggle
 M._preview_branch = nil  -- when set, panels source data from this branch (read-only preview)
 
 -- ---------------------------------------------------------------------------
@@ -63,14 +64,15 @@ local function find_global_map(mode, lhs)
 end
 
 --- Install a global mapping, remembering what it replaced.
-local function set_global_map(mode, lhs, rhs, desc)
+local function set_global_map(mode, lhs, rhs, desc, extra)
   if not lhs or lhs == "" then return end
   table.insert(M._installed_maps, {
     mode = mode,
     lhs  = lhs,
     prev = find_global_map(mode, lhs) or false,
   })
-  vim.keymap.set(mode, lhs, rhs, { silent = true, desc = desc })
+  local opts = vim.tbl_extend("force", { silent = true, desc = desc }, extra or {})
+  vim.keymap.set(mode, lhs, rhs, opts)
 end
 
 --- Remove every mapping installed by set_global_map and put back whatever each
@@ -117,12 +119,13 @@ function M._install_click_dispatcher()
   if M._click_dispatcher_installed then return end
   M._click_dispatcher_installed = true
 
+  -- Expression mapping: the handler always returns <LeftMouse> so Neovim still
+  -- processes the real click itself. That keeps window focus changes, cursor
+  -- placement and — crucially — separator drag-resizing working. Feeding the
+  -- key back with nvim_feedkeys instead, as this used to, breaks the
+  -- press/drag/release sequence that resizing depends on.
   set_global_map("n", "<LeftMouse>", function()
     local mp = vim.fn.getmousepos()
-    -- Replay the real click first so Neovim focuses the target window and moves
-    -- the cursor. Mode "n" (noremap) prevents this from re-triggering our map.
-    vim.api.nvim_feedkeys(
-      vim.api.nvim_replace_termcodes("<LeftMouse>", true, false, true), "n", false)
 
     local target
     if mp.winid == M._commit_win then
@@ -130,18 +133,22 @@ function M._install_click_dispatcher()
     elseif mp.winid == M._file_win then
       target = file_panel
     end
-    if not target or mp.line < 1 then return end
 
-    -- Defer activation until after the fed click has been processed so the
-    -- cursor/window state is settled.
-    vim.schedule(function()
-      if not is_valid_win(mp.winid) then return end
-      pcall(vim.api.nvim_win_set_cursor, mp.winid, { mp.line, 0 })
-      if target.activate_line then
-        pcall(target.activate_line, mp.line)
-      end
-    end)
-  end, "Activate diff.nvim panel row (global)")
+    -- mp.line is 0 when the click landed on a separator or status line rather
+    -- than on a text row, so those fall through to plain Neovim handling.
+    if target and mp.line >= 1 then
+      local winid, line = mp.winid, mp.line
+      vim.schedule(function()
+        if not is_valid_win(winid) then return end
+        pcall(vim.api.nvim_win_set_cursor, winid, { line, 0 })
+        if target.activate_line then
+          pcall(target.activate_line, line)
+        end
+      end)
+    end
+
+    return "<LeftMouse>"
+  end, "Activate diff.nvim panel row (global)", { expr = true, replace_keycodes = true })
 
   -- Block horizontal mouse-wheel scrolling over the panels. Like clicks, wheel
   -- events act on the window under the cursor regardless of focus, so a
@@ -153,11 +160,10 @@ function M._install_click_dispatcher()
     set_global_map("n", key, function()
       local mp = vim.fn.getmousepos()
       if mp.winid == M._commit_win or mp.winid == M._file_win then
-        return  -- swallow: no horizontal scroll in the panels
+        return ""  -- swallow: no horizontal scroll in the panels
       end
-      vim.api.nvim_feedkeys(
-        vim.api.nvim_replace_termcodes(key, true, false, true), "n", false)
-    end, "Block panel horizontal scroll (global)")
+      return key   -- anywhere else, let Neovim scroll normally
+    end, "Block panel horizontal scroll (global)", { expr = true, replace_keycodes = true })
   end
   block_hscroll("<ScrollWheelLeft>")
   block_hscroll("<ScrollWheelRight>")
@@ -180,7 +186,21 @@ end
 --- Return the tabpage that owns any tracked diff.nvim window.
 --- @return integer|nil
 local function get_diff_tab()
-  for _, win in ipairs({ M._file_win, M._commit_win, M._notes_win, M._main_win }) do
+  -- Built as a dense list on purpose. These fields are routinely nil -- the
+  -- panel handles are cleared while the sidebar is hidden -- and ipairs over
+  -- {nil, nil, nil, main_win} stops at the first index and finds nothing. That
+  -- made toggle_sidebar_panel bail out on the show branch, so hiding the
+  -- sidebar was a one-way trip.
+  local candidates = {}
+  local function add(win)
+    if win then table.insert(candidates, win) end
+  end
+  add(M._file_win)
+  add(M._commit_win)
+  add(M._notes_win)
+  add(M._main_win)
+
+  for _, win in ipairs(candidates) do
     if is_valid_win(win) then
       return vim.api.nvim_win_get_tabpage(win)
     end
@@ -486,6 +506,8 @@ function M.close()
   clear_panel_state()
   M._main_win      = nil
   M._sidebar_hidden = false
+  -- A fresh open starts from the configured width again.
+  M._panel_sizes   = nil
 
   -- Remove the global click dispatcher installed on open.
   M._remove_click_dispatcher()
@@ -514,11 +536,21 @@ function M.toggle_sidebar_panel()
   if not M.is_open() then return end
 
   local cfg   = config.get()
-  local width = cfg.sidebar_width or 40
   local caller_tab = vim.api.nvim_get_current_tabpage()
   local caller_win = vim.api.nvim_get_current_win()
 
+  -- Re-show at whatever size the panels were last left at, so a width the user
+  -- dragged out with the mouse is not thrown away by a hide/show cycle.
+  local width = (M._panel_sizes and M._panel_sizes.width) or cfg.sidebar_width or 40
+
   if not M._sidebar_hidden then
+    -- Remember the current sizes before the windows go away.
+    if is_valid_win(M._file_win) then
+      M._panel_sizes = {
+        width       = vim.api.nvim_win_get_width(M._file_win),
+        file_height = vim.api.nvim_win_get_height(M._file_win),
+      }
+    end
     -- Hide: close the two sidebar windows
     close_tracked_win(M._file_win)
     close_tracked_win(M._commit_win)
@@ -582,8 +614,13 @@ function M.toggle_sidebar_panel()
     M._commit_win = commit_win
     M._commit_buf = commit_buf
 
-    -- Size: file panel ≈ 60%
-    layout_two_panels()
+    -- Restore the previous split height when there is one; otherwise fall back
+    -- to the default file panel ≈ 60%.
+    if M._panel_sizes and M._panel_sizes.file_height then
+      pcall(vim.api.nvim_win_set_height, M._file_win, M._panel_sizes.file_height)
+    else
+      layout_two_panels()
+    end
 
     set_panel_win_opts(M._file_win)
     set_panel_win_opts(M._commit_win)
