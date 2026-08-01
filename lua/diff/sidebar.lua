@@ -154,13 +154,20 @@ local function stop_fs_watcher()
   end
 end
 
---- Create a scratch buffer suitable for a sidebar panel.
+--- Create, or reuse, a scratch buffer suitable for a sidebar panel.
+---
+--- A same-named buffer is emptied and reused rather than force-deleted:
+--- nvim_buf_delete on a displayed buffer closes the window showing it, so the
+--- old scan could take down a live panel while trying to replace it.
 --- @param  name string
 --- @return integer
 local function make_panel_buf(name)
   for _, b in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_valid(b) and vim.api.nvim_buf_get_name(b) == name then
-      pcall(vim.api.nvim_buf_delete, b, { force = true })
+      vim.api.nvim_set_option_value("modifiable", true, { buf = b })
+      pcall(vim.api.nvim_buf_set_lines, b, 0, -1, false, {})
+      vim.api.nvim_set_option_value("modifiable", false, { buf = b })
+      return b
     end
   end
 

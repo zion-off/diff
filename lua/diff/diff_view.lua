@@ -119,20 +119,31 @@ local function detect_ft(path, lines)
   return ""
 end
 
---- Create a scratch buffer for a diff pane.
+--- Create, or reuse, a scratch buffer for a diff pane.
+---
+--- An existing buffer of the same name is emptied and handed back rather than
+--- force-deleted. nvim_buf_delete on a buffer that is currently displayed makes
+--- Neovim close the window showing it, which is one of the ways panes vanish.
+---
+--- bufhidden is "hide", not "wipe": with "wipe", merely swapping the buffer out
+--- of its window destroys it, so any code holding the handle is left with a
+--- dead buffer. close_diff_wins deletes these explicitly instead.
 --- @param  name string
 --- @return integer
 local function make_buf(name)
   for _, b in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_valid(b) and vim.api.nvim_buf_get_name(b) == name then
-      pcall(vim.api.nvim_buf_delete, b, { force = true })
+      vim.api.nvim_set_option_value("modifiable", true, { buf = b })
+      pcall(vim.api.nvim_buf_set_lines, b, 0, -1, false, {})
+      vim.api.nvim_set_option_value("modifiable", false, { buf = b })
+      return b
     end
   end
 
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_name(buf, name)
   vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
-  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
+  vim.api.nvim_set_option_value("bufhidden", "hide", { buf = buf })
   vim.api.nvim_set_option_value("swapfile", false, { buf = buf })
   vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
   return buf
@@ -444,15 +455,19 @@ local function close_diff_wins()
   M._header_win = nil
   M._header_buf = nil
 
-  -- Determine if we need to restore the main area window
+  -- Collect the live panes into a dense list. Iterating {M._left_win,
+  -- M._right_win} with ipairs was wrong: single-pane mode leaves the left side
+  -- nil, and ipairs over {nil, x} stops at the first index, so the whole
+  -- teardown below was silently skipped for single-pane views.
   local sidebar = require("diff.sidebar")
-  local right_is_main = (M._right_win ~= nil and M._right_win == sidebar._main_win)
-  local left_is_main  = (M._left_win ~= nil and M._left_win == sidebar._main_win)
+  local panes = {}
+  if M._left_win  then table.insert(panes, { win = M._left_win,  buf = M._left_buf })  end
+  if M._right_win then table.insert(panes, { win = M._right_win, buf = M._right_buf }) end
 
-  for _, win in ipairs({ M._left_win, M._right_win }) do
-    if win and vim.api.nvim_win_is_valid(win) then
+  for _, pane in ipairs(panes) do
+    if vim.api.nvim_win_is_valid(pane.win) then
       -- Don't close the main area window — just clear its buffer
-      if (win == M._right_win and right_is_main) or (win == M._left_win and left_is_main) then
+      if pane.win == sidebar._main_win then
         local placeholder = vim.api.nvim_create_buf(false, true)
         vim.api.nvim_set_option_value("buftype", "nofile", { buf = placeholder })
         vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = placeholder })
@@ -463,12 +478,23 @@ local function close_diff_wins()
           "  Select a file from the sidebar to view its diff.",
           "",
         })
-        pcall(vim.api.nvim_win_set_buf, win, placeholder)
+        pcall(vim.api.nvim_win_set_buf, pane.win, placeholder)
         -- Clear winbar
-        pcall(vim.api.nvim_set_option_value, "winbar", "", { win = win })
+        pcall(vim.api.nvim_set_option_value, "winbar", "", { win = pane.win })
       else
-        pcall(vim.api.nvim_win_close, win, true)
+        pcall(vim.api.nvim_win_close, pane.win, true)
       end
+    end
+  end
+
+  -- Delete the pane buffers, now that the loop above has detached every one of
+  -- them from its window. They are created with bufhidden="hide" so that
+  -- swapping them out of a window cannot destroy them mid-render, which makes
+  -- cleanup our responsibility. Order matters: deleting a buffer that is still
+  -- displayed makes Neovim close the window showing it.
+  for _, pane in ipairs(panes) do
+    if pane.buf and vim.api.nvim_buf_is_valid(pane.buf) then
+      pcall(vim.api.nvim_buf_delete, pane.buf, { force = true })
     end
   end
 
