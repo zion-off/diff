@@ -816,17 +816,27 @@ local function setup_keymaps(left_buf, right_buf, opts)
   local function leave_note(buf, side)
     return function()
       local annotations = require("diff.annotations")
-      local vstart = vim.fn.getpos("'<")
-      local vend   = vim.fn.getpos("'>")
       local line_start, line_end
 
-      if vstart[2] > 0 then
-        line_start = vstart[2]
-        line_end   = vend[2]
+      local mode = vim.fn.mode()
+      if mode == "v" or mode == "V" or mode == "\22" then
+        -- Leave visual mode before reading '< and '>. Those marks are only
+        -- updated when the selection ends, so reading them from inside visual
+        -- mode returns the *previous* selection.
+        vim.cmd([[execute "normal! \<Esc>"]])
+        line_start = vim.fn.getpos("'<")[2]
+        line_end   = vim.fn.getpos("'>")[2]
       else
+        -- Deliberately not consulting '< / '> here: they persist for the whole
+        -- buffer, so any earlier visual selection would hijack a note that was
+        -- meant for the line under the cursor.
         local pos  = vim.api.nvim_win_get_cursor(0)
         line_start = pos[1]
         line_end   = pos[1]
+      end
+
+      if line_end < line_start then
+        line_start, line_end = line_end, line_start
       end
 
       -- Map buffer line to actual file line via aligned table

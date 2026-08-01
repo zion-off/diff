@@ -128,6 +128,15 @@ end
 --- if the user has those plugins).
 --- @param opts table  {file_path, line_start, line_end, side, repo_root}
 function M.prompt_note(opts)
+  local function submit(text)
+    if text and text ~= "" then
+      M.append_note(vim.tbl_extend("force", opts, {
+        text      = text,
+        timestamp = os.date("%Y-%m-%d %H:%M:%S"),
+      }))
+    end
+  end
+
   -- Try nui.nvim
   local nui_ok, NuiInput = pcall(require, "nui.input")
   if nui_ok and NuiInput then
@@ -141,30 +150,37 @@ function M.prompt_note(opts)
       },
       win_options = { winhighlight = "Normal:Normal" },
     }, {
-      prompt   = "> ",
-      on_submit = function(text)
-        if text and text ~= "" then
-          M.append_note(vim.tbl_extend("force", opts, {
-            text      = text,
-            timestamp = os.date("%Y-%m-%d %H:%M:%S"),
-          }))
-        end
-      end,
+      prompt    = "> ",
+      on_submit = submit,
     })
-    input:mount()
-    input:map("i", "<Esc>", function() input:unmount() end, { noremap = true })
-    return
+
+    local mounted = pcall(function()
+      input:mount()
+      input:map("i", "<Esc>", function() input:unmount() end, { noremap = true })
+    end)
+
+    if mounted then
+      -- nui creates the popup with enter=false and, from its BufWinEnter
+      -- handler, runs `startinsert!` immediately while deferring
+      -- nvim_set_current_win to a scheduled callback. The insert command
+      -- therefore applies to whichever window was focused at the time, and the
+      -- popup is left in normal mode once focus finally moves to it -- which is
+      -- why typing did not work until a/i were pressed.
+      --
+      -- Re-assert focus and insert mode after both of nui's steps have run.
+      vim.schedule(function()
+        if input.winid and vim.api.nvim_win_is_valid(input.winid) then
+          pcall(vim.api.nvim_set_current_win, input.winid)
+          vim.cmd("startinsert!")
+        end
+      end)
+      return
+    end
+    -- Mounting failed; fall through to the vim.ui.input path below.
   end
 
   -- Fallback: vim.ui.input (styled by noice.nvim / dressing.nvim if present)
-  vim.ui.input({ prompt = "Leave a note: " }, function(text)
-    if text and text ~= "" then
-      M.append_note(vim.tbl_extend("force", opts, {
-        text      = text,
-        timestamp = os.date("%Y-%m-%d %H:%M:%S"),
-      }))
-    end
-  end)
+  vim.ui.input({ prompt = "Leave a note: " }, submit)
 end
 
 -- ---------------------------------------------------------------------------
