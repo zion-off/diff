@@ -27,6 +27,13 @@ local function dir_key(section, path)
   return section .. ":" .. path
 end
 
+-- Cached last-rendered data, kept so a resize can re-render without a fresh
+-- git fetch.
+local _last_status, _last_preview
+-- Width the panel was last rendered at, so repeated resize events (e.g. a
+-- height-only split change) don't trigger redundant re-renders.
+local _last_width
+
 -- ---------------------------------------------------------------------------
 -- Status badge helpers
 -- ---------------------------------------------------------------------------
@@ -75,15 +82,20 @@ end
 --- Build display lines and line_map from status data, write into buf.
 --- @param buf     integer
 --- @param status  table   {staged: table[], unstaged: table[]}
+--- @param win     integer  Window the panel is displayed in (used to size
+---   truncation/wrapping to the panel's actual, possibly user-resized, width).
 --- @param preview string|nil  Branch being previewed; when set the working-tree
 ---   status is not applicable, so the panel shows only a preview header.
-local function render(buf, status, preview)
+local function render(buf, win, status, preview)
   vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
   vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
   line_map = {}
 
   local cfg      = config.get()
-  local panel_w  = cfg.sidebar_width or 40
+  local panel_w  = (win and vim.api.nvim_win_is_valid(win))
+      and vim.api.nvim_win_get_width(win)
+      or (cfg.sidebar_width or 40)
+  _last_width = panel_w
 
   -- Preview mode: working-tree changes belong only to the live HEAD, so there is
   -- nothing meaningful to show here. Render just a header naming the branch.
@@ -259,10 +271,13 @@ end
 --- @param win       integer
 --- @param repo_root string
 function M.setup(buf, win, repo_root)
-  -- Reset state on each setup (prevents leaks between open/close cycles)
+  -- Reset state on each setup (prevents leaks between open/close cycles,
+  -- e.g. a resize firing before the first refresh() of a new session/repo
+  -- would otherwise re-render stale data from the previous one).
   line_map = {}
   collapsed = { staged = false, unstaged = false }
   collapsed_dirs = {}
+  _last_status, _last_preview, _last_width = nil, nil, nil
 
   local cfg = config.get()
   local km  = cfg.keymaps or {}
@@ -307,6 +322,34 @@ function M.setup(buf, win, repo_root)
 
   -- Expose the row activator so the global click dispatcher can reach it.
   M.activate_line = activate_line
+
+  -- Re-render on window resize so truncation/wrapping tracks the panel's
+  -- actual (possibly user-resized) width instead of the configured default.
+  -- Skips when the width hasn't actually changed (e.g. a height-only split
+  -- change elsewhere in the tab still lists this window in v:event.windows).
+  local function maybe_rerender_for_resize()
+    if not vim.api.nvim_win_is_valid(win) then return end
+    if not vim.api.nvim_buf_is_valid(buf) or not _last_status then return end
+    local w = vim.api.nvim_win_get_width(win)
+    if w == _last_width then return end
+    render(buf, win, _last_status, _last_preview)
+  end
+
+  local resize_aug = vim.api.nvim_create_augroup("DiffNvimFilePanelResize", { clear = true })
+  vim.api.nvim_create_autocmd("WinResized", {
+    group = resize_aug,
+    callback = function()
+      if not vim.tbl_contains(vim.v.event.windows or {}, win) then return end
+      maybe_rerender_for_resize()
+    end,
+  })
+  -- WinResized only fires for the current tabpage; a terminal resize (or
+  -- `:set columns`) while the sidebar's tab isn't focused wouldn't otherwise
+  -- be picked up until the next data refresh.
+  vim.api.nvim_create_autocmd("VimResized", {
+    group = resize_aug,
+    callback = maybe_rerender_for_resize,
+  })
 
   -- 's': stage file (unstaged section only)
   vim.keymap.set("n", km.stage_file or "s", function()
@@ -394,7 +437,8 @@ end
 function M.refresh(buf, win, repo_root, preview)
   if preview then
     if not vim.api.nvim_buf_is_valid(buf) then return end
-    render(buf, { staged = {}, unstaged = {} }, preview)
+    _last_status, _last_preview = { staged = {}, unstaged = {} }, preview
+    render(buf, win, _last_status, _last_preview)
     return
   end
 
@@ -416,7 +460,8 @@ function M.refresh(buf, win, repo_root, preview)
       for _, f in ipairs(status.unstaged or {}) do
         f.stat = stats.unstaged[f.path]
       end
-      render(buf, status)
+      _last_status, _last_preview = status, nil
+      render(buf, win, status)
     end)
   end)
 end

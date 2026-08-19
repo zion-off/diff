@@ -13,6 +13,13 @@ local CURSOR_NS = vim.api.nvim_create_namespace("diff_nvim_commit_cursor")
 -- Module-level state
 -- ---------------------------------------------------------------------------
 
+-- Module-level references for re-render (declared early so `render`, defined
+-- below, closes over the same upvalues that `setup`/`refresh` assign to).
+local _buf, _win, _repo_root, _commits
+-- Width the panel was last rendered at, so repeated resize events (e.g. a
+-- height-only split change) don't trigger redundant re-renders.
+local _last_width
+
 -- line_map[lnr] = { type = "commit"|"commit_file", commit = <commit>,
 --                   file = <file_info> (for commit_file type) }
 local line_map = {}
@@ -127,7 +134,10 @@ local function render(buf, commits)
   local hl_queue = {}
 
   local cfg     = config.get()
-  local panel_w = cfg.sidebar_width or 40
+  local panel_w = (_win and vim.api.nvim_win_is_valid(_win))
+      and vim.api.nvim_win_get_width(_win)
+      or (cfg.sidebar_width or 40)
+  _last_width = panel_w
 
   local HASH_W = 7
   -- Indentation for the dim metadata line beneath each subject. Aligns roughly
@@ -518,9 +528,6 @@ end
 -- Public API
 -- ---------------------------------------------------------------------------
 
--- Module-level references for re-render
-local _buf, _win, _repo_root, _commits
-
 --- Wire up keymaps for the commit panel buffer.
 --- @param buf       integer
 --- @param win       integer
@@ -537,6 +544,7 @@ function M.setup(buf, win, repo_root)
   stat_cache = {}
   line_map = {}
   _commits = nil
+  _last_width = nil
   -- Close any open tooltip from previous session and reset the request counter
   close_tooltip()
   M._tooltip_req_id = 0
@@ -560,6 +568,52 @@ function M.setup(buf, win, repo_root)
     callback = function()
       highlight_cursor_commit(buf, win)
     end,
+  })
+
+  -- Re-render on window resize so truncation/wrapping tracks the panel's
+  -- actual (possibly user-resized) width instead of the configured default.
+  -- Skips when the width hasn't actually changed (e.g. a height-only split
+  -- change elsewhere in the tab still lists this window in v:event.windows).
+  -- Re-render changes the panel's total line count (word-wrapped expanded
+  -- commit bodies reflow), so the cursor is re-anchored to the same commit
+  -- hash it was on rather than left on a now-unrelated line.
+  local function maybe_rerender_for_resize()
+    if not vim.api.nvim_win_is_valid(win) then return end
+    if not vim.api.nvim_buf_is_valid(buf) then return end
+    local w = vim.api.nvim_win_get_width(win)
+    if w == _last_width then return end
+
+    local cur_lnr = vim.api.nvim_win_get_cursor(win)[1]
+    local cur_meta = line_map[cur_lnr]
+    local cur_hash = cur_meta and cur_meta.commit and cur_meta.commit.hash
+
+    render(buf, _commits or {})
+
+    if cur_hash then
+      local line_count = vim.api.nvim_buf_line_count(buf)
+      for lnr = 1, line_count do
+        local meta = line_map[lnr]
+        if meta and meta.commit and meta.commit.hash == cur_hash then
+          pcall(vim.api.nvim_win_set_cursor, win, { lnr, 0 })
+          break
+        end
+      end
+    end
+  end
+
+  vim.api.nvim_create_autocmd("WinResized", {
+    group = aug,
+    callback = function()
+      if not vim.tbl_contains(vim.v.event.windows or {}, win) then return end
+      maybe_rerender_for_resize()
+    end,
+  })
+  -- WinResized only fires for the current tabpage; a terminal resize (or
+  -- `:set columns`) while the sidebar's tab isn't focused wouldn't otherwise
+  -- be picked up until the next data refresh.
+  vim.api.nvim_create_autocmd("VimResized", {
+    group = aug,
+    callback = maybe_rerender_for_resize,
   })
 
   -- Activate the entry on line `lnr`: expand/collapse a commit, or open a
