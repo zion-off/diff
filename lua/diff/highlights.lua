@@ -118,10 +118,16 @@ local function build_defaults()
     -- Commit file entries
     DiffNvimCommitFileEntry = { link = "Normal" },
 
+    -- The file currently shown in the diff view, marked in either panel
+    DiffNvimActiveFile      = { link = "Visual" },
+    DiffNvimActiveSign      = { fg = p.ref_head, bold = true },
+
     -- Winbar for diff panes
     DiffNvimWinbar          = { bold = true, link = "StatusLine" },
     -- Full-width filename header bar spanning both diff panes
     DiffNvimHeader          = { bold = true, link = "StatusLine" },
+    -- Rule drawn under the header (the header window's own status line)
+    DiffNvimHeaderRule      = { link = "WinSeparator" },
   }
 end
 

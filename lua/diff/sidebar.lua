@@ -1,49 +1,51 @@
+--- diff.nvim — interface layout: a dedicated tab with the sidebar panels
+--- (file status on top, commits below) and a main area for the diff view.
+---
+--- Also owns what is shared across the interface: the git-directory watcher,
+--- refresh scheduling, mouse activation and the interface-scoped keymaps.
 local M = {}
 
 local file_panel   = require("diff.file_panel")
 local commit_panel = require("diff.commit_panel")
 local config       = require("diff.config")
-local git          = require("diff.git")
+local log          = require("diff.log").scope("sidebar")
+
+local uv = vim.uv or vim.loop
+
+local REFRESH_DEBOUNCE_MS = 50
+local WATCH_DEBOUNCE_MS   = 100
 
 -- ---------------------------------------------------------------------------
--- Module-level state
+-- State
 -- ---------------------------------------------------------------------------
 
-M._file_win      = nil
-M._commit_win    = nil
-M._file_buf      = nil
-M._commit_buf    = nil
-M._main_win      = nil   -- the main editing area (right side) for diff panes
-M._repo_root     = nil
-M._aug           = nil   -- augroup for auto-refresh
-M._saved_layout  = nil   -- saved session state to restore on close
-M._sidebar_hidden = false -- true when sidebar panels are temporarily hidden
-M._notes_win     = nil   -- notes right-side split window
-M._notes_buf     = nil   -- notes buffer
-M._fs_watcher    = nil   -- libuv fs_event handle for .git/index watch
-M._debounce_timer = nil  -- pending debounce timer for fs_event (module-level for cleanup)
-M._saved_mouse   = nil   -- previous global 'mouse' value (restored on close)
-M._panel_sizes   = nil   -- {width, file_height} kept across a hide/show toggle
-M._preview_branch = nil  -- when set, panels source data from this branch (read-only preview)
+M._file_win       = nil
+M._commit_win     = nil
+M._file_buf       = nil
+M._commit_buf     = nil
+M._main_win       = nil   -- main area (diff view host)
+M._repo_root      = nil
+M._git_dir        = nil
+M._saved_layout   = nil   -- tab + window to return to on close
+M._sidebar_hidden = false
+M._saved_mouse    = nil   -- previous global 'mouse' value (restored on close)
+M._panel_sizes    = nil   -- {width, file_height} kept across a hide/show toggle
+M._preview_branch = nil   -- when set, panels source data from this branch
 
--- ---------------------------------------------------------------------------
--- Helpers
--- ---------------------------------------------------------------------------
+local watcher, watch_timer, refresh_timer
+local mouse_ns = vim.api.nvim_create_namespace("diff_nvim_mouse")
+local aug = vim.api.nvim_create_augroup("DiffNvimSidebar", { clear = true })
 
---- @param win integer|nil
---- @return boolean
 local function is_valid_win(win)
   return win ~= nil and vim.api.nvim_win_is_valid(win)
 end
 
 -- ---------------------------------------------------------------------------
--- Global keymaps installed while the interface is open
+-- Interface-scoped global keymaps
 -- ---------------------------------------------------------------------------
 
--- Records every global mapping we install, together with whatever it shadowed.
--- close() used to vim.keymap.del these unconditionally, which silently threw
--- away the user's own mapping on those keys -- including <LeftMouse>, where
--- losing it breaks mouse use editor-wide.
+-- Every global mapping installed on open, with whatever it shadowed, so close()
+-- can put the user's own mappings back.
 -- Entries: { mode = string, lhs = string, prev = <keymap table>|false }
 M._installed_maps = {}
 
@@ -51,10 +53,6 @@ local function normalize_lhs(lhs)
   return vim.api.nvim_replace_termcodes(lhs, true, true, true)
 end
 
---- Find an existing global mapping for `lhs` in `mode`.
---- nvim_get_keymap reports lhs in termcode-translated form, so both sides are
---- normalized before comparing.
---- @return table|nil
 local function find_global_map(mode, lhs)
   local target = normalize_lhs(lhs)
   for _, m in ipairs(vim.api.nvim_get_keymap(mode)) do
@@ -63,294 +61,249 @@ local function find_global_map(mode, lhs)
   return nil
 end
 
---- Install a global mapping, remembering what it replaced.
-local function set_global_map(mode, lhs, rhs, desc, extra)
+local function set_global_map(mode, lhs, rhs, desc)
   if not lhs or lhs == "" then return end
-  table.insert(M._installed_maps, {
-    mode = mode,
-    lhs  = lhs,
-    prev = find_global_map(mode, lhs) or false,
-  })
-  local opts = vim.tbl_extend("force", { silent = true, desc = desc }, extra or {})
-  vim.keymap.set(mode, lhs, rhs, opts)
+  table.insert(M._installed_maps, { mode = mode, lhs = lhs, prev = find_global_map(mode, lhs) or false })
+  vim.keymap.set(mode, lhs, rhs, { silent = true, desc = desc })
 end
 
---- Remove every mapping installed by set_global_map and put back whatever each
---- one shadowed. Restores in reverse install order so nesting is preserved.
 local function restore_global_maps()
   for i = #M._installed_maps, 1, -1 do
     local entry = M._installed_maps[i]
     pcall(vim.keymap.del, entry.mode, entry.lhs)
-
     local prev = entry.prev
     if prev then
-      local opts = {
-        silent  = prev.silent  == 1,
-        noremap = prev.noremap == 1,
-        expr    = prev.expr    == 1,
-        nowait  = prev.nowait  == 1,
-        desc    = prev.desc,
-      }
       local rhs = prev.callback or prev.rhs
       if rhs then
-        pcall(vim.keymap.set, entry.mode, entry.lhs, rhs, opts)
+        pcall(vim.keymap.set, entry.mode, entry.lhs, rhs, {
+          silent  = prev.silent  == 1,
+          noremap = prev.noremap == 1,
+          expr    = prev.expr    == 1,
+          nowait  = prev.nowait  == 1,
+          desc    = prev.desc,
+        })
       end
     end
   end
   M._installed_maps = {}
 end
 
-local function clear_panel_state()
-  M._file_win   = nil
-  M._commit_win = nil
-  M._file_buf   = nil
-  M._commit_buf = nil
-end
+-- ---------------------------------------------------------------------------
+-- Mouse
+-- ---------------------------------------------------------------------------
 
-local function clear_notes_state()
-  M._notes_win = nil
-  M._notes_buf = nil
-end
+-- A click on a panel row activates it, even when another window had focus.
+-- vim.on_key observes the click without mapping <LeftMouse>, so Neovim's own
+-- handling (focus, cursor placement, separator drag-resize) and any user
+-- mapping of the key are untouched. The row is read after Neovim has
+-- processed the click.
+local LEFT_MOUSE = normalize_lhs("<LeftMouse>")
 
--- Install a single global <LeftMouse> map that activates the clicked row in a
--- diff.nvim panel regardless of which window currently has focus. See the call
--- site in M.open() for the rationale. Idempotent.
-function M._install_click_dispatcher()
-  if M._click_dispatcher_installed then return end
-  M._click_dispatcher_installed = true
-
-  -- Expression mapping: the handler always returns <LeftMouse> so Neovim still
-  -- processes the real click itself. That keeps window focus changes, cursor
-  -- placement and — crucially — separator drag-resizing working. Feeding the
-  -- key back with nvim_feedkeys instead, as this used to, breaks the
-  -- press/drag/release sequence that resizing depends on.
-  set_global_map("n", "<LeftMouse>", function()
+local function on_mouse_key(key)
+  if key ~= LEFT_MOUSE then return end
+  vim.schedule(function()
     local mp = vim.fn.getmousepos()
-
     local target
     if mp.winid == M._commit_win then
       target = commit_panel
     elseif mp.winid == M._file_win then
       target = file_panel
     end
-
-    -- mp.line is 0 when the click landed on a separator or status line rather
-    -- than on a text row, so those fall through to plain Neovim handling.
-    if target and mp.line >= 1 then
-      local winid, line = mp.winid, mp.line
-      vim.schedule(function()
-        if not is_valid_win(winid) then return end
-        pcall(vim.api.nvim_win_set_cursor, winid, { line, 0 })
-        if target.activate_line then
-          pcall(target.activate_line, line)
-        end
-      end)
+    -- line is 0 on a separator or status line: leave those to Neovim.
+    if target and mp.line >= 1 and is_valid_win(mp.winid) then
+      log.trace("click on %s row %d", target == file_panel and "file panel" or "commit panel", mp.line)
+      pcall(vim.api.nvim_win_set_cursor, mp.winid, { mp.line, 0 })
+      local ok, err = pcall(target.activate_line, mp.line)
+      if not ok then log.warn("click activation failed: %s", tostring(err)) end
     end
-
-    return "<LeftMouse>"
-  end, "Activate diff.nvim panel row (global)", { expr = true, replace_keycodes = true })
-
-  -- Block horizontal mouse-wheel scrolling over the panels. Like clicks, wheel
-  -- events act on the window under the cursor regardless of focus, so a
-  -- buffer-local map only suppresses them while the panel is focused. These
-  -- global maps swallow horizontal scroll when the mouse is over a diff.nvim
-  -- panel (content is truncated to width, so it only reveals blank space) and
-  -- otherwise replay the event so scrolling works normally elsewhere.
-  local function block_hscroll(key)
-    set_global_map("n", key, function()
-      local mp = vim.fn.getmousepos()
-      if mp.winid == M._commit_win or mp.winid == M._file_win then
-        return ""  -- swallow: no horizontal scroll in the panels
-      end
-      return key   -- anywhere else, let Neovim scroll normally
-    end, "Block panel horizontal scroll (global)", { expr = true, replace_keycodes = true })
-  end
-  block_hscroll("<ScrollWheelLeft>")
-  block_hscroll("<ScrollWheelRight>")
+  end)
 end
 
-function M._remove_click_dispatcher()
-  if not M._click_dispatcher_installed then return end
-  M._click_dispatcher_installed = false
-  -- The mappings themselves are removed by restore_global_maps() in close(),
-  -- which also puts back anything they shadowed.
+-- ---------------------------------------------------------------------------
+-- Refresh scheduling and the git-directory watcher
+-- ---------------------------------------------------------------------------
+
+local function stop_timer(t)
+  if t then pcall(function() t:stop() t:close() end) end
 end
 
---- @param win integer|nil
-local function close_tracked_win(win)
-  if is_valid_win(win) then
-    pcall(vim.api.nvim_win_close, win, true)
+local function stop_watcher()
+  stop_timer(watch_timer)
+  watch_timer = nil
+  if watcher then
+    pcall(function() watcher:stop() watcher:close() end)
+    watcher = nil
   end
 end
 
---- Return the tabpage that owns any tracked diff.nvim window.
---- @return integer|nil
+--- Watch the git directory itself, not .git/index: git replaces the index by
+--- renaming a new file over it, which gives it a new inode, and a watch on the
+--- old inode never fires again. A directory watch sees every replacement, plus
+--- HEAD moves (checkout) and COMMIT_EDITMSG/ORIG_HEAD writes (commit, reset).
+local function start_watcher()
+  stop_watcher()
+  if not M._git_dir then return end
+  local ok, handle = pcall(uv.new_fs_event)
+  if not ok or not handle then return end
+  local timer = uv.new_timer()
+  local started = handle:start(M._git_dir, {}, function(err, fname)
+    if err then
+      log.warn("git dir watcher error: %s", tostring(err))
+      return
+    end
+    -- Lock files come and go around every write; the rename that follows is
+    -- the event that matters.
+    if not fname or fname:match("%.lock$") then return end
+    log.trace("git dir event: %s", fname)
+    timer:stop()
+    timer:start(WATCH_DEBOUNCE_MS, 0, vim.schedule_wrap(function()
+      if not M.is_open() then return end
+      log.debug("git state changed (%s); refreshing", fname)
+      M.refresh()
+      vim.api.nvim_exec_autocmds("User", { pattern = "DiffNvimGitChanged", modeline = false })
+    end))
+  end)
+  if started then
+    watcher, watch_timer = handle, timer
+    log.debug("watching %s", M._git_dir)
+  else
+    log.warn("cannot watch %s; relying on focus/write refresh", M._git_dir)
+    pcall(function() handle:close() timer:close() end)
+  end
+end
+
+--- Coalesce refresh requests (FocusGained, :wa writing many buffers, …) into
+--- a single re-fetch.
+function M.request_refresh()
+  if not refresh_timer then refresh_timer = uv.new_timer() end
+  refresh_timer:stop()
+  refresh_timer:start(REFRESH_DEBOUNCE_MS, 0, vim.schedule_wrap(function()
+    if M.is_open() then M.refresh() end
+  end))
+end
+
+-- ---------------------------------------------------------------------------
+-- Panels
+-- ---------------------------------------------------------------------------
+
+local function clear_panel_state()
+  M._file_win, M._commit_win, M._file_buf, M._commit_buf = nil, nil, nil, nil
+end
+
+--- Return the tabpage of the interface, if it is open.
 local function get_diff_tab()
-  -- Built as a dense list on purpose. These fields are routinely nil -- the
-  -- panel handles are cleared while the sidebar is hidden -- and ipairs over
-  -- {nil, nil, nil, main_win} stops at the first index and finds nothing. That
-  -- made toggle_sidebar_panel bail out on the show branch, so hiding the
-  -- sidebar was a one-way trip.
-  local candidates = {}
-  local function add(win)
-    if win then table.insert(candidates, win) end
-  end
-  add(M._file_win)
-  add(M._commit_win)
-  add(M._notes_win)
-  add(M._main_win)
-
-  for _, win in ipairs(candidates) do
-    if is_valid_win(win) then
-      return vim.api.nvim_win_get_tabpage(win)
-    end
+  for _, win in ipairs({ M._file_win or false, M._commit_win or false, M._main_win or false }) do
+    if win and is_valid_win(win) then return vim.api.nvim_win_get_tabpage(win) end
   end
   return nil
 end
 
---- Returns true when the plugin layout is currently open.
---- @return boolean
 function M.is_open()
-  -- When sidebar panels are hidden, check the main diff window instead
   if M._sidebar_hidden then
     return is_valid_win(M._main_win)
   end
   return is_valid_win(M._file_win) and is_valid_win(M._commit_win)
 end
 
---- Cancel and clean up the pending debounce timer (if any).
-local function cancel_debounce_timer()
-  if M._debounce_timer then
-    pcall(function() M._debounce_timer:stop() M._debounce_timer:close() end)
-    M._debounce_timer = nil
-  end
-end
-
-local function stop_fs_watcher()
-  if M._fs_watcher then
-    pcall(function()
-      M._fs_watcher:stop()
-      M._fs_watcher:close()
-    end)
-    M._fs_watcher = nil
-  end
-end
-
---- Create, or reuse, a scratch buffer suitable for a sidebar panel.
----
---- A same-named buffer is emptied and reused rather than force-deleted:
---- nvim_buf_delete on a displayed buffer closes the window showing it, so the
---- old scan could take down a live panel while trying to replace it.
---- @param  name string
---- @return integer
+--- A scratch buffer for a sidebar panel, reusing one of the same name (it
+--- is emptied rather than deleted: deleting a displayed buffer closes its window).
 local function make_panel_buf(name)
   for _, b in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_valid(b) and vim.api.nvim_buf_get_name(b) == name then
-      vim.api.nvim_set_option_value("modifiable", true, { buf = b })
+      vim.bo[b].modifiable = true
       pcall(vim.api.nvim_buf_set_lines, b, 0, -1, false, {})
-      vim.api.nvim_set_option_value("modifiable", false, { buf = b })
+      vim.bo[b].modifiable = false
       return b
     end
   end
-
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_name(buf, name)
-  vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
-  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
-  vim.api.nvim_set_option_value("swapfile", false, { buf = buf })
-  vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+  vim.bo[buf].buftype    = "nofile"
+  vim.bo[buf].bufhidden  = "wipe"
+  vim.bo[buf].swapfile   = false
+  vim.bo[buf].undolevels = -1
+  vim.bo[buf].modifiable = false
   return buf
 end
 
---- Apply common window options for a sidebar panel.
---- @param win integer
+--- Panel lines are rendered to the window's exact width, so 'wrap' never
+--- actually wraps — but it does make horizontal scrolling impossible, which
+--- is what keeps the panels pinned without intercepting any keys.
 local function set_panel_win_opts(win)
-  local wopts = {
-    number         = false,
-    relativenumber = false,
-    wrap           = false,
-    signcolumn     = "no",
-    foldcolumn     = "0",
-    cursorline     = true,
-    winfixwidth    = true,
-    spell          = false,
-    list           = false,
-    sidescroll     = 0,
-    sidescrolloff  = 0,
-  }
-  for k, v in pairs(wopts) do
+  for k, v in pairs({
+    number = false, relativenumber = false, wrap = true, linebreak = false,
+    signcolumn = "no", foldcolumn = "0", statuscolumn = "", cursorline = true,
+    winfixwidth = true, spell = false, list = false,
+  }) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
 end
 
 local function layout_two_panels()
   if not is_valid_win(M._file_win) or not is_valid_win(M._commit_win) then return end
-  local total_h = vim.api.nvim_win_get_height(M._file_win)
-                + vim.api.nvim_win_get_height(M._commit_win)
-                + 1
-  local file_h  = math.max(1, math.floor(total_h * 0.60))
-  file_h = math.min(file_h, math.max(1, total_h - 1))
+  local total_h = vim.api.nvim_win_get_height(M._file_win) + vim.api.nvim_win_get_height(M._commit_win) + 1
+  local file_h  = math.min(math.max(1, math.floor(total_h * 0.60)), math.max(1, total_h - 1))
   pcall(vim.api.nvim_win_set_height, M._file_win, file_h)
 end
 
---- Save the current window/buffer layout so it can be restored later.
-local function save_layout()
-  local layout = {
-    tabpage   = vim.api.nvim_get_current_tabpage(),
-    wins      = {},
-    current   = vim.api.nvim_get_current_win(),
-  }
-  for _, win in ipairs(vim.api.nvim_list_wins()) do
-    if vim.api.nvim_win_is_valid(win) then
-      table.insert(layout.wins, {
-        win  = win,
-        buf  = vim.api.nvim_win_get_buf(win),
-      })
-    end
-  end
-  return layout
+--- Create the two panel windows by splitting off `anchor`.
+local function create_panels(anchor, width)
+  local position = config.get().sidebar_position == "right" and "botright" or "topleft"
+  vim.api.nvim_set_current_win(anchor)
+  vim.cmd(position .. " " .. width .. " vsplit")
+  M._file_win = vim.api.nvim_get_current_win()
+  M._file_buf = make_panel_buf("diff://file-panel")
+  vim.api.nvim_win_set_buf(M._file_win, M._file_buf)
+
+  vim.cmd("rightbelow split")
+  M._commit_win = vim.api.nvim_get_current_win()
+  M._commit_buf = make_panel_buf("diff://commit-panel")
+  vim.api.nvim_win_set_buf(M._commit_win, M._commit_buf)
+
+  set_panel_win_opts(M._file_win)
+  set_panel_win_opts(M._commit_win)
+  file_panel.setup(M._file_buf, M._file_win, M._repo_root)
+  commit_panel.setup(M._commit_buf, M._commit_win, M._repo_root)
 end
 
---- Restore a previously saved layout. Closes the diff.nvim tab if we opened one.
-local function restore_layout(saved)
-  if not saved then return end
-  -- Switch back to original tabpage if it still exists
-  if saved.tabpage and vim.api.nvim_tabpage_is_valid(saved.tabpage) then
-    vim.api.nvim_set_current_tabpage(saved.tabpage)
-  end
-  -- Restore cursor to the original window if valid
-  if saved.current and vim.api.nvim_win_is_valid(saved.current) then
-    vim.api.nvim_set_current_win(saved.current)
+--- Fill `win` with the "select a file" placeholder.
+function M.show_placeholder(win)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].buftype   = "nofile"
+  vim.bo[buf].bufhidden = "wipe"
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+    "",
+    "  diff.nvim",
+    "",
+    "  Select a file from the sidebar to view its diff.",
+    "  Press 'q' in the sidebar to close.",
+    "",
+  })
+  vim.bo[buf].modifiable = false
+  pcall(vim.api.nvim_win_set_buf, win, buf)
+  for k, v in pairs({ number = false, relativenumber = false, statuscolumn = "", signcolumn = "no",
+                      scrollbind = false, cursorbind = false }) do
+    pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
 end
 
 -- ---------------------------------------------------------------------------
--- Open / close — takes over a new tab to create the full layout
+-- Open / close
 -- ---------------------------------------------------------------------------
 
---- Open the diff.nvim interface.
---- Creates a new tab with: sidebar (left: file panel top, commit panel bottom)
---- and main editing area on the right.
---- @param repo_root string
-function M.open(repo_root)
-  -- Clean up any partial state from a previous session
-  if M._file_win or M._commit_win or M._notes_win or M._main_win then
-    if not M.is_open() then
-      -- Partial state — clean it up first
-      M.close()
-    else
-      return -- already fully open
-    end
+--- Open the interface in a new tab.
+--- @param info {root: string, git_dir: string}
+function M.open(info)
+  if M._file_win or M._commit_win or M._main_win then
+    if M.is_open() then return end
+    M.close() -- partial state from an earlier session
   end
 
-  M._repo_root = repo_root
+  local elapsed = require("diff.log").timer()
+  M._repo_root, M._git_dir = info.root, info.git_dir
   M._sidebar_hidden = false
-  local cfg    = config.get()
-  local width  = cfg.sidebar_width or 40
+  local cfg = config.get()
 
-  -- Enable mouse interactivity while the interface is open. Only touch the
-  -- global 'mouse' option if it doesn't already cover normal mode, and remember
-  -- the previous value so it can be restored on close.
   M._saved_mouse = nil
   if cfg.mouse then
     local cur = vim.o.mouse
@@ -358,438 +311,228 @@ function M.open(repo_root)
       M._saved_mouse = cur
       vim.o.mouse = "a"
     end
+    vim.on_key(on_mouse_key, mouse_ns)
   end
 
-  -- Save the current layout before taking over
-  M._saved_layout = save_layout()
+  M._saved_layout = { tabpage = vim.api.nvim_get_current_tabpage(), win = vim.api.nvim_get_current_win() }
 
-  -- Open a new tab for the diff.nvim interface
   vim.cmd("tabnew")
-
-  -- The new tab has one window — this becomes the main area (right side)
   M._main_win = vim.api.nvim_get_current_win()
-
-  -- `:tabnew` creates an empty, *listed* [No Name] buffer for the new window.
-  -- Remember it so we can wipe it after swapping in our scratch buffer;
-  -- otherwise it leaks into the buffer list on every open/close cycle.
+  -- `:tabnew` leaves a listed, empty [No Name] buffer behind; wipe it once
+  -- the placeholder has replaced it.
   local tabnew_buf = vim.api.nvim_win_get_buf(M._main_win)
-
-  -- Create a scratch buffer for the main area (placeholder)
-  local main_buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_set_option_value("buftype", "nofile", { buf = main_buf })
-  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = main_buf })
-  vim.api.nvim_buf_set_lines(main_buf, 0, -1, false, {
-    "",
-    "  diff.nvim",
-    "",
-    "  Select a file from the sidebar to view its diff.",
-    "  Press 'q' to close.",
-    "",
-  })
-  vim.api.nvim_win_set_buf(M._main_win, main_buf)
-
-  -- Wipe the orphaned [No Name] buffer left behind by `:tabnew`.
-  if tabnew_buf ~= main_buf
-    and vim.api.nvim_buf_is_valid(tabnew_buf)
-    and vim.api.nvim_buf_get_name(tabnew_buf) == ""
-    and vim.api.nvim_buf_line_count(tabnew_buf) == 1
-    and vim.api.nvim_buf_get_lines(tabnew_buf, 0, 1, false)[1] == ""
-  then
+  M.show_placeholder(M._main_win)
+  if vim.api.nvim_buf_is_valid(tabnew_buf) and vim.api.nvim_buf_get_name(tabnew_buf) == ""
+    and not vim.bo[tabnew_buf].modified then
     pcall(vim.api.nvim_buf_delete, tabnew_buf, { force = true })
   end
 
-  -- Create sidebar split (respects sidebar_position config)
-  local position = cfg.sidebar_position == "right" and "botright" or "topleft"
-  vim.cmd(position .. " " .. width .. " vsplit")
-  local sidebar_win = vim.api.nvim_get_current_win()
-
-  -- Create the file panel buffer and assign it to the sidebar
-  local file_buf = make_panel_buf("diff://file-panel")
-  vim.api.nvim_win_set_buf(sidebar_win, file_buf)
-  M._file_win = sidebar_win
-  M._file_buf = file_buf
-
-  -- Split below for the commit panel
-  vim.cmd("rightbelow split")
-  local commit_win = vim.api.nvim_get_current_win()
-  local commit_buf = make_panel_buf("diff://commit-panel")
-  vim.api.nvim_win_set_buf(commit_win, commit_buf)
-  M._commit_win = commit_win
-  M._commit_buf = commit_buf
-
-  -- Size: file panel ≈ 60%, commit panel ≈ 40%
+  create_panels(M._main_win, cfg.sidebar_width or 40)
   layout_two_panels()
-
-  set_panel_win_opts(M._file_win)
-  set_panel_win_opts(M._commit_win)
-
-  -- Wire up panels
-  file_panel.setup(file_buf, M._file_win, repo_root)
-  commit_panel.setup(commit_buf, M._commit_win, repo_root)
-
-  -- Global click dispatcher: a buffer-local <LeftMouse> map only fires when its
-  -- buffer is already the current one, so clicking a panel from another window
-  -- would merely focus it (requiring a second click to activate). This global
-  -- map runs from any window: it first replays the default <LeftMouse> so Neovim
-  -- moves focus + cursor to the clicked window, then activates the clicked row
-  -- in whichever diff.nvim panel received the click. Clicks elsewhere fall
-  -- through to the default behavior. Installed once; removed on close().
-  M._install_click_dispatcher()
-
-  -- Focus the file panel to start
   vim.api.nvim_set_current_win(M._file_win)
 
-  -- Start the filesystem watcher now that the repo root is set
-  M._start_fs_watcher()
+  if cfg.auto_refresh then start_watcher() end
 
-  -- Register interface-scoped keymaps (restored on close)
-  local km  = cfg.keymaps or {}
-  local function nmap(key, fn, desc)
-    set_global_map("n", key, fn, desc .. " (diff)")
-  end
-  nmap(km.toggle_sidebar_panel or "<leader>gS", function()
-    M.toggle_sidebar_panel()
-  end, "Toggle sidebar")
-  nmap(km.copy_notes_path or "<leader>gy", function()
-    require("diff.annotations").copy_notes_path()
-  end, "Copy notes path")
-  nmap(km.toggle_notes or "<leader>N", function()
-    require("diff.annotations").toggle_notes(repo_root)
-  end, "Toggle notes panel")
-  nmap(km.preview_branch or "<leader>gb", function()
-    M.pick_preview_branch()
-  end, "Preview branch")
+  local km = cfg.keymaps or {}
+  local function nmap(key, fn, desc) set_global_map("n", key, fn, desc .. " (diff)") end
+  nmap(km.toggle_sidebar_panel, M.toggle_sidebar_panel, "Toggle sidebar")
+  nmap(km.copy_notes_path, function() require("diff.annotations").copy_notes_path() end, "Copy notes path")
+  nmap(km.toggle_notes, function() require("diff.annotations").toggle_notes(M._repo_root) end, "Toggle notes panel")
+  nmap(km.preview_branch, M.pick_preview_branch, "Preview branch")
 
-  -- Populate
   M.refresh()
+  log.info("opened interface for %s (git dir %s) in %.1f ms", info.root, info.git_dir, elapsed())
 end
 
---- Close the diff.nvim interface, restore previous layout.
+--- Close the interface and return to where it was opened from.
 function M.close()
-  -- Remove the global mappings installed on open, putting back anything they
-  -- shadowed. This covers both the <leader> maps and the mouse dispatcher.
   restore_global_maps()
-
-  -- Leaving preview mode when the interface closes so a fresh open starts live.
+  vim.on_key(nil, mouse_ns)
   M._preview_branch = nil
   pcall(function() require("diff.branch_picker").close() end)
+  stop_watcher()
+  stop_timer(refresh_timer)
+  refresh_timer = nil
 
-  -- Stop the filesystem watcher if running
-  stop_fs_watcher()
-
-  -- Cancel any pending debounce timer
-  cancel_debounce_timer()
-
-  local diff_tab = get_diff_tab()
-
-  -- Close the notes panel split if open
-  close_tracked_win(M._notes_win)
-  clear_notes_state()
+  -- The view first, so its watchers and buffers go before the tab does.
+  require("diff.diff_view").close()
+  require("diff.annotations").close_panel()
   commit_panel.close_tooltip()
 
-  -- Note: We intentionally do NOT delete M._aug (auto-refresh augroup) here.
-  -- The callback checks M.is_open() so it's harmless when closed,
-  -- and it needs to survive close/reopen cycles.
-
-  -- Close the diff.nvim tab (all windows in it will be closed)
-  -- Restore previous layout first (switch to old tab)
-  restore_layout(M._saved_layout)
-  M._saved_layout = nil
-
-  -- Now close the diff.nvim tab
+  local diff_tab = get_diff_tab()
+  local saved = M._saved_layout
+  if saved and vim.api.nvim_tabpage_is_valid(saved.tabpage) then
+    vim.api.nvim_set_current_tabpage(saved.tabpage)
+    if is_valid_win(saved.win) then vim.api.nvim_set_current_win(saved.win) end
+  end
   if diff_tab and vim.api.nvim_tabpage_is_valid(diff_tab) then
-    -- Use tabclose which handles the "last window" edge case correctly
-    local tab_nr = vim.api.nvim_tabpage_get_number(diff_tab)
-    pcall(vim.cmd, "tabclose " .. tab_nr)
+    pcall(vim.cmd, "tabclose " .. vim.api.nvim_tabpage_get_number(diff_tab))
   end
 
   clear_panel_state()
-  M._main_win      = nil
+  M._main_win, M._saved_layout, M._panel_sizes = nil, nil, nil
   M._sidebar_hidden = false
-  -- A fresh open starts from the configured width again.
-  M._panel_sizes   = nil
-
-  -- Remove the global click dispatcher installed on open.
-  M._remove_click_dispatcher()
-
-  -- Restore the global 'mouse' option if we changed it on open.
   if M._saved_mouse ~= nil then
     vim.o.mouse = M._saved_mouse
     M._saved_mouse = nil
   end
+  log.info("closed interface")
 end
 
---- Toggle the interface open/closed.
---- @param repo_root string|nil
-function M.toggle(repo_root)
+function M.toggle(info)
   if M.is_open() then
     M.close()
   else
-    M.open(repo_root or M._repo_root or vim.fn.getcwd())
+    M.open(info)
   end
 end
 
---- Toggle just the sidebar panels (file + commit) without closing the diff view.
---- When hidden the diff panes expand to fill the space.
---- When shown again the sidebar is recreated from cached state.
+--- Hide or show the sidebar panels without closing the diff view.
 function M.toggle_sidebar_panel()
   if not M.is_open() then return end
-
-  local cfg   = config.get()
-  local caller_tab = vim.api.nvim_get_current_tabpage()
+  local cfg = config.get()
   local caller_win = vim.api.nvim_get_current_win()
 
-  -- Re-show at whatever size the panels were last left at, so a width the user
-  -- dragged out with the mouse is not thrown away by a hide/show cycle.
-  local width = (M._panel_sizes and M._panel_sizes.width) or cfg.sidebar_width or 40
-
   if not M._sidebar_hidden then
-    -- Remember the current sizes before the windows go away.
     if is_valid_win(M._file_win) then
       M._panel_sizes = {
         width       = vim.api.nvim_win_get_width(M._file_win),
         file_height = vim.api.nvim_win_get_height(M._file_win),
       }
     end
-    -- Hide: close the two sidebar windows
-    close_tracked_win(M._file_win)
-    close_tracked_win(M._commit_win)
+    for _, win in ipairs({ M._file_win, M._commit_win }) do
+      if is_valid_win(win) then pcall(vim.api.nvim_win_close, win, true) end
+    end
     clear_panel_state()
     M._sidebar_hidden = true
+    return
+  end
+
+  local diff_tab = get_diff_tab()
+  if not diff_tab then return end
+  pcall(vim.api.nvim_set_current_tabpage, diff_tab)
+
+  -- Split from the outermost window on the configured side.
+  local target, best
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(diff_tab)) do
+    local col = vim.api.nvim_win_get_position(win)[2]
+    local better = cfg.sidebar_position == "right" and (not best or col > best) or (not best or col < best)
+    if better then target, best = win, col end
+  end
+  if not target then return end
+
+  create_panels(target, (M._panel_sizes and M._panel_sizes.width) or cfg.sidebar_width or 40)
+  if M._panel_sizes and M._panel_sizes.file_height then
+    pcall(vim.api.nvim_win_set_height, M._file_win, M._panel_sizes.file_height)
   else
-    -- Show: recreate the sidebar split alongside the diff area.
-    local diff_tab = get_diff_tab()
-    if not diff_tab or not vim.api.nvim_tabpage_is_valid(diff_tab) then return end
-    if vim.api.nvim_get_current_tabpage() ~= diff_tab then
-      local ok_tab = pcall(vim.api.nvim_set_current_tabpage, diff_tab)
-      if not ok_tab then return end
-    end
-
-    local tab_wins = vim.api.nvim_tabpage_list_wins(diff_tab)
-    local target_win = nil
-    local position = cfg.sidebar_position == "right" and "botright" or "topleft"
-
-    if cfg.sidebar_position == "right" then
-      -- Sidebar goes on the right — split from the rightmost window
-      local best_col = -1
-      for _, win in ipairs(tab_wins) do
-        if vim.api.nvim_win_is_valid(win) then
-          local pos = vim.api.nvim_win_get_position(win)
-          if pos[2] > best_col then
-            best_col   = pos[2]
-            target_win = win
-          end
-        end
-      end
-    else
-      -- Sidebar goes on the left — split from the leftmost window
-      local best_col = math.huge
-      for _, win in ipairs(tab_wins) do
-        if vim.api.nvim_win_is_valid(win) then
-          local pos = vim.api.nvim_win_get_position(win)
-          if pos[2] < best_col then
-            best_col   = pos[2]
-            target_win = win
-          end
-        end
-      end
-    end
-
-    if not target_win then return end
-    local ok_sw = pcall(vim.api.nvim_set_current_win, target_win)
-    if not ok_sw then return end
-    vim.cmd(position .. " " .. width .. " vsplit")
-    local sidebar_win = vim.api.nvim_get_current_win()
-
-    -- Re-use existing buffers (they were wiped with the window, recreate)
-    local file_buf = make_panel_buf("diff://file-panel")
-    vim.api.nvim_win_set_buf(sidebar_win, file_buf)
-    M._file_win = sidebar_win
-    M._file_buf = file_buf
-
-    vim.cmd("rightbelow split")
-    local commit_win = vim.api.nvim_get_current_win()
-    local commit_buf = make_panel_buf("diff://commit-panel")
-    vim.api.nvim_win_set_buf(commit_win, commit_buf)
-    M._commit_win = commit_win
-    M._commit_buf = commit_buf
-
-    -- Restore the previous split height when there is one; otherwise fall back
-    -- to the default file panel ≈ 60%.
-    if M._panel_sizes and M._panel_sizes.file_height then
-      pcall(vim.api.nvim_win_set_height, M._file_win, M._panel_sizes.file_height)
-    else
-      layout_two_panels()
-    end
-
-    set_panel_win_opts(M._file_win)
-    set_panel_win_opts(M._commit_win)
-
-    -- Wire up and repopulate from last-fetched git data (no re-run)
-    local root = M._repo_root
-    file_panel.setup(file_buf, M._file_win, root)
-    commit_panel.setup(commit_buf, M._commit_win, root)
-
-    -- Clear hidden flag before refreshing so refresh() doesn't skip panels
-    M._sidebar_hidden = false
-
-    -- Refresh using cached state
-    M.refresh()
-
-    -- Restore caller focus when possible; otherwise focus file panel.
-    local restored = false
-    if caller_tab and vim.api.nvim_tabpage_is_valid(caller_tab) then
-      if vim.api.nvim_get_current_tabpage() ~= caller_tab then
-        restored = pcall(vim.api.nvim_set_current_tabpage, caller_tab)
-      else
-        restored = true
-      end
-      if restored and caller_win and vim.api.nvim_win_is_valid(caller_win) then
-        restored = pcall(vim.api.nvim_set_current_win, caller_win)
-      end
-    end
-    if not restored and is_valid_win(M._file_win) then
-      pcall(vim.api.nvim_set_current_win, M._file_win)
-    end
+    layout_two_panels()
   end
+  M._sidebar_hidden = false
+  M.refresh()
+  if is_valid_win(caller_win) then pcall(vim.api.nvim_set_current_win, caller_win) end
 end
 
---- Get the main editing window (right side) for the diff view to use.
---- @return integer|nil
+-- ---------------------------------------------------------------------------
+-- Services for the diff view
+-- ---------------------------------------------------------------------------
+
 function M.get_main_win()
-  if M._main_win and vim.api.nvim_win_is_valid(M._main_win) then
-    return M._main_win
-  end
-  return nil
+  return is_valid_win(M._main_win) and M._main_win or nil
 end
 
---- Set/update the main window reference (called by diff_view when it creates panes).
---- @param win integer
-function M.set_main_win(win)
-  M._main_win = win
+function M.focus_panel()
+  if is_valid_win(M._file_win) then pcall(vim.api.nvim_set_current_win, M._file_win) end
+end
+
+--- Open `path` at `line` in the window the interface was opened from (the
+--- interface tab stays open; return to it with gt or :tabnext).
+function M.open_in_editor(path, line)
+  local saved = M._saved_layout
+  if saved and vim.api.nvim_tabpage_is_valid(saved.tabpage) then
+    vim.api.nvim_set_current_tabpage(saved.tabpage)
+    if is_valid_win(saved.win) then vim.api.nvim_set_current_win(saved.win) end
+  else
+    vim.cmd("tabnew")
+  end
+  local ok, err = pcall(vim.cmd, "edit " .. vim.fn.fnameescape(path))
+  if not ok then
+    log.warn("cannot open %s: %s", path, tostring(err))
+    vim.notify("diff.nvim: cannot open " .. path .. ": " .. tostring(err), vim.log.levels.ERROR)
+    return
+  end
+  pcall(vim.api.nvim_win_set_cursor, 0, { line, 0 })
+  vim.cmd("normal! zz")
 end
 
 -- ---------------------------------------------------------------------------
 -- Refresh
 -- ---------------------------------------------------------------------------
 
---- Refresh both panels (re-fetch git status and commits).
+--- Re-fetch git data for the visible panels.
 function M.refresh()
-  if not M.is_open() then return end
-
-  local root = M._repo_root
-  if not root then return end
-
-  -- Only refresh panels when they are visible (skip when hidden)
-  if M._sidebar_hidden then return end
-
-  local preview = M._preview_branch
-
-  if M._file_buf and vim.api.nvim_buf_is_valid(M._file_buf) and is_valid_win(M._file_win) then
-    file_panel.refresh(M._file_buf, M._file_win, root, preview)
-  end
-
-  if M._commit_buf and vim.api.nvim_buf_is_valid(M._commit_buf) and is_valid_win(M._commit_win) then
-    commit_panel.refresh(M._commit_buf, M._commit_win, root, preview)
-  end
+  if not M.is_open() or M._sidebar_hidden or not M._repo_root then return end
+  file_panel.refresh(M._preview_branch)
+  commit_panel.refresh(M._preview_branch)
 end
 
 -- ---------------------------------------------------------------------------
 -- Branch preview
 -- ---------------------------------------------------------------------------
 
---- Enter (or leave) branch-preview mode.
---- In preview mode the commit panel sources its history from `branch` and the
---- file panel is emptied (working-tree changes belong only to the live HEAD).
---- @param branch string|nil  Branch to preview, or nil to return to live mode.
 function M.set_preview_branch(branch)
+  log.info("preview branch: %s", branch or "(live)")
   M._preview_branch = branch
   M.refresh()
 end
 
---- Open the branch picker and switch preview mode based on the selection.
 function M.pick_preview_branch()
-  if not M.is_open() then return end
-  local root = M._repo_root
-  if not root then return end
-  require("diff.branch_picker").open(root, function(branch)
-    M.set_preview_branch(branch)
-  end)
+  if not M.is_open() or not M._repo_root then return end
+  require("diff.branch_picker").open(M._repo_root, M.set_preview_branch)
 end
 
 -- ---------------------------------------------------------------------------
--- Auto-refresh
+-- Autocommands
 -- ---------------------------------------------------------------------------
 
 function M.setup_auto_refresh()
-  local cfg = config.get()
-  if not cfg.auto_refresh then return end
+  vim.api.nvim_clear_autocmds({ group = aug })
 
-  if M._aug then
-    pcall(vim.api.nvim_del_augroup_by_id, M._aug)
-  end
-
-  M._aug = vim.api.nvim_create_augroup("DiffNvimAutoRefresh", { clear = true })
-
-  -- Keep FocusGained and BufWritePost autocmds — they complement the watcher
-  -- for cases like rebases that touch more than just the index.
-  vim.api.nvim_create_autocmd({ "FocusGained", "BufWritePost" }, {
-    group    = M._aug,
+  -- Panels are rendered to their window width: re-render from cached data
+  -- (no git) whenever a panel is resized, e.g. while dragging a separator.
+  vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
+    group = aug,
     callback = function()
-      if M.is_open() then
-        M.refresh()
+      if not M.is_open() or M._sidebar_hidden then return end
+      local resized = vim.v.event and vim.v.event.windows or {}
+      local all = #resized == 0
+      for _, w in ipairs(resized) do
+        if w == M._file_win or w == M._commit_win then all = true end
+      end
+      if all then
+        file_panel.render()
+        commit_panel.render()
       end
     end,
   })
 
-  -- Filesystem watch on <repo_root>/.git/index for instant refresh.
-  -- Started when the sidebar opens (called from open()), stopped on close().
-  -- We defer the actual watch start until after the repo root is set.
-  vim.schedule(function()
-    M._start_fs_watcher()
-  end)
-end
+  vim.api.nvim_create_autocmd("User", {
+    group = aug,
+    pattern = "DiffNvimViewChanged",
+    callback = function(ev)
+      file_panel.mark_active(ev.data)
+      commit_panel.mark_active(ev.data)
+    end,
+  })
 
---- Start (or restart) the libuv filesystem watcher on .git/index.
-function M._start_fs_watcher()
-  -- Stop any previous watcher
-  stop_fs_watcher()
-
-  -- Cancel any pending debounce timer from the old watcher
-  cancel_debounce_timer()
-
-  local root = M._repo_root
-  if not root then return end
-
-  local index_path = root .. "/.git/index"
-
-  -- Prefer vim.uv (Neovim 0.10+) over deprecated vim.loop
-  local uv = vim.uv or vim.loop
-  local ok, fs_event = pcall(uv.new_fs_event)
-  if not ok or not fs_event then return end
-
-  local started = fs_event:start(index_path, {}, vim.schedule_wrap(function(err, _, _)
-    if err then return end
-    -- Debounce: cancel any pending timer and restart it
-    if M._debounce_timer then
-      cancel_debounce_timer()
-    end
-    M._debounce_timer = vim.defer_fn(function()
-      M._debounce_timer = nil
-      if M.is_open() then
-        M.refresh()
-      end
-    end, 300)
-  end))
-
-  if started then
-    M._fs_watcher = fs_event
-  else
-    pcall(function()
-      fs_event:stop()
-      fs_event:close()
-    end)
-  end
+  if not config.get().auto_refresh then return end
+  -- The watcher covers .git changes; these cover working-tree edits, which
+  -- change `git status` without touching .git.
+  vim.api.nvim_create_autocmd({ "FocusGained", "BufWritePost" }, {
+    group = aug,
+    callback = function()
+      if M.is_open() then M.request_refresh() end
+    end,
+  })
 end
 
 return M

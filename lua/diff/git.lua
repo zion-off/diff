@@ -1,9 +1,25 @@
 local M = {}
 
+local log = require("diff.log").scope("git")
+
 -- Unit Separator (0x1F) used as a field delimiter in --format outputs to avoid
 -- clashes with commit content. Declared at module scope so every helper (log,
 -- for-each-ref, …) can reference it regardless of definition order.
 local SEP = string.char(0x1F)
+
+-- Record Separator (0x1E) marks the end of the commit message in `git show`
+-- output that is followed by a file list.
+local RS = string.char(0x1E)
+
+-- GIT_OPTIONAL_LOCKS=0 stops read-only commands such as `git status` from
+-- opportunistically rewriting .git/index to refresh stat info. Without it the
+-- panel's own refresh writes the index, which the .git watcher then reports as
+-- an external change.
+local GIT_ENV = { GIT_OPTIONAL_LOCKS = "0" }
+
+-- core.quotepath=false keeps non-ASCII paths verbatim instead of octal-escaped
+-- and quoted, so they match the paths used to read files.
+local GIT_PREFIX = { "git", "-c", "core.quotepath=false" }
 
 -- ---------------------------------------------------------------------------
 -- Core runner
@@ -13,41 +29,46 @@ local SEP = string.char(0x1F)
 --- @param args     string[]   Arguments passed to git (after "git").
 --- @param cwd      string     Working directory for the process.
 --- @param callback fun(lines: string[], stderr: string, code: number)
-function M.run(args, cwd, callback)
+--- @param opts     table|nil  { stdin = string|nil, raw = boolean|nil }
+---   raw: keep stdout exactly as delivered. The final element is "" when the
+---   output ended with a newline, which content readers need to see.
+function M.run(args, cwd, callback, opts)
+  opts = opts or {}
   local stdout_chunks = {}
   local stderr_chunks = {}
+  local elapsed = require("diff.log").timer()
 
-  local cmd = vim.list_extend({ "git" }, args)
+  local cmd = vim.list_extend(vim.list_extend({}, GIT_PREFIX), args)
 
   local job_id = vim.fn.jobstart(cmd, {
     cwd = cwd,
+    env = GIT_ENV,
     stdout_buffered = true,
     stderr_buffered = true,
 
-    -- Append rather than assign. `stdout_buffered` delivers everything in a
-    -- single callback today, so this is behaviour-preserving, but assigning
-    -- meant that a second callback would silently discard everything received
-    -- before it — a truncated diff rendered as if it were complete.
+    -- Append rather than assign: a second callback must not discard data
+    -- received before it.
     on_stdout = function(_, data)
-      if data then
-        vim.list_extend(stdout_chunks, data)
-      end
+      if data then vim.list_extend(stdout_chunks, data) end
     end,
 
     on_stderr = function(_, data)
-      if data then
-        vim.list_extend(stderr_chunks, data)
-      end
+      if data then vim.list_extend(stderr_chunks, data) end
     end,
 
     on_exit = function(_, code)
       vim.schedule(function()
-        -- jobstart gives a trailing empty string; strip it
-        while #stdout_chunks > 0 and stdout_chunks[#stdout_chunks] == "" do
-          table.remove(stdout_chunks)
+        if not opts.raw then
+          while #stdout_chunks > 0 and stdout_chunks[#stdout_chunks] == "" do
+            table.remove(stdout_chunks)
+          end
         end
-
         local stderr_str = table.concat(stderr_chunks, "\n"):gsub("\n+$", "")
+        log.debug("git %s -> exit %d in %.1f ms (%d lines)",
+          table.concat(args, " "), code, elapsed(), #stdout_chunks)
+        if code ~= 0 and stderr_str ~= "" then
+          log.debug("git %s stderr: %s", args[1], stderr_str)
+        end
         callback(stdout_chunks, stderr_str, code)
       end)
     end,
@@ -55,52 +76,42 @@ function M.run(args, cwd, callback)
 
   -- jobstart returns <= 0 on failure (command not found, invalid args, etc.)
   if job_id <= 0 then
+    log.error("failed to start git %s (jobstart returned %d)", table.concat(args, " "), job_id)
     vim.schedule(function()
       callback({}, "failed to start git process (is git installed?)", -1)
     end)
+    return
   end
+
+  if opts.stdin then
+    vim.fn.chansend(job_id, opts.stdin)
+  end
+  vim.fn.chanclose(job_id, "stdin")
 end
 
 -- ---------------------------------------------------------------------------
--- Repo root
+-- Repository
 -- ---------------------------------------------------------------------------
 
---- Resolve the git repo root for a given directory.
+--- Resolve the work-tree root and the git directory for `cwd`.
+--- The git directory is resolved by git rather than assumed to be
+--- `<root>/.git`: in a linked worktree or submodule `.git` is a file, and the
+--- index lives elsewhere.
 --- @param cwd      string
---- @param callback fun(root: string|nil, err: string|nil)
-function M.get_repo_root(cwd, callback)
-  M.run({ "rev-parse", "--show-toplevel" }, cwd, function(lines, stderr, code)
-    if code ~= 0 or #lines == 0 then
+--- @param callback fun(info: {root: string, git_dir: string}|nil, err: string|nil)
+function M.get_repo_info(cwd, callback)
+  M.run({ "rev-parse", "--show-toplevel", "--absolute-git-dir" }, cwd, function(lines, stderr, code)
+    if code ~= 0 or #lines < 2 then
       callback(nil, stderr ~= "" and stderr or "not a git repository")
-    else
-      callback(lines[1]:gsub("%s+$", ""), nil)
+      return
     end
+    callback({ root = vim.trim(lines[1]), git_dir = vim.trim(lines[2]) }, nil)
   end)
 end
 
 -- ---------------------------------------------------------------------------
 -- Branches
 -- ---------------------------------------------------------------------------
-
---- Get the name of the currently checked-out branch.
---- @param root     string
---- @param callback fun(branch: string|nil, err: string|nil)
----   branch is nil when in a detached-HEAD state.
-function M.get_current_branch(root, callback)
-  M.run({ "rev-parse", "--abbrev-ref", "HEAD" }, root, function(lines, stderr, code)
-    if code ~= 0 or #lines == 0 then
-      callback(nil, stderr ~= "" and stderr or "cannot determine current branch")
-      return
-    end
-    local name = lines[1]:gsub("%s+$", "")
-    -- Detached HEAD reports the literal string "HEAD".
-    if name == "HEAD" or name == "" then
-      callback(nil, nil)
-    else
-      callback(name, nil)
-    end
-  end)
-end
 
 --- List local and remote branches, sorted by most-recent commit.
 --- @param root     string
@@ -233,97 +244,85 @@ end
 -- Diffstat (per-file insertions/deletions)
 -- ---------------------------------------------------------------------------
 
---- Parse `git diff --numstat` output into a map keyed by path.
---- Each value: { added = number|nil, deleted = number|nil, binary = boolean }.
---- numstat reports "-" for binary files.
+local function numstat_entry(a, d)
+  return { added = tonumber(a), deleted = tonumber(d), binary = (a == "-" or d == "-") }
+end
+
+--- Parse `--numstat` output (newline-terminated records) into a map keyed by
+--- path. For renames the new path is used.
 --- @param lines string[]
 --- @return table<string, {added: number|nil, deleted: number|nil, binary: boolean}>
 local function parse_numstat(lines)
   local map = {}
   for _, line in ipairs(lines) do
-    if line ~= "" then
-      local a, d, rest = line:match("^(%S+)\t(%S+)\t(.+)$")
-      if a and d and rest then
-        -- For renames, numstat path may be "old => new" or use brace syntax.
-        -- Use the new path (last segment after " => ") when present.
-        local path = rest
-        local arrow = rest:find(" => ", 1, true)
-        if arrow then
-          path = rest:sub(arrow + 4):gsub("[}].*$", function(s) return s end)
+    local a, d, rest = line:match("^(%S+)\t(%S+)\t(.+)$")
+    if a then
+      local path = rest
+      local arrow = rest:find(" => ", 1, true)
+      if arrow then
+        -- "old => new" or brace form "dir/{old => new}/file".
+        local pre, new_mid, post = rest:match("^(.-){.- => (.-)}(.*)$")
+        if pre then
+          path = (pre .. new_mid .. post):gsub("//", "/")
+        else
+          path = rest:sub(arrow + 4)
         end
-        local binary = (a == "-" or d == "-")
-        map[path] = {
-          added   = tonumber(a),
-          deleted = tonumber(d),
-          binary  = binary,
-        }
       end
+      map[path] = numstat_entry(a, d)
     end
   end
   return map
 end
 
---- Get per-file insertion/deletion counts for the working tree and index.
+--- Get per-file insertion/deletion counts for the index and the working tree.
+--- Both queries run in parallel.
+---
+--- Plumbing (diff-index / diff-files) on purpose: porcelain `git diff`
+--- refreshes stale stat info and rewrites .git/index even with
+--- GIT_OPTIONAL_LOCKS=0, which the .git watcher would report as an external
+--- change after every save.
 --- @param root     string
 --- @param callback fun(stats: {staged: table, unstaged: table}, err: string|nil)
----   stats.staged / stats.unstaged are maps: path -> {added, deleted, binary}
 function M.get_diffstat(root, callback)
-  M.run({ "diff", "--no-ext-diff", "--numstat", "--cached" }, root,
-    function(staged_lines, _, staged_code)
-      local staged = staged_code == 0 and parse_numstat(staged_lines) or {}
-      M.run({ "diff", "--no-ext-diff", "--numstat" }, root,
-        function(unstaged_lines, stderr, code)
-          local unstaged = code == 0 and parse_numstat(unstaged_lines) or {}
-          callback({ staged = staged, unstaged = unstaged }, code ~= 0 and stderr or nil)
-        end)
-    end)
-end
-
--- ---------------------------------------------------------------------------
--- Diffs
--- ---------------------------------------------------------------------------
-
---- Get the diff for a tracked file.
-function M.get_diff(root, path, staged, callback)
-  local args = { "diff", "--no-ext-diff", "--diff-algorithm=histogram" }
-  if staged then
-    table.insert(args, "--cached")
-  end
-  vim.list_extend(args, { "--", path })
-
-  M.run(args, root, function(lines, stderr, code)
-    if code ~= 0 then
-      callback(nil, stderr)
-    else
-      callback(table.concat(lines, "\n"), nil)
-    end
-  end)
-end
-
---- Get a diff for an untracked file.
-function M.get_untracked_diff(root, path, callback)
-  M.run(
-    { "diff", "--no-ext-diff", "--diff-algorithm=histogram", "--no-index", "--", "/dev/null", path },
-    root,
-    function(lines, stderr, code)
-      if code ~= 0 and code ~= 1 then
-        callback(nil, stderr)
+  local result, pending, first_err = { staged = {}, unstaged = {} }, 2, nil
+  local function collect(key)
+    return function(lines, stderr, code)
+      if code == 0 then
+        result[key] = parse_numstat(lines)
       else
-        callback(table.concat(lines, "\n"), nil)
+        first_err = first_err or stderr
       end
+      pending = pending - 1
+      if pending == 0 then callback(result, first_err) end
     end
-  )
+  end
+  M.run({ "diff-index", "--cached", "--numstat", "-M", "HEAD" }, root, collect("staged"))
+  M.run({ "diff-files", "--numstat" }, root, collect("unstaged"))
 end
 
---- Retrieve a file's content at a specific ref.
+-- ---------------------------------------------------------------------------
+-- File content
+-- ---------------------------------------------------------------------------
+
+--- Retrieve a file's exact content at a ref. Pass ref = "" for the index.
+--- Trailing blank lines and CR characters are preserved, and `eol` reports
+--- whether the content ended with a newline, so the result compares cleanly
+--- against the working tree read in binary mode.
+--- @param callback fun(content: {lines: string[], eol: boolean}|nil, err: string|nil)
 function M.get_file_at_ref(root, ref, path, callback)
   M.run({ "show", ref .. ":" .. path }, root, function(lines, stderr, code)
     if code ~= 0 then
       callback(nil, stderr)
-    else
-      callback(lines, nil)
+      return
     end
-  end)
+    local eol = true
+    if #lines > 0 and lines[#lines] == "" then
+      table.remove(lines)
+    elseif #lines > 0 then
+      eol = false
+    end
+    callback({ lines = lines, eol = eol }, nil)
+  end, { raw = true })
 end
 
 -- ---------------------------------------------------------------------------
@@ -343,212 +342,145 @@ function M.get_commits(root, n, callback, ref)
   if ref and ref ~= "" then
     table.insert(args, ref)
   end
-  M.run(
-    args,
-    root,
-    function(lines, stderr, code)
-      if code ~= 0 then
-        callback(nil, stderr)
-        return
-      end
-
-      local commits = {}
-      for _, line in ipairs(lines) do
-        if line == "" then goto next_line end
-
-        -- Split on the Unit Separator character
-        local parts = {}
-        local start_pos = 1
-        while true do
-          local sep_pos = line:find(SEP, start_pos, true)
-          if sep_pos then
-            table.insert(parts, line:sub(start_pos, sep_pos - 1))
-            start_pos = sep_pos + 1
-          else
-            table.insert(parts, line:sub(start_pos))
-            break
-          end
-        end
-
-        if #parts >= 5 then
-          local refs_str = parts[6] or ""
-          local refs = {}
-          if refs_str ~= "" then
-            for r in refs_str:gmatch("[^,]+") do
-              local trimmed = r:gsub("^%s+", ""):gsub("%s+$", "")
-              if trimmed ~= "" then
-                -- git emits the current branch as "HEAD -> main"; split it into
-                -- two distinct refs so each gets its own pill/colour.
-                local head, branch = trimmed:match("^(HEAD)%s*%->%s*(.+)$")
-                if head and branch then
-                  table.insert(refs, head)
-                  table.insert(refs, branch)
-                else
-                  table.insert(refs, trimmed)
-                end
-              end
-            end
-          end
-
-          table.insert(commits, {
-            hash       = parts[1],
-            short_hash = parts[2],
-            author     = parts[3],
-            time       = parts[4],
-            subject    = parts[5],
-            refs       = refs,
-          })
-        end
-
-        ::next_line::
-      end
-
-      callback(commits, nil)
-    end
-  )
-end
-
--- ---------------------------------------------------------------------------
--- Commit diff
--- ---------------------------------------------------------------------------
-
---- Get the diff introduced by a commit.
-function M.get_commit_diff(root, hash, file_path, callback)
-  local args = { "diff", "--no-ext-diff", "--diff-algorithm=histogram", hash .. "^.." .. hash }
-  if file_path then
-    vim.list_extend(args, { "--", file_path })
-  end
-
   M.run(args, root, function(lines, stderr, code)
     if code ~= 0 then
-      -- Initial commit — no parent; fall back to git show
-      local show_args = { "show", "--no-ext-diff", "--format=", hash }
-      if file_path then
-        vim.list_extend(show_args, { "--", file_path })
-      end
-      M.run(show_args, root, function(show_lines, show_stderr, show_code)
-        if show_code ~= 0 then
-          callback(nil, show_stderr)
-        else
-          callback(table.concat(show_lines, "\n"), nil)
+      callback(nil, stderr)
+      return
+    end
+
+    local commits = {}
+    for _, line in ipairs(lines) do
+      local parts = vim.split(line, SEP, { plain = true })
+      if #parts >= 5 then
+        local refs = {}
+        for r in (parts[6] or ""):gmatch("[^,]+") do
+          local trimmed = vim.trim(r)
+          if trimmed ~= "" then
+            -- git emits the current branch as "HEAD -> main"; split it into
+            -- two distinct refs so each gets its own pill/colour.
+            local head, branch = trimmed:match("^(HEAD)%s*%->%s*(.+)$")
+            if head then
+              table.insert(refs, head)
+              table.insert(refs, branch)
+            else
+              table.insert(refs, trimmed)
+            end
+          end
         end
-      end)
-    else
-      callback(table.concat(lines, "\n"), nil)
-    end
-  end)
-end
 
--- ---------------------------------------------------------------------------
--- Commit message body (subject + full description)
--- ---------------------------------------------------------------------------
-
---- Fetch the full commit message (subject + body) for a hash.
---- @param root     string
---- @param hash     string
---- @param callback fun(lines: string[]|nil, err: string|nil)
----   lines: the raw message lines with trailing blank lines stripped.
-function M.get_commit_body(root, hash, callback)
-  M.run({ "show", "--no-patch", "--format=%B", hash }, root, function(lines, stderr, code)
-    if code ~= 0 then
-      callback(nil, stderr ~= "" and stderr or "cannot fetch commit message")
-      return
-    end
-    -- Strip trailing blank lines.
-    while #lines > 0 and lines[#lines] == "" do
-      table.remove(lines)
-    end
-    callback(lines, nil)
-  end)
-end
-
---- Fetch the aggregate stat summary line for a commit, e.g.
---- "3 files changed, 40 insertions(+), 12 deletions(-)".
---- @param root     string
---- @param hash     string
---- @param callback fun(summary: string|nil, err: string|nil)
-function M.get_commit_stat(root, hash, callback)
-  M.run({ "show", "--stat", "--format=", hash }, root, function(lines, stderr, code)
-    if code ~= 0 then
-      callback(nil, stderr ~= "" and stderr or "cannot fetch commit stat")
-      return
-    end
-    -- The summary is the last non-empty line containing "changed".
-    local summary = ""
-    for i = #lines, 1, -1 do
-      if lines[i]:match("changed") then
-        summary = lines[i]:gsub("^%s+", ""):gsub("%s+$", "")
-        break
+        table.insert(commits, {
+          hash       = parts[1],
+          short_hash = parts[2],
+          author     = parts[3],
+          time       = parts[4],
+          subject    = parts[5],
+          refs       = refs,
+        })
       end
     end
-    callback(summary, nil)
+
+    callback(commits, nil)
   end)
 end
 
 -- ---------------------------------------------------------------------------
--- Commit file list
+-- Commit details (message + changed files + per-file stats)
 -- ---------------------------------------------------------------------------
 
---- Get the list of files changed in a commit, with per-file diffstat counts.
+--- Parse `--numstat -z` output. jobstart reports NUL bytes as "\n" inside
+--- each delivered line, so the records are recovered by splitting on "\n".
+--- Rename records are "a\td\t" followed by separate old and new path fields.
+local function parse_numstat_z(lines)
+  local fields = vim.split(table.concat(lines, "\n"), "\n", { plain = true })
+  local map, i = {}, 1
+  while i <= #fields do
+    local a, d, path = fields[i]:match("^(%S+)\t(%S+)\t(.*)$")
+    if a then
+      if path == "" then
+        path = fields[i + 2] -- rename: skip the old path, keep the new one
+        i = i + 2
+      end
+      if path and path ~= "" then map[path] = numstat_entry(a, d) end
+    end
+    i = i + 1
+  end
+  return map
+end
+
+--- Fetch everything the commit panel shows for an expanded commit, using two
+--- parallel processes.
 --- @param root     string
 --- @param hash     string
---- @param callback fun(files: table[]|nil, err: string|nil)
----   Each file entry: { path, old_path|nil, status, status_char,
----                      stat = { added, deleted, binary } | nil }
-function M.get_commit_files(root, hash, callback)
-  M.run(
-    { "diff-tree", "--no-commit-id", "-r", "--name-status", hash },
-    root,
+--- @param callback fun(details: {body: string[], files: table[], added: integer, deleted: integer}|nil, err: string|nil)
+---   Each file: { path, old_path|nil, status, status_char, stat|nil }
+function M.get_commit_details(root, hash, callback)
+  local body, files, stats, err
+  local pending = 2
+
+  local function done()
+    pending = pending - 1
+    if pending > 0 then return end
+    if not files then
+      callback(nil, err or "cannot read commit")
+      return
+    end
+    local added, deleted = 0, 0
+    for _, f in ipairs(files) do
+      f.stat = stats and stats[f.path] or nil
+      if f.stat then
+        added   = added + (f.stat.added or 0)
+        deleted = deleted + (f.stat.deleted or 0)
+      end
+    end
+    callback({ body = body, files = files, added = added, deleted = deleted }, nil)
+  end
+
+  M.run({ "show", "--no-color", "--no-show-signature", "--format=%B" .. RS, "--name-status", hash }, root,
     function(lines, stderr, code)
       if code ~= 0 then
-        callback(nil, stderr)
+        err = stderr
+        done()
         return
       end
-
-      local files = {}
+      body, files = {}, {}
+      local in_files = false
       for _, line in ipairs(lines) do
-        if line == "" then goto next end
-        -- Format: "M\tpath" or "R100\told\tnew"
-        local status_char, rest = line:match("^(%a%d*)%s+(.+)$")
-        if status_char and rest then
-          local s = status_char:sub(1, 1)
-          local path = rest
-          local old_path = nil
-          -- Handle renames/copies (R100, C100)
-          if s == "R" or s == "C" then
-            local tab = rest:find("\t", 1, true)
-            if tab then
-              old_path = rest:sub(1, tab - 1)
-              path = rest:sub(tab + 1)
-            end
+        if not in_files then
+          local rs = line:find(RS, 1, true)
+          if rs then
+            in_files = true
+            local before = line:sub(1, rs - 1)
+            if before ~= "" then table.insert(body, before) end
+          else
+            table.insert(body, line)
           end
-          table.insert(files, {
-            path        = path,
-            old_path    = old_path,
-            status      = parse_status_char(s),
-            status_char = s,
-          })
+        elseif line ~= "" then
+          -- "M\tpath" or "R100\told\tnew"
+          local status_char, rest = line:match("^(%a)%d*\t(.+)$")
+          if status_char then
+            local path, old_path = rest, nil
+            if status_char == "R" or status_char == "C" then
+              old_path, path = rest:match("^(.-)\t(.+)$")
+              path = path or rest
+            end
+            table.insert(files, {
+              path        = path,
+              old_path    = old_path,
+              status      = parse_status_char(status_char),
+              status_char = status_char,
+            })
+          end
         end
-        ::next::
       end
+      while #body > 0 and body[#body] == "" do table.remove(body) end
+      done()
+    end)
 
-      -- Fetch per-file numstat and merge counts onto each entry by path.
-      -- Best-effort: if it fails, return the files without stats.
-      M.run(
-        { "diff-tree", "--no-commit-id", "-r", "--numstat", hash },
-        root,
-        function(ns_lines, _, ns_code)
-          if ns_code == 0 then
-            local stats = parse_numstat(ns_lines)
-            for _, f in ipairs(files) do
-              f.stat = stats[f.path]
-            end
-          end
-          callback(files, nil)
-        end
-      )
-    end
-  )
+  M.run({ "show", "--no-color", "--no-show-signature", "--format=", "--numstat", "-z", hash }, root,
+    function(lines, _, code)
+      if code == 0 then stats = parse_numstat_z(lines) end
+      done()
+    end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -567,25 +499,18 @@ function M.unstage_file(root, path, callback)
   end)
 end
 
--- ---------------------------------------------------------------------------
--- Binary detection
--- ---------------------------------------------------------------------------
-
-function M.is_binary(root, path, callback)
-  M.run(
-    { "diff", "--no-ext-diff", "--numstat", "HEAD", "--", path },
-    root,
-    function(lines, _, _)
-      local binary = false
-      for _, line in ipairs(lines) do
-        if line:match("^%-\t%-\t") then
-          binary = true
-          break
-        end
-      end
-      callback(binary)
-    end
-  )
+--- Apply a patch to the index (used for hunk staging).
+--- @param root     string
+--- @param patch    string     Unified diff, zero context lines allowed.
+--- @param reverse  boolean    true to unapply (unstage).
+--- @param callback fun(ok: boolean, err: string|nil)
+function M.apply_to_index(root, patch, reverse, callback)
+  local args = { "apply", "--cached", "--unidiff-zero", "--whitespace=nowarn" }
+  if reverse then table.insert(args, "--reverse") end
+  table.insert(args, "-")
+  M.run(args, root, function(_, stderr, code)
+    callback(code == 0, code ~= 0 and stderr or nil)
+  end, { stdin = patch })
 end
 
 return M

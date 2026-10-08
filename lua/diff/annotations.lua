@@ -1,6 +1,7 @@
 local M = {}
 
 local config = require("diff.config")
+local log    = require("diff.log").scope("notes")
 
 -- Namespace for highlights in the notes panel
 local NS = vim.api.nvim_create_namespace("diff_nvim_notes")
@@ -13,6 +14,9 @@ local NS = vim.api.nvim_create_namespace("diff_nvim_notes")
 -- Nil until the first note is written this session.
 M._session_path    = nil
 M._session_file_created = false
+
+-- Notes panel window/buffer, owned by this module.
+M._panel = { win = nil, buf = nil }
 
 -- Timestamp captured once at module-load time (= once per Neovim session, since
 -- Lua modules are cached by require).  Format: ISO-8601-like compact form without
@@ -57,6 +61,7 @@ function M.append_note(note)
 
   local f = io.open(path, "a")
   if not f then
+    log.error("cannot open notes file %s", path)
     vim.notify("diff.nvim: cannot open notes file: " .. path, vim.log.levels.ERROR)
     return
   end
@@ -87,20 +92,43 @@ function M.append_note(note)
 
   -- Mark file as created for this session
   M._session_file_created = true
+  log.info("note saved for %s:%s (%s side)", note.file_path, lines_str, note.side or "?")
 
   vim.notify("diff.nvim: note saved → " .. path, vim.log.levels.INFO)
 
-  -- Refresh note markers in the current diff view
-  local dv = require("diff.diff_view")
-  if dv._current_repo and dv._current_file then
-    dv.rerender()
+  require("diff.diff_view").refresh_annotations()
+  if M.panel_win() then
+    M._render_notes_buf(M._panel.buf)
   end
+end
 
-  -- Live-update the notes panel split if it is open
-  local sidebar = require("diff.sidebar")
-  if sidebar._notes_win and vim.api.nvim_win_is_valid(sidebar._notes_win) then
-    M._render_notes_buf(sidebar._notes_buf)
+-- ---------------------------------------------------------------------------
+-- Reading notes back (for markers in the diff view)
+-- ---------------------------------------------------------------------------
+
+--- Notes recorded this session for `file_path`.
+--- @return table[]  { line_start = integer, side = "old"|"new"|nil, text = string }
+function M.notes_for(repo_root, file_path)
+  local out = {}
+  if not M._session_file_created then return out end
+  local f = io.open(M.get_notes_path(repo_root), "r")
+  if not f then return out end
+  local content = f:read("*a")
+  f:close()
+
+  -- "## Note — <file>, lines <start>[-<end>] [(<side> side)]" followed by a
+  -- "> text" quote. Accepts en-dash or hyphen, and blank lines in between.
+  for header, text in content:gmatch("## Note [—%-]- ([^\n]+)\n+> ([^\n]+)") do
+    local note_file = header:match("^(.+), lines %d+")
+    if note_file == file_path then
+      table.insert(out, {
+        line_start = tonumber(header:match("lines (%d+)")),
+        side       = header:match("%((%a+) side%)"),
+        text       = text,
+      })
+    end
   end
+  return out
 end
 
 -- ---------------------------------------------------------------------------
@@ -209,14 +237,18 @@ local function load_notes_lines()
   return lines
 end
 
---- Close the notes panel and clear sidebar state.
---- @param sidebar table
-local function close_notes_panel(sidebar)
-  if sidebar._notes_win and vim.api.nvim_win_is_valid(sidebar._notes_win) then
-    pcall(vim.api.nvim_win_close, sidebar._notes_win, true)
+--- @return integer|nil  the notes panel window when it is open
+function M.panel_win()
+  local win = M._panel.win
+  return (win and vim.api.nvim_win_is_valid(win)) and win or nil
+end
+
+--- Close the notes panel if it is open.
+function M.close_panel()
+  if M.panel_win() then
+    pcall(vim.api.nvim_win_close, M._panel.win, true)
   end
-  sidebar._notes_win = nil
-  sidebar._notes_buf = nil
+  M._panel = { win = nil, buf = nil }
 end
 
 --- (Re-)render the notes buffer from the session file.
@@ -235,9 +267,8 @@ end
 function M.toggle_notes(repo_root)
   local sidebar = require("diff.sidebar")
 
-  -- Close if already open
-  if sidebar._notes_win and vim.api.nvim_win_is_valid(sidebar._notes_win) then
-    close_notes_panel(sidebar)
+  if M.panel_win() then
+    M.close_panel()
     return
   end
 
@@ -292,15 +323,14 @@ function M.toggle_notes(repo_root)
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
 
-  sidebar._notes_win = win
-  sidebar._notes_buf = buf
+  M._panel = { win = win, buf = buf }
 
   -- Render content
   M._render_notes_buf(buf)
 
   -- Keymaps: close
   vim.keymap.set("n", "q", function()
-    close_notes_panel(sidebar)
+    M.close_panel()
   end, { buffer = buf, nowait = true, desc = "Close notes panel (diff)" })
 
   -- Keymap: delete note under cursor
@@ -313,10 +343,7 @@ function M.toggle_notes(repo_root)
     M._delete_note_at_cursor(buf, path, repo_root)
   end, { buffer = buf, nowait = true, desc = "Delete note (diff)" })
 
-  -- Return focus to the file panel if it's open
-  if sidebar._file_win and vim.api.nvim_win_is_valid(sidebar._file_win) then
-    pcall(vim.api.nvim_set_current_win, sidebar._file_win)
-  end
+  sidebar.focus_panel()
 end
 
 -- ---------------------------------------------------------------------------
@@ -399,10 +426,13 @@ function M._delete_note_at_cursor(buf, path, repo_root)
     f2:write(table.concat(new_lines, "\n") .. "\n")
     f2:close()
     vim.notify("diff.nvim: note deleted", vim.log.levels.INFO)
+    log.info("note deleted (lines %d-%d of %s)", block_start, block_end, path)
     -- Re-apply highlights on successfully updated buffer
     M._apply_notes_highlights(buf, new_lines)
+    require("diff.diff_view").refresh_annotations()
   else
     -- Write failed — revert the buffer to its original content
+    log.error("failed to persist note deletion to %s: %s", path, tostring(f2_err))
     vim.notify("diff.nvim: failed to persist deletion: " .. tostring(f2_err), vim.log.levels.ERROR)
     vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)

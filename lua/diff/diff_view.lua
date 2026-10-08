@@ -1,1715 +1,1049 @@
+--- diff.nvim — side-by-side diff view.
+---
+--- The view owns a header window and one or two pane windows inside the
+--- interface's main area. Those windows and their buffers live for as long as
+--- the view is open: opening another file, expanding context or a live refresh
+--- only replaces buffer content, so the layout never reflows and focus never
+--- jumps.
+---
+--- State flows one way: content.load -> diff_engine.compute (model) ->
+--- diff_engine.layout (items) -> render. Keymaps read the current state, so
+--- they are installed once per buffer.
 local M = {}
 
-local git         = require("diff.git")
-local diff_parser = require("diff.diff_parser")
-local word_diff   = require("diff.word_diff")
-local config      = require("diff.config")
+local config  = require("diff.config")
+local log     = require("diff.log").scope("view")
+local git     = require("diff.git")
+local content = require("diff.content")
+local engine  = require("diff.diff_engine")
+local syntax  = require("diff.syntax")
+local word_diff = require("diff.word_diff")
 
-local NS = vim.api.nvim_create_namespace("diff_nvim_diff")
+local NS       = vim.api.nvim_create_namespace("diff_nvim_diff")
+local NS_WORDS = vim.api.nvim_create_namespace("diff_nvim_words")
+local NS_NOTES = vim.api.nvim_create_namespace("diff_nvim_notes_markers")
+local NS_HEAD  = vim.api.nvim_create_namespace("diff_nvim_header")
 
--- ---------------------------------------------------------------------------
--- Module-level state
--- ---------------------------------------------------------------------------
+-- Highlight priorities relative to tree-sitter's 100.
+local PRIORITY_LINE_BG   = 50   -- below syntax so colours show through
+local PRIORITY_NOTE_SIGN = 70
+local PRIORITY_WORD_HL   = 150  -- above syntax so changed tokens stand out
 
-M._left_win      = nil
-M._right_win     = nil
-M._left_buf      = nil
-M._right_buf     = nil
-M._header_win    = nil   -- full-width filename bar spanning both diff panes
-M._header_buf    = nil
-M._left_aligned  = nil
-M._right_aligned = nil
-M._scroll_aug    = nil
-M._current_repo  = nil
-M._current_file  = nil
+local EXPAND_STEP = 10
+local WATCH_DEBOUNCE_MS = 150
 
--- Render generation counter: incremented on each M.open() call.
--- Scheduled callbacks check this to avoid applying stale highlights
--- if M.open() is called again before the first schedule fires.
-M._render_gen    = 0
-
--- Request generation counter: incremented on each open_file_diff() /
--- open_commit_diff() call. This guards the *fetch* phase, which _render_gen
--- does not: git jobs for two files run concurrently and can complete out of
--- order, so without this a slow fetch for the previously-selected file renders
--- on top of the file the user just clicked.
-M._request_gen   = 0
-
--- Cursor alignment lookup tables (built at render time)
--- Maps: left_to_right[left_buf_line] = right_buf_line (and vice-versa)
-M._left_to_right = nil
-M._right_to_left = nil
-
--- State needed for expand-context feature
-M._current_hunks    = nil
-M._current_old      = nil
-M._current_new      = nil
-M._current_ctx      = nil
-M._current_ft       = nil
-
--- Single-pane mode
-M._single_pane      = false
-
--- Live file-watcher state (for unstaged files open in the diff viewer)
-M._file_watcher       = nil   -- libuv fs_event handle
-M._file_watcher_timer = nil   -- pending debounce timer
-M._watched_file_info  = nil   -- {repo_root, file_info} saved for re-open on change
+local SIDES = { "old", "new" }
 
 -- ---------------------------------------------------------------------------
--- Highlight priorities (relative to tree-sitter's default of 100)
+-- State
 -- ---------------------------------------------------------------------------
-local PRIORITY_LINE_BG   = 50   -- background diff colors — below TS so syntax shows through
-local PRIORITY_WORD_HL   = 150  -- word diff highlights — above TS so they are clearly visible
-local PRIORITY_NOTE_SIGN = 70   -- note markers — between line bg and word highlights
 
---- Match a filetype against a scratch buffer holding `lines`.
---- Neovim resolves several common extensions with detection functions that read
---- the buffer rather than the name — .h (c vs cpp), .ts (typescript vs xml),
---- .m (objc vs matlab), .r, .env, and every extensionless script identified by
---- its shebang. Those functions call vim.filetype.getlines(bufnr), so
---- vim.filetype.match returns nil for them unless it is given a real `buf`.
---- Passing `contents` is not enough.
---- @param  path  string
---- @param  lines string[]
---- @return string  Filetype, or "" when still undetectable.
-local function match_ft_with_content(path, lines)
-  local buf = vim.api.nvim_create_buf(false, true)
-  local ok_lines = pcall(vim.api.nvim_buf_set_lines, buf, 0, -1, false, lines)
-  local ft = ""
-  if ok_lines then
-    for _, name in ipairs({ path, vim.fn.fnamemodify(path, ":t") }) do
-      if name ~= "" then
-        local ok, matched = pcall(vim.filetype.match, { buf = buf, filename = name })
-        if ok and matched and matched ~= "" then
-          ft = matched
-          break
-        end
-      end
-    end
-  end
-  pcall(vim.api.nvim_buf_delete, buf, { force = true })
-  return ft
+local function fresh_state()
+  return {
+    header_win = nil, header_buf = nil,
+    extra_win  = nil,           -- second pane (old side) in split mode
+    bufs  = {},                 -- side -> pane buffer (persist while open)
+    panes = {},                 -- side -> window currently showing that side
+    root = nil, source = nil, navigator = nil,
+    model = nil, layout = nil, ctx = nil, reveals = {},
+    sources = {},               -- side -> syntax Source
+    words = {},                 -- model row -> word ranges (lazy)
+    lnum_width = 1,
+    watcher = nil, watch_timer = nil,
+    -- open_gen counts opens, refresh_gen counts in-place refreshes. They are
+    -- separate so a background refresh (watcher, index change) can never
+    -- cancel an open the user asked for, while an open always supersedes a
+    -- refresh still in flight.
+    open_gen = 0, refresh_gen = 0,
+    opening = false,
+  }
 end
 
---- Detect the filetype for a file path, trying multiple strategies.
---- vim.filetype.match can return nil on repo-relative paths even when the
---- extension is unambiguous, so we fall back to basename, then to
---- content-aware matching, then to the raw extension.
---- @param  path  string        Any path form — absolute, relative, or basename only.
---- @param  lines string[]|nil  Real file content, used for content-dependent
----   extensions. Pass the original file lines, not the aligned diff lines: the
----   aligned list can start with a collapsed separator, which hides the shebang.
---- @return string              Filetype string, or "" if undetectable.
-local function detect_ft(path, lines)
-  if not path or path == "" then return "" end
-  local ft = vim.filetype.match({ filename = path })
-  if ft and ft ~= "" then return ft end
-  local basename = vim.fn.fnamemodify(path, ":t")
-  ft = vim.filetype.match({ filename = basename })
-  if ft and ft ~= "" then return ft end
-  if lines and #lines > 0 then
-    ft = match_ft_with_content(path, lines)
-    if ft ~= "" then return ft end
-  end
-  local ext = vim.fn.fnamemodify(path, ":e")
-  if ext and ext ~= "" then
-    ft = vim.filetype.match({ filename = "x." .. ext })
-    if ft and ft ~= "" then return ft end
-  end
-  return ""
+local S = fresh_state()
+
+local function valid_win(w) return w ~= nil and vim.api.nvim_win_is_valid(w) end
+local function valid_buf(b) return b ~= nil and vim.api.nvim_buf_is_valid(b) end
+
+local function sidebar() return require("diff.sidebar") end
+
+local function notify(msg, level)
+  vim.notify("diff.nvim: " .. msg, level or vim.log.levels.INFO)
 end
 
---- Create, or reuse, a scratch buffer for a diff pane.
----
---- An existing buffer of the same name is emptied and handed back rather than
---- force-deleted. nvim_buf_delete on a buffer that is currently displayed makes
---- Neovim close the window showing it, which is one of the ways panes vanish.
----
---- bufhidden is "hide", not "wipe": with "wipe", merely swapping the buffer out
---- of its window destroys it, so any code holding the handle is left with a
---- dead buffer. close_diff_wins deletes these explicitly instead.
---- @param  name string
---- @return integer
-local function make_buf(name)
-  for _, b in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_valid(b) and vim.api.nvim_buf_get_name(b) == name then
-      vim.api.nvim_set_option_value("modifiable", true, { buf = b })
-      pcall(vim.api.nvim_buf_set_lines, b, 0, -1, false, {})
-      vim.api.nvim_set_option_value("modifiable", false, { buf = b })
-      return b
-    end
-  end
-
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(buf, name)
-  vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
-  vim.api.nvim_set_option_value("bufhidden", "hide", { buf = buf })
-  vim.api.nvim_set_option_value("swapfile", false, { buf = buf })
-  vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
-  return buf
+--- Side shown in `buf`, or nil when it is not one of our panes.
+local function side_of_buf(buf)
+  if buf == S.bufs.old then return "old" end
+  if buf == S.bufs.new then return "new" end
 end
 
---- Apply per-window options appropriate for a diff pane.
---- @param win integer
---- Open a pane to the left of `anchor_win` and show `buf` in it.
---- Returns the new window, or nil when the split could not be made.
----
---- `:vsplit` throws E36 when there is not enough room — a narrow terminal
---- alongside the sidebar and an open notes panel is enough. That must not
---- propagate: the error path in the callers responds by closing the whole
---- view, turning a recoverable layout constraint into a vanished diff.
---- @param  anchor_win integer
---- @param  buf        integer
---- @return integer|nil
-local function split_left_pane(anchor_win, buf)
-  if not (anchor_win and vim.api.nvim_win_is_valid(anchor_win)) then return nil end
-  if not pcall(vim.api.nvim_set_current_win, anchor_win) then return nil end
-  if not pcall(vim.cmd, "leftabove vsplit") then return nil end
-
-  local win = vim.api.nvim_get_current_win()
-  if win == anchor_win then return nil end
-  if not pcall(vim.api.nvim_win_set_buf, win, buf) then
-    pcall(vim.api.nvim_win_close, win, true)
-    return nil
-  end
-  return win
+local function side_of_win(win)
+  if win == S.panes.old then return "old" end
+  if win == S.panes.new then return "new" end
 end
 
-local function set_win_opts(win)
-  local wopts = {
+local function item_at(idx)
+  return S.layout and S.layout.items[idx] or nil
+end
+
+local function row_of_item(item)
+  return item and item.row and S.model.rows[item.row] or nil
+end
+
+local function fire_view_changed()
+  local src = S.source
+  local data = src and { kind = src.kind, path = src.path, staged = src.staged, hash = src.hash } or {}
+  vim.api.nvim_exec_autocmds("User", { pattern = "DiffNvimViewChanged", data = data, modeline = false })
+end
+
+-- ---------------------------------------------------------------------------
+-- Live file watcher (unstaged working-tree files)
+-- ---------------------------------------------------------------------------
+
+local function stop_watcher()
+  if S.watch_timer then
+    pcall(function() S.watch_timer:stop() S.watch_timer:close() end)
+    S.watch_timer = nil
+  end
+  if S.watcher then
+    pcall(function() S.watcher:stop() S.watcher:close() end)
+    S.watcher = nil
+  end
+end
+
+--- Watch the file's directory rather than the file. Editors save atomically
+--- (write a temp file, rename it over the original), which replaces the inode;
+--- a watch on the file itself goes silent after the first such save, while a
+--- directory watch keeps reporting the new file under the same name.
+local function start_watcher(abs_path)
+  stop_watcher()
+  local uv = vim.uv or vim.loop
+  local dir, name = vim.fn.fnamemodify(abs_path, ":h"), vim.fn.fnamemodify(abs_path, ":t")
+  local ok, handle = pcall(uv.new_fs_event)
+  if not ok or not handle then return end
+  local timer = uv.new_timer()
+  local started = handle:start(dir, {}, function(err, fname)
+    if err or fname ~= name then return end
+    timer:stop()
+    timer:start(WATCH_DEBOUNCE_MS, 0, vim.schedule_wrap(function()
+      log.debug("file changed on disk: %s", abs_path)
+      M.refresh_content()
+    end))
+  end)
+  if started then
+    S.watcher, S.watch_timer = handle, timer
+    log.debug("watching %s", abs_path)
+  else
+    log.warn("cannot watch %s", dir)
+    pcall(function() handle:close() timer:close() end)
+  end
+end
+
+-- ---------------------------------------------------------------------------
+-- Windows and buffers
+-- ---------------------------------------------------------------------------
+
+local function set_opts(win, opts)
+  for k, v in pairs(opts) do
+    pcall(vim.api.nvim_set_option_value, k, v, { win = win })
+  end
+end
+
+local STATUSCOL = "%s%#LineNr#%{v:lua.require'diff.diff_view'.statuscol()} "
+
+local function pane_opts(win, bound)
+  set_opts(win, {
     number         = true,
     relativenumber = false,
+    statuscolumn   = STATUSCOL,
     wrap           = false,
     foldcolumn     = "0",
     signcolumn     = "yes:1",
     cursorline     = true,
-    scrollbind     = false,
-    cursorbind     = false,
-    diff           = false,
-  }
-  for k, v in pairs(wopts) do
-    pcall(vim.api.nvim_set_option_value, k, v, { win = win })
-  end
-end
-
---- Apply per-window options for the full-width filename header window.
---- @param win integer
-local function set_header_win_opts(win)
-  local wopts = {
-    number         = false,
-    relativenumber = false,
-    wrap           = false,
-    foldcolumn     = "0",
-    signcolumn     = "no",
-    cursorline     = false,
-    cursorcolumn   = false,
-    winfixheight   = true,
     list           = false,
     winbar         = "",
-  }
-  for k, v in pairs(wopts) do
-    pcall(vim.api.nvim_set_option_value, k, v, { win = win })
-  end
-  -- Give the header its own muted background via winhighlight so it reads as a bar.
-  pcall(vim.api.nvim_set_option_value, "winhighlight",
-    "Normal:DiffNvimHeader,NormalNC:DiffNvimHeader,EndOfLine:DiffNvimHeader",
-    { win = win })
+    scrollbind     = bound,
+    cursorbind     = bound,
+    diff           = false,
+  })
 end
 
---- Fill a diff buffer with the content from an aligned line list.
---- @param buf integer
---- @param aligned table[]
-local function fill_aligned_buf(buf, aligned)
-  local content = {}
-  for _, entry in ipairs(aligned) do
-    table.insert(content, entry.content)
-  end
-  vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, content)
-  vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+local function header_opts(win)
+  set_opts(win, {
+    number = false, relativenumber = false, statuscolumn = "", wrap = false,
+    foldcolumn = "0", signcolumn = "no", cursorline = false, list = false,
+    winfixheight = true, winbar = "",
+    winhighlight = "Normal:DiffNvimHeader,NormalNC:DiffNvimHeader,EndOfLine:DiffNvimHeader",
+    -- With 'laststatus' 1/2 the header gets its own status line; draw it as a
+    -- thin rule under the filename instead of a "[Scratch]" bar.
+    statusline = "%#DiffNvimHeaderRule#%=",
+    fillchars = "stl:─,stlnc:─",
+  })
 end
 
---- Create (or update) the full-width filename header that spans the diff panes.
---- Splits a 1-line window above `anchor_win`. The anchor window remains the
---- bottom window (i.e. the diff pane), so the header sits above the OLD/NEW
---- vertical split and therefore spans its full width.
---- @param anchor_win integer  window the diff pane lives in (becomes bottom)
---- @param text       string   filename / heading text to display
---- @return integer|nil        the header window, or nil on failure
-local function create_header(anchor_win, text)
-  if not (anchor_win and vim.api.nvim_win_is_valid(anchor_win)) then return nil end
-
-  -- Reuse an existing header window if still valid (e.g. on rerender).
-  local header_win = M._header_win
-  if not (header_win and vim.api.nvim_win_is_valid(header_win)) then
-    vim.api.nvim_set_current_win(anchor_win)
-    -- `aboveleft split` opens the new window above and keeps `anchor_win` below.
-    local ok = pcall(vim.cmd, "aboveleft split")
-    if not ok then return nil end
-    header_win = vim.api.nvim_get_current_win()
-  end
-
-  -- Header buffer (scratch, single line).
-  local header_buf = M._header_buf
-  if not (header_buf and vim.api.nvim_buf_is_valid(header_buf)) then
-    header_buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_set_option_value("buftype", "nofile", { buf = header_buf })
-    vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = header_buf })
-    vim.api.nvim_set_option_value("swapfile", false, { buf = header_buf })
-  end
-
-  vim.api.nvim_set_option_value("modifiable", true, { buf = header_buf })
-  vim.api.nvim_buf_set_lines(header_buf, 0, -1, false, { "  " .. text })
-  vim.api.nvim_set_option_value("modifiable", false, { buf = header_buf })
-
-  vim.api.nvim_win_set_buf(header_win, header_buf)
-  pcall(vim.api.nvim_win_set_height, header_win, 1)
-  set_header_win_opts(header_win)
-
-  M._header_win = header_win
-  M._header_buf = header_buf
-  return header_win
-end
-
---- Start tree-sitter for a buffer, falling back to regex syntax when needed.
---- @param buf integer
---- @param ft string
-local function start_buf_syntax(buf, ft)
-  if ft == "" then return end
-  local ts_ok = pcall(vim.treesitter.start, buf, ft)
-  if not ts_ok then
-    pcall(function() vim.bo[buf].syntax = ft end)
-    return
-  end
-  -- Force a full-buffer parse. Tree-sitter's highlighter parses lazily by
-  -- viewport (via its on_win decoration callback), so lines that start off
-  -- screen can render unhighlighted until scrolled into view and redrawn.
-  -- Parsing the whole buffer up front makes highlighting deterministic.
-  pcall(function()
-    local parser = vim.treesitter.get_parser(buf, ft)
-    if parser then parser:parse(true) end
-  end)
-end
-
---- Set filetype and start tree-sitter for a buffer.
---- @param buf integer
---- @param ft string
-local function set_buf_filetype(buf, ft)
-  if ft == "" then return end
-  pcall(vim.api.nvim_set_option_value, "filetype", ft, { buf = buf })
-  start_buf_syntax(buf, ft)
-end
-
--- ---------------------------------------------------------------------------
--- Enclosing-declaration resolution (GitHub-style collapsed-section headings)
--- ---------------------------------------------------------------------------
-
--- Node-type substrings that qualify as a "section heading" (function, class,
--- etc.). Deliberately excludes variable declarations / assignments so we don't
--- label a collapsed region with an unrelated `local x = ...` line.
-local DECL_INCLUDE = {
-  "function", "method", "class", "struct", "interface", "impl",
-  "module", "namespace", "constructor", "enum", "trait", "def",
-}
-local DECL_EXCLUDE = {
-  "variable", "field", "assignment", "call", "parameter", "argument",
-}
-
-local function node_is_decl(t)
-  for _, x in ipairs(DECL_EXCLUDE) do
-    if t:find(x, 1, true) then return false end
-  end
-  for _, x in ipairs(DECL_INCLUDE) do
-    if t:find(x, 1, true) then return true end
-  end
-  return false
-end
-
---- Build a scratch tree-sitter parse of full file `lines` for `ft`.
---- Returns { root, lines } or nil if no parser is available.
---- The scratch buffer is wiped immediately; the parsed tree stays valid.
-local function parse_full_file(lines, ft)
-  if ft == "" or not lines or #lines == 0 then return nil end
+local function scratch_buf(bufhidden)
   local buf = vim.api.nvim_create_buf(false, true)
-  local ok_lines = pcall(vim.api.nvim_buf_set_lines, buf, 0, -1, false, lines)
-  if not ok_lines then
-    pcall(vim.api.nvim_buf_delete, buf, { force = true })
-    return nil
-  end
-  local ok, parser = pcall(vim.treesitter.get_parser, buf, ft)
-  if not ok or not parser then
-    pcall(vim.api.nvim_buf_delete, buf, { force = true })
-    return nil
-  end
-  local ok_parse = pcall(function() parser:parse(true) end)
-  local trees = ok_parse and parser:trees() or nil
-  local root = trees and trees[1] and trees[1]:root() or nil
-  pcall(vim.api.nvim_buf_delete, buf, { force = true })
-  if not root then return nil end
-  return { root = root, lines = lines }
+  vim.bo[buf].buftype    = "nofile"
+  vim.bo[buf].bufhidden  = bufhidden
+  vim.bo[buf].swapfile   = false
+  vim.bo[buf].undolevels = -1
+  vim.bo[buf].modifiable = false
+  return buf
 end
 
--- Memoises parse_full_file. Parsing a whole file is synchronous and scales
--- with file size, not with how much of the diff is on screen, and both sides
--- were re-parsed on every render — so each zo/zR press and every live refresh
--- paid the full cost again for content that had not changed.
---
--- Keyed by the identity of the lines table, which is replaced exactly when the
--- content is re-fetched. Weak keys so a cached parse never keeps a stale file's
--- lines alive.
-local parse_cache = setmetatable({}, { __mode = "k" })
-
---- @param lines string[]|nil
---- @param ft    string
---- @return table|nil
-local function parse_full_file_cached(lines, ft)
-  if not lines or ft == "" then return nil end
-
-  local hit = parse_cache[lines]
-  if hit and hit.ft == ft then return hit.parsed end
-
-  local parsed = parse_full_file(lines, ft)
-  -- Stored even when nil (no parser for this filetype) so the miss is not
-  -- retried on every render.
-  parse_cache[lines] = { ft = ft, parsed = parsed }
-  return parsed
+local function set_lines(buf, lines)
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
 end
 
---- Resolve the enclosing declaration heading for a 1-based `line_num` within a
---- parsed file. Returns a trimmed signature string (e.g. "function M.open")
---- or nil when there is no enclosing declaration.
-local function enclosing_decl(parsed, line_num)
-  if not parsed or not line_num then return nil end
-  local row = line_num - 1  -- tree-sitter is 0-based
-  if row < 0 then return nil end
-  local ok, node = pcall(function()
-    return parsed.root:descendant_for_range(row, 0, row, 0)
-  end)
-  if not ok or not node then return nil end
-  while node do
-    if node_is_decl(node:type()) then
-      local sr = select(1, node:range())
-      local line = parsed.lines[sr + 1] or ""
-      line = line:gsub("^%s+", ""):gsub("%s+$", "")
-      -- Drop a trailing block-opening brace/paren for a cleaner heading.
-      line = line:gsub("%s*[{(]%s*$", "")
-      if line ~= "" then return line end
-      return nil
+local setup_keymaps -- defined below; installed once per pane buffer
+
+local function pane_buf(side)
+  if not valid_buf(S.bufs[side]) then
+    S.bufs[side] = scratch_buf("hide")
+    setup_keymaps(S.bufs[side], side)
+  end
+  return S.bufs[side]
+end
+
+--- The window the primary pane lives in: the interface's main area, or the
+--- widest window that is not a sidebar panel.
+local function host_window()
+  local main = sidebar().get_main_win()
+  if valid_win(main) then return main end
+  local best, best_w
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))
+    local w = vim.api.nvim_win_get_width(win)
+    if win ~= S.header_win and not name:match("^diff://file") and not name:match("^diff://commit")
+      and (not best_w or w > best_w) then
+      best, best_w = win, w
     end
-    node = node:parent()
   end
-  return nil
+  return best
 end
 
---- Stop the live file watcher and cancel any pending debounce timer.
-local function stop_file_watcher()
-  if M._file_watcher_timer then
-    pcall(function() M._file_watcher_timer:stop() end)
-    M._file_watcher_timer = nil
-  end
-  if M._file_watcher then
-    pcall(function()
-      M._file_watcher:stop()
-      M._file_watcher:close()
-    end)
-    M._file_watcher = nil
-  end
-  M._watched_file_info = nil
+--- Split a new window off `anchor` with `cmd`; nil when there is no room
+--- (E36), which callers treat as "degrade", never as a fatal error.
+local function split_from(anchor, cmd)
+  local prev = vim.api.nvim_get_current_win()
+  if not pcall(vim.api.nvim_set_current_win, anchor) then return nil end
+  local ok = pcall(vim.cmd, cmd)
+  local win = vim.api.nvim_get_current_win()
+  pcall(vim.api.nvim_set_current_win, prev)
+  if not ok or win == anchor then return nil end
+  return win
 end
 
---- Start watching an absolute file path and refresh the diff on changes.
---- Only used for unstaged working-tree files.
---- @param abs_path  string   Absolute path to watch
---- @param repo_root string
---- @param file_info table    {path, status, staged, ...}
-local function start_file_watcher(abs_path, repo_root, file_info)
-  stop_file_watcher()
+--- Arrange header + panes for `mode` ("split", "new" or "old"), reusing
+--- every window that already exists. Returns the mode actually achieved.
+local function ensure_layout(mode)
+  local host = host_window()
+  if not host then return nil end
 
-  local uv = vim.uv or vim.loop
-  local ok, fs_event = pcall(uv.new_fs_event)
-  if not ok or not fs_event then return end
-
-  local started = fs_event:start(abs_path, {}, vim.schedule_wrap(function(err, _, _)
-    if err then return end
-    -- Cancel any pending debounce
-    if M._file_watcher_timer then
-      pcall(function() M._file_watcher_timer:stop() end)
-      M._file_watcher_timer = nil
+  if not valid_win(S.header_win) then
+    S.header_win = split_from(host, "aboveleft 1split")
+    if S.header_win then
+      S.header_buf = valid_buf(S.header_buf) and S.header_buf or scratch_buf("hide")
+      vim.api.nvim_win_set_buf(S.header_win, S.header_buf)
+      header_opts(S.header_win)
+      pcall(vim.api.nvim_win_set_height, S.header_win, 1)
     end
-    M._file_watcher_timer = vim.defer_fn(function()
-      M._file_watcher_timer = nil
-      M.refresh_content(repo_root, file_info)
-      -- Re-arm the watch. inotify follows the inode, not the path, so an
-      -- atomic save (write-to-temp then rename) leaves this handle watching a
-      -- file that no longer exists at abs_path and no further events arrive.
-      -- Re-arming after every change keeps the watch alive across such saves.
-      if M._file_watcher then
-        start_file_watcher(abs_path, repo_root, file_info)
+  end
+
+  local primary = mode == "old" and "old" or "new"
+  S.panes = { [primary] = host }
+  if vim.api.nvim_win_get_buf(host) ~= pane_buf(primary) then
+    vim.api.nvim_win_set_buf(host, pane_buf(primary))
+  end
+
+  if mode == "split" then
+    if not valid_win(S.extra_win) then
+      S.extra_win = split_from(host, "leftabove vsplit")
+    end
+    if S.extra_win then
+      if vim.api.nvim_win_get_buf(S.extra_win) ~= pane_buf("old") then
+        vim.api.nvim_win_set_buf(S.extra_win, pane_buf("old"))
       end
-    end, 300)
-  end))
-
-  if started then
-    M._file_watcher     = fs_event
-    M._watched_file_info = { repo_root = repo_root, file_info = file_info }
-  else
-    pcall(function()
-      fs_event:stop()
-      fs_event:close()
-    end)
+      S.panes.old = S.extra_win
+    else
+      log.warn("no room for a split diff; showing the new side only")
+      notify("not enough width for a split diff — showing the new side only", vim.log.levels.WARN)
+      mode = "new"
+    end
+  elseif valid_win(S.extra_win) then
+    pcall(vim.api.nvim_win_close, S.extra_win, true)
+    S.extra_win = nil
   end
+
+  for _, win in pairs(S.panes) do pane_opts(win, mode == "split") end
+  return mode
 end
 
-local function close_diff_wins()
-  -- Stop any live file watcher before tearing down windows/buffers
-  stop_file_watcher()
+-- ---------------------------------------------------------------------------
+-- Rendering
+-- ---------------------------------------------------------------------------
 
-  if M._scroll_aug then
-    pcall(vim.api.nvim_del_augroup_by_id, M._scroll_aug)
-    M._scroll_aug = nil
-  end
+local function separator_virt(side, sep)
+  local span = engine.separator_span(S.model, sep)
+  local virt = { { string.format("··· %d hidden lines ···", span.count), "DiffNvimSeparator" } }
+  local src = S.sources[side]
+  local heading = src and span[side][2] and src:enclosing_decl(span[side][2])
+  if heading then table.insert(virt, { "  " .. heading, "DiffNvimSeparatorDecl" }) end
+  return virt
+end
 
-  -- Invalidate any pending vim.schedule highlight callbacks from the closing view
-  M._render_gen = (M._render_gen or 0) + 1
+local FILLER = string.rep("░", 400)
 
-  -- Reset scroll guard to prevent permanent lockout (no longer a boolean — kept for compat)
+--- Persistent per-row decorations: line backgrounds, gutter signs, fillers and
+--- separators. Word and syntax highlights are drawn lazily per visible row.
+local function decorate(side)
+  local buf = S.bufs[side]
+  vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
+  local change_hl = side == "old" and "DiffNvimRemoved" or "DiffNvimAdded"
+  local sign_hl   = side == "old" and "DiffNvimGutterRemoved" or "DiffNvimGutterAdded"
 
-  -- Close the full-width filename header window (never the main area window).
-  if M._header_win and vim.api.nvim_win_is_valid(M._header_win) then
-    pcall(vim.api.nvim_win_close, M._header_win, true)
-  end
-  M._header_win = nil
-  M._header_buf = nil
-
-  -- Collect the live panes into a dense list. Iterating {M._left_win,
-  -- M._right_win} with ipairs was wrong: single-pane mode leaves the left side
-  -- nil, and ipairs over {nil, x} stops at the first index, so the whole
-  -- teardown below was silently skipped for single-pane views.
-  local sidebar = require("diff.sidebar")
-  local panes = {}
-  if M._left_win  then table.insert(panes, { win = M._left_win,  buf = M._left_buf })  end
-  if M._right_win then table.insert(panes, { win = M._right_win, buf = M._right_buf }) end
-
-  for _, pane in ipairs(panes) do
-    if vim.api.nvim_win_is_valid(pane.win) then
-      -- Don't close the main area window — just clear its buffer
-      if pane.win == sidebar._main_win then
-        local placeholder = vim.api.nvim_create_buf(false, true)
-        vim.api.nvim_set_option_value("buftype", "nofile", { buf = placeholder })
-        vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = placeholder })
-        vim.api.nvim_buf_set_lines(placeholder, 0, -1, false, {
-          "",
-          "  diff.nvim",
-          "",
-          "  Select a file from the sidebar to view its diff.",
-          "",
+  for i, item in ipairs(S.layout.items) do
+    local r = i - 1
+    if item.sep then
+      vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
+        line_hl_group = "DiffNvimSeparator",
+        virt_text = separator_virt(side, item.sep), virt_text_pos = "overlay",
+        priority = PRIORITY_LINE_BG,
+      })
+    else
+      local row = S.model.rows[item.row]
+      if not row[side] then
+        vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
+          line_hl_group = "DiffNvimFiller",
+          virt_text = { { FILLER, "DiffNvimFillerChar" } }, virt_text_pos = "overlay",
+          priority = PRIORITY_LINE_BG,
         })
-        pcall(vim.api.nvim_win_set_buf, pane.win, placeholder)
-        -- Clear winbar
-        pcall(vim.api.nvim_set_option_value, "winbar", "", { win = pane.win })
-      else
-        pcall(vim.api.nvim_win_close, pane.win, true)
+      elseif row.change then
+        vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
+          line_hl_group = change_hl, sign_text = "▍", sign_hl_group = sign_hl,
+          priority = PRIORITY_LINE_BG,
+        })
       end
     end
   end
-
-  -- Delete the pane buffers, now that the loop above has detached every one of
-  -- them from its window. They are created with bufhidden="hide" so that
-  -- swapping them out of a window cannot destroy them mid-render, which makes
-  -- cleanup our responsibility. Order matters: deleting a buffer that is still
-  -- displayed makes Neovim close the window showing it.
-  for _, pane in ipairs(panes) do
-    if pane.buf and vim.api.nvim_buf_is_valid(pane.buf) then
-      pcall(vim.api.nvim_buf_delete, pane.buf, { force = true })
-    end
-  end
-
-  M._left_win      = nil
-  M._right_win     = nil
-  M._left_buf      = nil
-  M._right_buf     = nil
-  M._left_aligned  = nil
-  M._right_aligned = nil
-  M._left_to_right = nil
-  M._right_to_left = nil
-  M._single_pane   = false
 end
 
---- Build cursor alignment lookup tables from aligned lists.
---- Both aligned arrays are guaranteed to be the same length by the diff_parser.
---- Since line i in left corresponds to line i in right by construction
---- (fillers pad both sides equally), the mapping is identity.
---- This function exists to make the cursor sync code explicit about the invariant.
---- @param left_aln  table[]
---- @param right_aln table[]
-local function build_cursor_map(left_aln, right_aln)
-  local len = math.min(#left_aln, #right_aln)
-  local l2r = {}
-  local r2l = {}
-
-  for i = 1, len do
-    l2r[i] = i
-    r2l[i] = i
+local function decorate_notes(side)
+  local buf = S.bufs[side]
+  vim.api.nvim_buf_clear_namespace(buf, NS_NOTES, 0, -1)
+  local notes = require("diff.annotations").notes_for(S.root, S.source.path)
+  if #notes == 0 then return end
+  local row_of_line = {}
+  for i, item in ipairs(S.layout.items) do
+    local row = row_of_item(item)
+    if row and row[side] then row_of_line[row[side]] = i - 1 end
   end
-
-  M._left_to_right = l2r
-  M._right_to_left = r2l
-end
-
--- ---------------------------------------------------------------------------
--- Highlight application
--- ---------------------------------------------------------------------------
-
---- Apply line-level background highlights, gutter signs, and separator/filler styling.
---- @param buf      integer
---- @param aligned  table[]
---- @param parsed   table|nil  full-file tree-sitter parse (from parse_full_file)
---- @param side     string|nil "old" or "new" — which coord space to resolve in
-local function apply_line_highlights(buf, aligned, parsed, side)
-  for i, entry in ipairs(aligned) do
-    local row = i - 1
-
-    if entry.type == "filler" then
-      -- Use virtual text with stipple character for visual distinction.
-      -- number_hl_group = "Conceal" visually suppresses the line number for
-      -- filler rows — they are structural padding, not real content.
-      vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
-        line_hl_group    = "DiffNvimFiller",
-        number_hl_group  = "Conceal",
-        virt_text        = { { string.rep("░", 80), "DiffNvimFillerChar" } },
-        virt_text_pos    = "overlay",
-        priority         = PRIORITY_LINE_BG,
-      })
-
-    elseif entry.type == "removed" then
-      vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
-        line_hl_group  = "DiffNvimRemoved",
-        sign_text      = "▍",
-        sign_hl_group  = "DiffNvimGutterRemoved",
-        priority       = PRIORITY_LINE_BG,
-      })
-
-    elseif entry.type == "added" then
-      vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
-        line_hl_group  = "DiffNvimAdded",
-        sign_text      = "▍",
-        sign_hl_group  = "DiffNvimGutterAdded",
-        priority       = PRIORITY_LINE_BG,
-      })
-
-    elseif entry.type == "separator" then
-      -- Separator rows carry no real line number. The buffer line itself is
-      -- empty (to keep tree-sitter's parse valid); the "··· N hidden lines ···"
-      -- marker is drawn as overlay virtual text instead of real buffer text.
-      --
-      -- GitHub-style: append the enclosing declaration (function/class/etc.) of
-      -- the collapsed region, resolved from the full-file tree-sitter parse.
-      local virt = { { entry.label or "··· hidden lines ···", "DiffNvimSeparator" } }
-
-      local span = side == "old" and entry.hidden_old or entry.hidden_new
-      if parsed and span then
-        -- Use the last hidden line: it sits deepest inside the enclosing scope,
-        -- giving the most specific heading (matches GitHub's behavior).
-        local heading = enclosing_decl(parsed, span[2])
-        if heading then
-          table.insert(virt, { "  " .. heading, "DiffNvimSeparatorDecl" })
-        end
-      end
-
-      vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
-        line_hl_group   = "DiffNvimSeparator",
-        number_hl_group = "Conceal",
-        virt_text       = virt,
-        virt_text_pos   = "overlay",
-        priority        = PRIORITY_LINE_BG,
+  for _, note in ipairs(notes) do
+    local r = (not note.side or note.side == side) and row_of_line[note.line_start]
+    if r then
+      local preview = note.text:sub(1, 40) .. (#note.text > 40 and "…" or "")
+      vim.api.nvim_buf_set_extmark(buf, NS_NOTES, r, 0, {
+        sign_text = "▸", sign_hl_group = "DiffNvimNoteMarker",
+        virt_text = { { "  " .. preview, "DiffNvimNoteVirtText" } }, virt_text_pos = "eol",
+        priority = PRIORITY_NOTE_SIGN,
       })
     end
   end
 end
 
---- Apply word-level diff highlights on paired removed/added lines.
---- @param left_buf   integer
---- @param right_buf  integer
---- @param left_aln   table[]
---- @param right_aln  table[]
-local function apply_word_highlights(left_buf, right_buf, left_aln, right_aln)
-  local len = math.min(#left_aln, #right_aln)
-  for i = 1, len do
-    local l = left_aln[i]
-    local r = right_aln[i]
-    if l.type == "removed" and r.type == "added" and l.content ~= "" and r.content ~= "" then
-      local ok, old_ranges, new_ranges = pcall(word_diff.compute, l.content, r.content)
-      if not ok then goto continue end
-      local row = i - 1
+local function render_header()
+  if not (valid_buf(S.header_buf) and S.source) then return end
+  local src, m = S.source, S.model
+  local text = "  " .. src.path
+  if src.old_path and src.old_path ~= src.path then text = "  " .. src.old_path .. " → " .. src.path end
+  if src.kind == "commit" then text = text .. "  @ " .. src.hash:sub(1, 7) end
+  if src.status == "added" or src.status == "untracked" then text = text .. "  (new file)" end
+  if src.status == "deleted" then text = text .. "  (deleted)" end
+  if src.binary then text = text .. "  (binary)" end
 
-      for _, range in ipairs(old_ranges) do
-        if range.end_col > range.start_col then
-          pcall(vim.api.nvim_buf_set_extmark, left_buf, NS, row, range.start_col, {
-            end_row  = row,
-            end_col  = math.min(range.end_col, #l.content),
-            hl_group = "DiffNvimRemovedWord",
-            priority = PRIORITY_WORD_HL,
-          })
-        end
-      end
-
-      for _, range in ipairs(new_ranges) do
-        if range.end_col > range.start_col then
-          pcall(vim.api.nvim_buf_set_extmark, right_buf, NS, row, range.start_col, {
-            end_row  = row,
-            end_col  = math.min(range.end_col, #r.content),
-            hl_group = "DiffNvimAddedWord",
-            priority = PRIORITY_WORD_HL,
-          })
-        end
-      end
-    end
-    ::continue::
+  local spans = {}
+  if m then
+    if m.old.eol ~= m.new.eol then text = text .. "  (newline at end of file changed)" end
+    local add, del = "+" .. m.added, "-" .. m.removed
+    table.insert(spans, { #text + 2, #text + 2 + #add, "DiffNvimStatAdded" })
+    table.insert(spans, { #text + 3 + #add, #text + 3 + #add + #del, "DiffNvimStatRemoved" })
+    text = text .. "  " .. add .. " " .. del
+  end
+  set_lines(S.header_buf, { text })
+  vim.api.nvim_buf_clear_namespace(S.header_buf, NS_HEAD, 0, -1)
+  for _, s in ipairs(spans) do
+    pcall(vim.api.nvim_buf_set_extmark, S.header_buf, NS_HEAD, 0, s[1], { end_col = s[2], hl_group = s[3] })
   end
 end
 
---- Place note markers (gutter sign + virtual text) for any notes matching the file.
---- @param buf       integer
---- @param aligned   table[]
---- @param side      string "old"|"new"
---- @param repo_root string
---- @param file_path string
-local function apply_note_markers(buf, aligned, side, repo_root, file_path)
-  local annotations = require("diff.annotations")
-  local notes_path = annotations.get_notes_path(repo_root)
-
-  local f = io.open(notes_path, "r")
-  if not f then return end
-
-  local content = f:read("*a")
-  f:close()
-  if not content or content == "" then return end
-
-  -- Parse notes to find any referencing this file
-  local ns_notes = vim.api.nvim_create_namespace("diff_nvim_notes_markers")
-  vim.api.nvim_buf_clear_namespace(buf, ns_notes, 0, -1)
-
-  -- Pattern: ## Note — <file_path>, lines <start>[–<end>] [(<side> side)]
-  -- Tolerant: accepts both en-dash and hyphen; handles blank line between header and quote
-  for header, note_text in content:gmatch("## Note [—%-]- ([^\n]+)\n+> ([^\n]+)") do
-    local note_file = header:match("^(.+), lines %d+")
-    if note_file and note_file == file_path then
-      local note_side = header:match("%((.+) side%)")
-      -- Only show markers on the matching side (or both if side unspecified)
-      if not note_side or note_side == side then
-        local line_start = tonumber(header:match("lines (%d+)"))
-        if line_start then
-          -- Find the buffer line that corresponds to this file line
-          for i, entry in ipairs(aligned) do
-            if entry.line_num == line_start then
-              local row = i - 1
-              local preview = note_text:sub(1, 40)
-              if #note_text > 40 then preview = preview .. "…" end
-              pcall(vim.api.nvim_buf_set_extmark, buf, ns_notes, row, 0, {
-                sign_text     = "▸",
-                sign_hl_group = "DiffNvimNoteMarker",
-                virt_text     = { { "  " .. preview, "DiffNvimNoteVirtText" } },
-                virt_text_pos = "eol",
-                priority      = PRIORITY_NOTE_SIGN,
-              })
-              break
-            end
-          end
-        end
-      end
-    end
-  end
-end
-
--- ---------------------------------------------------------------------------
--- Scroll synchronisation — eventignore-based, no boolean guard needed
--- ---------------------------------------------------------------------------
-
-local function setup_scroll_sync(left_win, right_win)
-  if M._scroll_aug then
-    pcall(vim.api.nvim_del_augroup_by_id, M._scroll_aug)
-  end
-
-  local aug = vim.api.nvim_create_augroup("DiffNvimScroll", { clear = true })
-  M._scroll_aug = aug
-
-  -- Re-entrancy guard. Syncing one pane moves the cursor or view in the other,
-  -- which fires the very same autocmds again; without a guard the two panes
-  -- ping-pong.
-  --
-  -- A plain flag rather than 'eventignore': eventignore is a global option, so
-  -- the previous approach suppressed WinScrolled and CursorMoved editor-wide
-  -- for the duration, silently dropping them for every other plugin. It also
-  -- rethrew with error() from inside an autocmd callback, which turns one
-  -- failure into an error message on every subsequent scroll.
-  local syncing = false
-  local function with_sync_guard(fn)
-    if syncing then return end
-    syncing = true
-    local ok, err = pcall(fn)
-    syncing = false   -- cleared unconditionally, so a throw cannot wedge sync
-    if not ok then
-      vim.notify("diff.nvim: scroll sync error: " .. tostring(err), vim.log.levels.DEBUG)
-    end
-  end
-
-  -- Sync topline: both buffers have identical line count (aligned), so syncing
-  -- topline directly keeps them visually aligned. Use args.match (the window that
-  -- actually scrolled) rather than get_current_win() to handle API-driven scrolls.
-  vim.api.nvim_create_autocmd("WinScrolled", {
-    group    = aug,
-    callback = function(ev)
-      if syncing then return end
-      -- args.match contains the ID of the window that scrolled
-      local scrolled_win = tonumber(ev.match)
-      local target_win
-
-      if scrolled_win == left_win then
-        target_win = right_win
-      elseif scrolled_win == right_win then
-        target_win = left_win
-      else
-        return
-      end
-
-      if not vim.api.nvim_win_is_valid(scrolled_win) then return end
-      if not vim.api.nvim_win_is_valid(target_win)   then return end
-
-      local info = vim.fn.getwininfo(scrolled_win)
-      if not info or #info == 0 then return end
-      local topline = info[1].topline
-      local leftcol = info[1].leftcol or 0
-
-      with_sync_guard(function()
-        vim.api.nvim_win_call(target_win, function()
-          vim.fn.winrestview({ topline = topline, leftcol = leftcol })
-        end)
+--- Bind each visible pane to its syntax source.
+local function bind_syntax()
+  for _, side in ipairs(SIDES) do
+    local buf, src = S.bufs[side], S.sources[side]
+    if S.panes[side] and src then
+      syntax.bind(buf, src, function(row0)
+        local row = row_of_item(item_at(row0 + 1))
+        local line = row and row[side]
+        return line and line - 1 or nil
       end)
-    end,
-  })
+    elseif valid_buf(buf) then
+      syntax.unbind(buf)
+    end
+  end
+end
 
-  -- Sync cursor via aligned_index identity map (both bufs have equal line count).
-  -- Also syncs topline as a safety net for cursor jumps (:norm gg, :norm G) that
-  -- may not fire WinScrolled in all Neovim builds.
-  -- Preserves column position and uses eventignore to prevent re-entrant callbacks.
-  vim.api.nvim_create_autocmd("CursorMoved", {
-    group    = aug,
-    callback = function()
-      if syncing then return end
-      local cur_win = vim.api.nvim_get_current_win()
-      local target_win, lookup
+--- Item index for an anchor, evaluated against the current layout.
+---   { side, line }        the row showing that line (or the gap hiding it)
+---   { sep_from = line }   the separator whose span starts at new-side `line`
+---   { block = i }         first row of block i
+local function resolve_anchor(anchor)
+  if not anchor then return 1 end
+  local items = S.layout.items
+  if anchor.block then
+    local blk = S.model.blocks[anchor.block]
+    return blk and S.layout.index_of[blk.first] or 1
+  end
+  if anchor.sep_from then
+    for i, item in ipairs(items) do
+      if item.sep and S.model.rows[item.sep.first].new == anchor.sep_from then return i end
+    end
+    return resolve_anchor(anchor.fallback)
+  end
+  local target
+  for r, row in ipairs(S.model.rows) do
+    if row[anchor.side] == anchor.line then target = r break end
+  end
+  if not target then
+    -- The line no longer exists (content shrank): nearest row on that side.
+    local best, best_d = 1, math.huge
+    for r, row in ipairs(S.model.rows) do
+      local l = row[anchor.side]
+      if l and math.abs(l - anchor.line) < best_d then best, best_d = r, math.abs(l - anchor.line) end
+    end
+    target = best
+  end
+  if S.layout.index_of[target] then return S.layout.index_of[target] end
+  for i, item in ipairs(items) do
+    if item.sep and target >= item.sep.first and target <= item.sep.last then return i end
+  end
+  return 1
+end
 
-      if cur_win == left_win then
-        target_win = right_win
-        lookup     = M._left_to_right
-      elseif cur_win == right_win then
-        target_win = left_win
-        lookup     = M._right_to_left
-      else
-        return
-      end
+--- Describe what is under the cursor of `win` so it can be found again after
+--- the layout changes, plus its screen offset from the top of the window.
+local function capture_anchor(win)
+  win = valid_win(win) and win or S.panes.new or S.panes.old
+  if not (valid_win(win) and S.layout) then return nil, nil end
+  local side = side_of_win(win) or "new"
+  local idx = vim.api.nvim_win_get_cursor(win)[1]
+  local offset = idx - vim.fn.getwininfo(win)[1].topline
+  local item = item_at(idx)
+  if not item then return nil, offset end
+  if item.sep then
+    local span = engine.separator_span(S.model, item.sep)
+    return { side = "new", line = span.new[1] }, offset
+  end
+  local row = S.model.rows[item.row]
+  if row[side] then return { side = side, line = row[side] }, offset end
+  local other = side == "old" and "new" or "old"
+  return { side = other, line = row[other] }, offset
+end
 
-      if not vim.api.nvim_win_is_valid(target_win) then return end
-      if not lookup then return end
-
-      local cursor = vim.api.nvim_win_get_cursor(cur_win)
-      local target_line = lookup[cursor[1]]
-      if not target_line then return end
-
-      local target_buf = vim.api.nvim_win_get_buf(target_win)
-      local line_count = vim.api.nvim_buf_line_count(target_buf)
-      target_line = math.min(target_line, line_count)
-
-      -- Preserve column; also sync topline to handle :norm gg/:norm G
-      local info = vim.fn.getwininfo(cur_win)
-      local topline = (info and #info > 0) and info[1].topline or nil
-
-      with_sync_guard(function()
-        pcall(vim.api.nvim_win_set_cursor, target_win, { target_line, cursor[2] })
-        if topline then
-          vim.api.nvim_win_call(target_win, function()
-            vim.fn.winrestview({ topline = topline })
-          end)
+local function place_cursor(idx, offset)
+  idx = math.max(1, math.min(idx, #S.layout.items))
+  for _, win in pairs(S.panes) do
+    if valid_win(win) then
+      local col = vim.api.nvim_win_get_cursor(win)[2]
+      pcall(vim.api.nvim_win_set_cursor, win, { idx, col })
+      vim.api.nvim_win_call(win, function()
+        if offset then
+          vim.fn.winrestview({ topline = math.max(1, idx - offset) })
+        else
+          vim.cmd("normal! zz")
         end
       end)
-    end,
-  })
+    end
+  end
 end
 
--- ---------------------------------------------------------------------------
--- Keymaps in diff pane
--- ---------------------------------------------------------------------------
+--- Render the current model into the panes and restore the cursor.
+--- @param anchor table|nil  see resolve_anchor
+--- @param offset integer|nil  screen offset to keep; nil centres the cursor
+local function render(anchor, offset)
+  local elapsed = require("diff.log").timer()
+  local m = S.model
+  S.layout = engine.layout(m, S.ctx, S.reveals)
 
-local function setup_keymaps(left_buf, right_buf, opts)
-  local cfg = config.get()
-  local km  = cfg.keymaps or {}
-
-  local function map(buf, mode, key, fn, desc)
-    vim.keymap.set(mode, key, fn, { buffer = buf, nowait = true, silent = true, desc = desc .. " (diff)" })
+  local text = { old = {}, new = {} }
+  for i, item in ipairs(S.layout.items) do
+    local row = row_of_item(item)
+    for _, side in ipairs(SIDES) do
+      text[side][i] = row and row[side] and m[side].lines[row[side]] or ""
+    end
   end
 
-  local function leave_note(buf, side)
-    return function()
-      local annotations = require("diff.annotations")
-      local line_start, line_end
+  for _, side in ipairs(SIDES) do
+    if S.panes[side] then
+      set_lines(S.bufs[side], text[side])
+      decorate(side)
+      decorate_notes(side)
+    end
+  end
+  bind_syntax()
+  render_header()
+  place_cursor(resolve_anchor(anchor), offset)
+  log.debug("render %s: %d rows, %d items in %.1f ms", S.source.path, #m.rows, #S.layout.items, elapsed())
+end
 
-      local mode = vim.fn.mode()
-      if mode == "v" or mode == "V" or mode == "\22" then
-        -- Leave visual mode before reading '< and '>. Those marks are only
-        -- updated when the selection ends, so reading them from inside visual
-        -- mode returns the *previous* selection.
-        vim.cmd([[execute "normal! \<Esc>"]])
-        line_start = vim.fn.getpos("'<")[2]
-        line_end   = vim.fn.getpos("'>")[2]
-      else
-        -- Deliberately not consulting '< / '> here: they persist for the whole
-        -- buffer, so any earlier visual selection would hijack a note that was
-        -- meant for the line under the cursor.
-        local pos  = vim.api.nvim_win_get_cursor(0)
-        line_start = pos[1]
-        line_end   = pos[1]
-      end
-
-      if line_end < line_start then
-        line_start, line_end = line_end, line_start
-      end
-
-      -- Map buffer line to actual file line via aligned table
-      local aligned = (buf == left_buf) and M._left_aligned or M._right_aligned
-      if aligned then
-        local function file_line(buf_line)
-          local entry = aligned[buf_line]
-          return entry and entry.line_num  -- nil for filler/separator lines
-        end
-        line_start = file_line(line_start)
-        line_end   = file_line(line_end)
-        if not line_start then
-          vim.notify("diff.nvim: cannot leave note on a filler/separator line", vim.log.levels.WARN)
-          return
-        end
-        if not line_end then line_end = line_start end
-      else
-        -- Aligned table not available (e.g. when the diff view was closed between
-        -- the key press and the callback). Cannot map buffer row → original file line,
-        -- so bail rather than record a meaningless buffer row as an annotation.
-        vim.notify("diff.nvim: cannot determine file line mapping for annotation", vim.log.levels.WARN)
-        return
-      end
-
-      annotations.prompt_note({
-        file_path  = opts.file_path,
-        line_start = line_start,
-        line_end   = line_end,
-        side       = side,
-        repo_root  = opts.repo_root,
+-- Word-level highlights, computed on demand for rows that are on screen.
+vim.api.nvim_set_decoration_provider(NS_WORDS, {
+  on_win = function(_, _, buf)
+    return S.layout ~= nil and side_of_buf(buf) ~= nil
+  end,
+  on_line = function(_, _, buf, r)
+    local side = side_of_buf(buf)
+    local item = side and item_at(r + 1)
+    local row = row_of_item(item)
+    if not (row and row.change and row.old and row.new) then return end
+    local w = S.words[item.row]
+    if not w then
+      local ok, o, n = pcall(word_diff.compute, S.model.old.lines[row.old], S.model.new.lines[row.new])
+      w = ok and { old = o, new = n } or { old = {}, new = {} }
+      S.words[item.row] = w
+    end
+    local hl = side == "old" and "DiffNvimRemovedWord" or "DiffNvimAddedWord"
+    for _, range in ipairs(w[side]) do
+      pcall(vim.api.nvim_buf_set_extmark, buf, NS_WORDS, r, range.start_col, {
+        end_col = range.end_col, hl_group = hl, priority = PRIORITY_WORD_HL, ephemeral = true,
       })
     end
-  end
+  end,
+})
 
-  local bufs_to_map = {}
-  if left_buf then table.insert(bufs_to_map, { left_buf, "old" }) end
-  if right_buf then table.insert(bufs_to_map, { right_buf, "new" }) end
-
-  for _, entry in ipairs(bufs_to_map) do
-    local buf  = entry[1]
-    local side = entry[2]
-
-    -- Leave note
-    map(buf, { "n", "v" }, km.leave_note or "<leader>n", leave_note(buf, side), "Leave note")
-
-    -- Toggle notes panel
-    map(buf, "n", km.toggle_notes or "<leader>N", function()
-      require("diff.annotations").toggle_notes(opts.repo_root)
-    end, "Toggle notes panel")
-
-    -- Next hunk
-    map(buf, "n", km.next_hunk or "]c", function()
-      local cur = vim.api.nvim_win_get_cursor(0)[1]
-      local aln = (buf == left_buf) and M._left_aligned or M._right_aligned
-      if not aln then return end
-      local i = cur
-      -- skip past the remainder of the current hunk
-      while i <= #aln and (aln[i].type == "removed" or aln[i].type == "added") do
-        i = i + 1
-      end
-      -- skip context/filler/separator until the next hunk starts
-      while i <= #aln and aln[i].type ~= "removed" and aln[i].type ~= "added" do
-        i = i + 1
-      end
-      if i <= #aln then
-        vim.api.nvim_win_set_cursor(0, { i, 0 })
-      end
-    end, "Next hunk")
-
-    -- Prev hunk
-    map(buf, "n", km.prev_hunk or "[c", function()
-      local cur = vim.api.nvim_win_get_cursor(0)[1]
-      local aln = (buf == left_buf) and M._left_aligned or M._right_aligned
-      if not aln then return end
-      local i = cur
-      -- skip backward past the current hunk (if cursor is inside one)
-      while i >= 1 and (aln[i].type == "removed" or aln[i].type == "added") do
-        i = i - 1
-      end
-      -- skip backward past context/filler/separator
-      while i >= 1 and aln[i].type ~= "removed" and aln[i].type ~= "added" do
-        i = i - 1
-      end
-      -- walk back to the first line of the previous hunk
-      while i > 1 and (aln[i - 1].type == "removed" or aln[i - 1].type == "added") do
-        i = i - 1
-      end
-      if i >= 1 and (aln[i].type == "removed" or aln[i].type == "added") then
-        vim.api.nvim_win_set_cursor(0, { i, 0 })
-      end
-    end, "Prev hunk")
-
-    -- j/k: step over filler rows.
-    --
-    -- Fillers are structural padding that exists only to keep this pane aligned
-    -- with the other side's added/removed lines. They hold no file content, so
-    -- stopping on them while moving vertically is never useful, and a large
-    -- one-sided change produces a long run of them to walk through.
-    --
-    -- Collapsed separators are deliberately NOT skipped: they are actionable
-    -- (l / zo expand the region they stand for), so the cursor must reach them.
-    local function vmove(dir)
-      local win  = vim.api.nvim_get_current_win()
-      local aln  = (buf == left_buf) and M._left_aligned or M._right_aligned
-      local last = vim.api.nvim_buf_line_count(buf)
-      local pos  = vim.api.nvim_win_get_cursor(win)
-      local row, col = pos[1], pos[2]
-
-      for _ = 1, vim.v.count1 do
-        local next_row = row + dir
-        while next_row >= 1 and next_row <= last
-          and aln and aln[next_row] and aln[next_row].type == "filler" do
-          next_row = next_row + dir
-        end
-        -- Out of bounds means only fillers remain in this direction; stop on
-        -- the last real row reached rather than jumping into the padding.
-        if next_row < 1 or next_row > last then break end
-        row = next_row
-      end
-
-      pcall(vim.api.nvim_win_set_cursor, win, { row, col })
-    end
-
-    map(buf, "n", "j",      function() vmove(1)  end, "Down, skip filler rows")
-    map(buf, "n", "k",      function() vmove(-1) end, "Up, skip filler rows")
-    map(buf, "n", "<Down>", function() vmove(1)  end, "Down, skip filler rows")
-    map(buf, "n", "<Up>",   function() vmove(-1) end, "Up, skip filler rows")
-
-    -- Expand context (zo)
-    map(buf, "n", km.expand_context or "zo", function()
-      M.expand_context()
-    end, "Expand context (+10 lines)")
-
-    -- 'l': expand collapsed separator line, otherwise keep default motion
-    map(buf, "n", "l", function()
-      local count = vim.v.count1
-      local motion = (count and count > 1) and (tostring(count) .. "l") or "l"
-      local aln = (buf == left_buf) and M._left_aligned or M._right_aligned
-      local entry = nil
-      if aln then
-        local cur = vim.api.nvim_win_get_cursor(0)[1]
-        entry = aln[cur]
-      end
-      if entry and entry.type == "separator" then
-        M.expand_context()
-      else
-        vim.api.nvim_feedkeys(motion, "n", false)
-      end
-    end, "Expand separator / move right")
-
-    -- Expand all (zR)
-    map(buf, "n", km.expand_all or "zR", function()
-      M.expand_all()
-    end, "Show all context")
-
-    -- Close diff view (return to sidebar)
-    map(buf, "n", "q", function()
-      close_diff_wins()
-      local sidebar = require("diff.sidebar")
-      if sidebar._file_win and vim.api.nvim_win_is_valid(sidebar._file_win) then
-        vim.api.nvim_set_current_win(sidebar._file_win)
-      end
-    end, "Close diff view")
-  end
-end
-
---- Expand context by 10 lines and re-render.
-function M.expand_context()
-  if not M._current_hunks then return end
-  local current = M._current_ctx or 3
-  M._current_ctx = current + 10
-  M.rerender()
-end
-
---- Show all context (no collapsing).
-function M.expand_all()
-  if not M._current_hunks then return end
-  M._current_ctx = nil
-  M.rerender()
-end
-
---- Re-render the diff with current state (used after context expansion).
-function M.rerender()
-  -- Single-pane mode does not support expand/collapse
-  if M._single_pane then return end
-
-  if not M._current_hunks or not M._current_old or not M._current_new then return end
-  if not M._left_buf or not vim.api.nvim_buf_is_valid(M._left_buf) then return end
-  if M._right_buf and not vim.api.nvim_buf_is_valid(M._right_buf) then return end
-
-  local left_aln, right_aln = diff_parser.build_aligned_lines(
-    M._current_hunks, M._current_old, M._current_new, M._current_ctx
-  )
-
-  M._left_aligned  = left_aln
-  M._right_aligned = right_aln
-
-  -- Rebuild cursor alignment map
-  build_cursor_map(left_aln, right_aln)
-
-  -- Re-fill buffers
-  fill_aligned_buf(M._left_buf, left_aln)
-  if M._right_buf then
-    fill_aligned_buf(M._right_buf, right_aln)
-  end
-
-  -- Re-apply tree-sitter first; defer all extmark application until after
-  -- tree-sitter has re-parsed the updated buffer content.
-  local ft = M._current_ft or ""
-  start_buf_syntax(M._left_buf, ft)
-  if M._right_buf then
-    start_buf_syntax(M._right_buf, ft)
-  end
-
-  local left_buf_ref  = M._left_buf
-  local right_buf_ref = M._right_buf
-
-  -- Parse the full old/new file once so collapsed separators can be labelled
-  -- with their enclosing declaration (GitHub-style headings).
-  local parsed_old = parse_full_file_cached(M._current_old, ft)
-  local parsed_new = parse_full_file_cached(M._current_new, ft)
-
-  -- Increment render generation for rerender as well
-  M._render_gen = M._render_gen + 1
-  local this_rerender_gen = M._render_gen
-
-  vim.schedule(function()
-    if this_rerender_gen ~= M._render_gen then return end
-    if not vim.api.nvim_buf_is_valid(left_buf_ref) then return end
-
-    -- Re-apply highlights
-    vim.api.nvim_buf_clear_namespace(left_buf_ref, NS, 0, -1)
-    apply_line_highlights(left_buf_ref, left_aln, parsed_old, "old")
-    if right_buf_ref and vim.api.nvim_buf_is_valid(right_buf_ref) then
-      vim.api.nvim_buf_clear_namespace(right_buf_ref, NS, 0, -1)
-      apply_line_highlights(right_buf_ref, right_aln, parsed_new, "new")
-      apply_word_highlights(left_buf_ref, right_buf_ref, left_aln, right_aln)
-    end
-
-    -- Re-apply note markers
-    if M._current_repo and M._current_file then
-      apply_note_markers(left_buf_ref, left_aln, "old", M._current_repo, M._current_file)
-      if right_buf_ref and vim.api.nvim_buf_is_valid(right_buf_ref) then
-        apply_note_markers(right_buf_ref, right_aln, "new", M._current_repo, M._current_file)
-      end
-    end
-  end)
+--- Real file line numbers for the gutter ('statuscolumn'). Pane rows are not
+--- file lines: fillers and collapsed context shift every row after them.
+--- %{} items are evaluated with the drawn window made current (only %!
+--- expressions get g:statusline_winid), so the current window is the pane.
+function M.statuscol()
+  local side = side_of_win(vim.api.nvim_get_current_win())
+  if not side or not S.layout or vim.v.virtnum ~= 0 then return "" end
+  local row = row_of_item(item_at(vim.v.lnum))
+  local n = row and row[side]
+  return string.format("%" .. S.lnum_width .. "s", n and tostring(n) or "")
 end
 
 -- ---------------------------------------------------------------------------
--- Core open function
+-- Opening
 -- ---------------------------------------------------------------------------
 
---- Open the split diff view with the provided content.
---- @param opts table {repo_root, file_path, old_lines, new_lines, diff_text, filetype, file_status}
-function M.open(opts)
-  close_diff_wins()
-
-  -- Increment render generation so any stale scheduled callbacks from a previous
-  -- M.open() call detect they are outdated and skip highlight application.
-  M._render_gen = M._render_gen + 1
-  local this_gen = M._render_gen
-
-  local old_lines = opts.old_lines or {}
-  local new_lines = opts.new_lines or {}
-  local diff_text = opts.diff_text or ""
-  local file_status = opts.file_status or nil
-
-  -- Resolve the filetype once, here, so every pane and any later rerender agree.
-  -- Content-aware detection reads the real file lines: prefer the new side, and
-  -- fall back to the old side for deleted files where the new side is empty.
-  local ft = opts.filetype or ""
-  if ft == "" then
-    ft = detect_ft(opts.file_path, #new_lines > 0 and new_lines or old_lines)
+local function destroy_sources()
+  for _, side in ipairs(SIDES) do
+    if valid_buf(S.bufs[side]) then syntax.unbind(S.bufs[side]) end
+    if S.sources[side] then S.sources[side]:destroy() end
   end
+  S.sources = {}
+end
 
-  -- Detect single-pane mode: added/untracked files (no old) or deleted files (no new)
-  local single_pane = false
-  local single_side = nil
+local function mode_for(source)
+  if source.status == "added" or source.status == "untracked" then return "new" end
+  if source.status == "deleted" then return "old" end
+  return "split"
+end
 
-  if file_status == "added" or file_status == "untracked" then
-    single_pane = true
-    single_side = "new"
-  elseif file_status == "deleted" then
-    single_pane = true
-    single_side = "old"
-  end
-
-  M._single_pane = single_pane
-
-  -- Parse diff and build aligned line lists
-  local hunks = diff_parser.parse(diff_text)
-
-  local cfg = config.get()
-  local ctx = cfg.context_lines
-
-  local left_aln, right_aln
-  if single_pane then
-    if single_side == "new" then
-      -- Only right pane is shown; left_aln unused in single-pane new-file mode
-      right_aln = {}
-      for i, line in ipairs(new_lines) do
-        table.insert(right_aln, { content = line, line_num = i, type = "added" })
-      end
-      left_aln = right_aln
-    else
-      -- Only left pane is shown; right_aln unused in single-pane deleted-file mode
-      left_aln = {}
-      for i, line in ipairs(old_lines) do
-        table.insert(left_aln, { content = line, line_num = i, type = "removed" })
-      end
-      right_aln = left_aln
+--- Renaming a buffer makes Neovim keep an unlisted buffer under the old name
+--- (as `:file` does, even with :keepalt); wipe it so renames cannot leak.
+local function rename_buf(buf, name)
+  local old = vim.api.nvim_buf_get_name(buf)
+  if old == name then return end
+  pcall(vim.api.nvim_buf_set_name, buf, name)
+  if old == "" then return end
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    if b ~= buf and vim.api.nvim_buf_get_name(b) == old and #vim.fn.win_findbuf(b) == 0 then
+      pcall(vim.api.nvim_buf_delete, b, { force = true })
     end
-  else
-    left_aln, right_aln = diff_parser.build_aligned_lines(hunks, old_lines, new_lines, ctx)
   end
+end
 
-  M._left_aligned    = left_aln
-  M._right_aligned   = right_aln
-  M._current_repo    = opts.repo_root
-  M._current_file    = opts.file_path
-  M._current_hunks   = hunks
-  M._current_old     = old_lines
-  M._current_new     = new_lines
-  M._current_ctx     = ctx
-  M._current_ft      = ft
-
-  -- Build cursor alignment map
-  if not single_pane then
-    build_cursor_map(left_aln, right_aln)
+local function name_buffers()
+  local src = S.source
+  local tag = src.kind == "commit" and src.hash:sub(1, 7) or (src.staged and "index" or "worktree")
+  for _, side in ipairs(SIDES) do
+    if valid_buf(S.bufs[side]) then
+      rename_buf(S.bufs[side],
+        string.format("diff://%s/%s/%s", tag, side, side == "old" and (src.old_path or src.path) or src.path))
+    end
   end
+end
 
-  -- ── Single-pane mode ────────────────────────────────────────────────────
-  if single_pane then
-    local pane_name = single_side == "new"
-      and ("diff://new/" .. opts.file_path)
-      or  ("diff://old/" .. opts.file_path)
-    local pane_buf = make_buf(pane_name)
-    local aln = single_side == "new" and right_aln or left_aln
-
-    -- Populate buffer
-    fill_aligned_buf(pane_buf, aln)
-
-    -- Set filetype and start tree-sitter; fall back to regex syntax if no TS parser
-    set_buf_filetype(pane_buf, ft)
-
-    -- Create window
-    local sidebar = require("diff.sidebar")
-    local main_win = sidebar.get_main_win()
-    local target_win = nil
-
-    if main_win and vim.api.nvim_win_is_valid(main_win) then
-      target_win = main_win
-    else
-      -- Fallback: use current window
-      target_win = vim.api.nvim_get_current_win()
+local function make_sources(old, new)
+  destroy_sources()
+  local src = S.source
+  if S.panes.new then S.sources.new = syntax.source(src.path, new.lines) end
+  if S.panes.old then
+    local ft = S.sources.new and S.sources.new.ft ~= "" and S.sources.new.ft or nil
+    S.sources.old = syntax.source(src.old_path or src.path, old.lines, ft)
+  end
+  for _, side in ipairs(SIDES) do
+    local s = S.sources[side]
+    if s then
+      -- Separator headings need the parse; redraw them once it lands.
+      s:on_ready(function()
+        if S.sources[side] == s and S.layout and valid_buf(S.bufs[side]) then decorate(side) end
+      end)
     end
+  end
+end
 
-    vim.api.nvim_set_current_win(target_win)
-    vim.api.nvim_win_set_buf(target_win, pane_buf)
+local function show_binary(root, source, navigator)
+  S.root, S.source, S.navigator, S.model, S.layout = root, vim.tbl_extend("force", source, { binary = true }), navigator, nil, nil
+  destroy_sources()
+  if not ensure_layout("new") then return end
+  local buf = S.bufs.new
+  vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
+  vim.api.nvim_buf_clear_namespace(buf, NS_NOTES, 0, -1)
+  set_lines(buf, { "", "  Binary file — no text diff to show." })
+  render_header()
+  name_buffers()
+  stop_watcher()
+  fire_view_changed()
+end
 
-    -- Full-width filename header above the single pane. Since one side is
-    -- absent, note whether this is a new or deleted file right in the header.
-    local suffix = single_side == "new" and "  (new file)" or "  (deleted)"
-    create_header(target_win, opts.file_path .. suffix)
-    vim.api.nvim_set_current_win(target_win)
-
-    if single_side == "new" then
-      M._right_win = target_win
-      M._right_buf = pane_buf
-      M._left_win = nil
-      M._left_buf = nil
-    else
-      M._left_win = target_win
-      M._left_buf = pane_buf
-      M._right_win = nil
-      M._right_buf = nil
-    end
-
-    set_win_opts(target_win)
-    pcall(vim.api.nvim_set_option_value, "winbar", "", { win = target_win })
-
-    -- Apply highlights — deferred so tree-sitter completes its first parse first.
-    -- Guard with generation counter to skip stale callbacks from rapid re-opens.
-    local pane_buf_ref = pane_buf
-    local repo_root_ref = opts.repo_root
-    local file_path_ref = opts.file_path
-    vim.schedule(function()
-      if this_gen ~= M._render_gen then return end
-      if not vim.api.nvim_buf_is_valid(pane_buf_ref) then return end
-      vim.api.nvim_buf_clear_namespace(pane_buf_ref, NS, 0, -1)
-      apply_line_highlights(pane_buf_ref, aln)
-      apply_note_markers(pane_buf_ref, aln, single_side, repo_root_ref, file_path_ref)
-    end)
-
-    -- Keymaps (single buffer)
-    setup_keymaps(
-      single_side == "old" and pane_buf or nil,
-      single_side == "new" and pane_buf or nil,
-      { file_path = opts.file_path, repo_root = opts.repo_root }
-    )
-
+local function show(root, source, navigator, old, new)
+  S.root, S.source, S.navigator = root, source, navigator
+  local mode = ensure_layout(mode_for(source))
+  if not mode then
+    notify("no window available for the diff", vim.log.levels.ERROR)
     return
   end
-
-  -- ── Two-pane mode ───────────────────────────────────────────────────────
-  local left_name  = "diff://old/" .. opts.file_path
-  local right_name = "diff://new/" .. opts.file_path
-  local left_buf   = make_buf(left_name)
-  local right_buf  = make_buf(right_name)
-
-  M._left_buf  = left_buf
-  M._right_buf = right_buf
-
-  fill_aligned_buf(left_buf,  left_aln)
-  fill_aligned_buf(right_buf, right_aln)
-
-  -- Set filetype and start tree-sitter for syntax highlighting; fall back to
-  -- regex syntax if no TS parser exists for this filetype.
-  set_buf_filetype(left_buf, ft)
-  set_buf_filetype(right_buf, ft)
-
-  -- ── Create windows in the main area ─────────────────────────────────────
-  local sidebar = require("diff.sidebar")
-  local main_win = sidebar.get_main_win()
-
-  -- Pick the window the NEW side goes in: the sidebar's main area when it is
-  -- available, otherwise the widest window that is not one of our panels.
-  local host_win = (main_win and vim.api.nvim_win_is_valid(main_win)) and main_win or nil
-
-  if not host_win then
-    local best_width = 0
-    for _, win in ipairs(vim.api.nvim_list_wins()) do
-      if vim.api.nvim_win_is_valid(win) then
-        local buf = vim.api.nvim_win_get_buf(win)
-        local name = vim.api.nvim_buf_get_name(buf)
-        if not name:match("^diff://file") and not name:match("^diff://commit") then
-          local w = vim.api.nvim_win_get_width(win)
-          if w > best_width then
-            best_width = w
-            host_win   = win
-          end
-        end
-      end
-    end
+  S.model   = engine.compute(old, new)
+  S.ctx     = config.get().context_lines
+  S.reveals = {}
+  S.words   = {}
+  S.lnum_width = #tostring(math.max(#old.lines, #new.lines, 1))
+  name_buffers()
+  make_sources(old, new)
+  render({ block = 1 })
+  for _, side in ipairs(SIDES) do
+    if S.sources[side] then S.sources[side]:parse() end
   end
 
-  if not host_win then
-    if not pcall(vim.cmd, "vsplit") then
-      vim.notify("diff.nvim: no room to open a diff window", vim.log.levels.ERROR)
+  if source.kind == "worktree" and not source.staged and source.status ~= "deleted" then
+    start_watcher(root .. "/" .. source.path)
+  else
+    stop_watcher()
+  end
+  pcall(vim.api.nvim_set_current_win, S.panes.new or S.panes.old)
+  fire_view_changed()
+end
+
+--- Open a diff.
+--- @param root      string
+--- @param source    table  see content.lua
+--- @param navigator fun(source: table, dir: integer): table|nil  supplies ]f / [f targets
+function M.open(root, source, navigator)
+  S.open_gen = S.open_gen + 1
+  S.opening = true
+  local gen = S.open_gen
+  local elapsed = require("diff.log").timer()
+  log.debug("open %s:%s (%s)", source.kind, source.path, source.hash or (source.staged and "staged" or "unstaged"))
+
+  content.load(root, source, function(old, new)
+    -- A newer file was requested while this one was loading.
+    if gen ~= S.open_gen then
+      log.debug("dropping stale load for %s", source.path)
       return
     end
-    host_win = vim.api.nvim_get_current_win()
-  end
-
-  pcall(vim.api.nvim_set_current_win, host_win)
-  pcall(vim.api.nvim_win_set_buf, host_win, right_buf)
-  M._right_win = host_win
-
-  -- Full-width filename header above the (still un-split) host window.
-  create_header(host_win, opts.file_path)
-
-  M._left_win = split_left_pane(host_win, left_buf)
-
-  if main_win and host_win == main_win then
-    sidebar.set_main_win(host_win)
-  end
-
-  -- The split can legitimately fail for want of width. Degrade to showing the
-  -- new side alone rather than letting the caller's error path tear the view
-  -- down; everything below guards on M._left_win being present.
-  if not M._left_win then
-    M._single_pane = true
-    M._left_buf    = nil
-    -- The OLD-side buffer was built before the split was attempted; without a
-    -- window to show it, drop it rather than leaking it into the buffer list.
-    pcall(vim.api.nvim_buf_delete, left_buf, { force = true })
-    vim.notify("diff.nvim: not enough width for a split diff — showing the new side only",
-      vim.log.levels.WARN)
-  end
-
-  if M._left_win then set_win_opts(M._left_win) end
-  set_win_opts(M._right_win)
-
-  -- The filename is shown once in the full-width header window (create_header),
-  -- so the per-pane winbars are cleared. The left/right split conveys OLD/NEW.
-  if M._left_win then
-    pcall(vim.api.nvim_set_option_value, "winbar", "", { win = M._left_win })
-  end
-  pcall(vim.api.nvim_set_option_value, "winbar", "", { win = M._right_win })
-
-  -- ── Apply highlights ─────────────────────────────────────────────────────
-  -- Deferred via vim.schedule so tree-sitter completes its first parse before
-  -- our extmarks are applied. This prevents TS from overwriting word highlights.
-  -- Guard with generation counter to skip stale callbacks from rapid re-opens.
-  local left_buf_ref  = M._left_buf
-  local right_buf_ref = right_buf
-  local repo_root_ref = opts.repo_root
-  local file_path_ref = opts.file_path
-
-  -- Parse the full old/new file so collapsed separators can be labelled with
-  -- their enclosing declaration (GitHub-style headings).
-  local parsed_old = left_buf_ref and parse_full_file_cached(old_lines, ft) or nil
-  local parsed_new = parse_full_file_cached(new_lines, ft)
-
-  vim.schedule(function()
-    if this_gen ~= M._render_gen then return end
-    if not vim.api.nvim_buf_is_valid(right_buf_ref) then return end
-
-    vim.api.nvim_buf_clear_namespace(right_buf_ref, NS, 0, -1)
-    apply_line_highlights(right_buf_ref, right_aln, parsed_new, "new")
-    apply_note_markers(right_buf_ref, right_aln, "new", repo_root_ref, file_path_ref)
-
-    if left_buf_ref and vim.api.nvim_buf_is_valid(left_buf_ref) then
-      vim.api.nvim_buf_clear_namespace(left_buf_ref, NS, 0, -1)
-      apply_line_highlights(left_buf_ref, left_aln, parsed_old, "old")
-      apply_word_highlights(left_buf_ref, right_buf_ref, left_aln, right_aln)
-      apply_note_markers(left_buf_ref, left_aln, "old", repo_root_ref, file_path_ref)
+    S.opening = false
+    local fetch_ms = elapsed()
+    local ok, err = xpcall(function()
+      if content.looks_binary(old) or content.looks_binary(new) then
+        show_binary(root, source, navigator)
+      else
+        show(root, source, navigator, old, new)
+      end
+    end, debug.traceback)
+    if not ok then
+      log.error("rendering %s failed: %s", source.path, err)
+      notify("error rendering diff: " .. tostring(err):match("^[^\n]*"), vim.log.levels.ERROR)
+      M.close()
+      return
     end
+    log.info("opened %s in %.1f ms (load %.1f ms)", source.path, elapsed(), fetch_ms)
   end)
+end
 
-  -- ── Scroll sync ──────────────────────────────────────────────────────────
-  if M._left_win then
-    setup_scroll_sync(M._left_win, M._right_win)
-  end
-
-  -- ── Keymaps ──────────────────────────────────────────────────────────────
-  setup_keymaps(M._left_buf, right_buf, {
-    file_path = opts.file_path,
-    repo_root = opts.repo_root,
-  })
-
-  -- Focus the right (new) pane, which is the side users read first.
-  pcall(vim.api.nvim_set_current_win, M._right_win)
+--- Re-read both sides and update the panes in place, keeping the cursor on
+--- the same line and the window scrolled to the same place. Skips rendering
+--- entirely when nothing changed.
+function M.refresh_content()
+  local source, root = S.source, S.root
+  -- An open in flight will load fresh content anyway.
+  if not (source and S.model) or S.opening then return end
+  S.refresh_gen = S.refresh_gen + 1
+  local gen, open_gen = S.refresh_gen, S.open_gen
+  content.load(root, source, function(old, new)
+    if gen ~= S.refresh_gen or open_gen ~= S.open_gen or S.source ~= source then
+      log.debug("dropping superseded refresh of %s", source.path)
+      return
+    end
+    if vim.deep_equal(old, S.model.old) and vim.deep_equal(new, S.model.new) then
+      log.trace("refresh %s: unchanged", source.path)
+      return
+    end
+    if content.looks_binary(old) or content.looks_binary(new) then
+      show_binary(root, source, S.navigator)
+      return
+    end
+    local focus = vim.api.nvim_get_current_win()
+    local anchor, offset = capture_anchor(side_of_win(focus) and focus or nil)
+    -- Carry the cursor line and expanded ranges over to the new content.
+    if anchor then
+      anchor.line = engine.line_mapper(S.model[anchor.side].lines, (anchor.side == "old" and old or new).lines)(anchor.line)
+    end
+    local map_new = engine.line_mapper(S.model.new.lines, new.lines)
+    for _, range in ipairs(S.reveals) do
+      range[1], range[2] = map_new(range[1]), map_new(range[2])
+    end
+    S.model = engine.compute(old, new)
+    S.words = {}
+    S.lnum_width = #tostring(math.max(#old.lines, #new.lines, 1))
+    if S.sources.old then S.sources.old:update(old.lines) end
+    if S.sources.new then S.sources.new:update(new.lines) end
+    render(anchor, offset)
+    log.debug("refreshed %s in place", source.path)
+  end)
 end
 
 -- ---------------------------------------------------------------------------
--- Open diff for a file from the file panel (with crash protection)
+-- Actions
 -- ---------------------------------------------------------------------------
 
-local function get_old_content(root, file, callback)
-  if file.staged then
-    git.get_file_at_ref(root, "HEAD", file.path, function(lines, err)
-      callback(err and {} or lines)
-    end)
+local function current_pane()
+  local win = vim.api.nvim_get_current_win()
+  if side_of_win(win) then return win, side_of_win(win) end
+  local fallback = S.panes.new or S.panes.old
+  return fallback, side_of_win(fallback)
+end
+
+local function cursor_idx()
+  local win = current_pane()
+  return valid_win(win) and vim.api.nvim_win_get_cursor(win)[1] or 1
+end
+
+--- Expand context. what = "cursor" (separator under the cursor, or the
+--- nearest one), "all", or "reset" (back to the configured context).
+function M.expand(what)
+  if not S.model then return end
+  local win = current_pane()
+  local anchor, offset = capture_anchor(win)
+
+  if what == "all" then
+    S.ctx = nil
+  elseif what == "reset" then
+    S.ctx, S.reveals = config.get().context_lines, {}
+    offset = nil
   else
-    git.run({ "show", ":" .. file.path }, root, function(lines, _, code)
-      if code == 0 then
-        callback(lines)
-      else
-        git.get_file_at_ref(root, "HEAD", file.path, function(lines2, err2)
-          callback(err2 and {} or lines2)
-        end)
+    local idx, items = cursor_idx(), S.layout.items
+    local sep
+    for d = 0, #items do
+      for _, i in ipairs({ idx + d, idx - d }) do
+        if items[i] and items[i].sep then sep = items[i].sep break end
       end
-    end)
+      if sep then break end
+    end
+    if not sep then return end
+    local span = engine.separator_span(S.model, sep)
+    S.reveals = engine.reveal(S.model, S.reveals, sep, EXPAND_STEP)
+    -- Stay on what remains of this separator so repeated presses keep
+    -- expanding it; once fully revealed, land on its first line.
+    if items[idx] and items[idx].sep == sep then
+      anchor = { sep_from = span.new[1] + EXPAND_STEP, fallback = { side = "new", line = span.new[1] } }
+    end
   end
+  render(anchor, offset)
 end
 
-local function get_new_content(root, file, callback)
-  if file.staged then
-    git.run({ "show", ":" .. file.path }, root, function(lines, _, code)
-      callback(code == 0 and lines or {})
-    end)
+local function block_at_cursor()
+  local row = row_of_item(item_at(cursor_idx()))
+  return row and row.block and S.model.blocks[row.block] or nil
+end
+
+function M.jump_hunk(dir)
+  if not S.model or #S.model.blocks == 0 then return end
+  local idx = cursor_idx()
+  local current = block_at_cursor()
+  local target
+  if dir > 0 then
+    for _, blk in ipairs(S.model.blocks) do
+      local i = S.layout.index_of[blk.first]
+      if i and i > idx and blk ~= current then target = i break end
+    end
   else
-    local full = root .. "/" .. file.path
-    vim.schedule(function()
-      local ok, lines = pcall(vim.fn.readfile, full)
-      if not ok or not lines then
-        vim.notify("diff.nvim: cannot read " .. file.path, vim.log.levels.WARN)
-        callback({})
-      else
-        callback(lines)
-      end
-    end)
+    for b = #S.model.blocks, 1, -1 do
+      local blk = S.model.blocks[b]
+      local i = S.layout.index_of[blk.first]
+      if i and i < idx and blk ~= current then target = i break end
+    end
+  end
+  if target then
+    vim.cmd("normal! m'")
+    local win = current_pane()
+    pcall(vim.api.nvim_win_set_cursor, win, { target, 0 })
   end
 end
 
---- Refresh the content of the already-open diff panes in place.
----
---- The file watcher must not go through M.open. M.open tears down and
---- re-creates windows and then moves focus, so routing a watcher event through
---- it means that anything writing the file -- your own :w, a formatter, an LSP
---- code action, another process -- rebuilds the layout underneath you and
---- steals focus from wherever you happened to be. Refilling the existing
---- buffers instead leaves windows, focus, cursor and scroll position alone;
---- Neovim clamps the cursor by itself when the buffer shortens.
----
---- @param repo_root string
---- @param file_info table    {path, status, staged, ...}
-function M.refresh_content(repo_root, file_info)
-  -- Only the two-pane view supports in-place re-rendering (M.rerender bails on
-  -- single-pane), and the panes must still be showing the watched file.
-  if M._single_pane then return end
-  if M._current_file ~= file_info.path then return end
-  if not (M._left_buf  and vim.api.nvim_buf_is_valid(M._left_buf))  then return end
-  if not (M._right_buf and vim.api.nvim_buf_is_valid(M._right_buf)) then return end
-
-  local ok, err = pcall(function()
-    local pending = 3
-    local old_lines, new_lines, diff_text
-
-    local function done()
-      pending = pending - 1
-      if pending > 0 then return end
-
-      -- Re-check: the user may have closed the view or selected another file
-      -- while these git jobs were in flight.
-      if M._single_pane then return end
-      if M._current_file ~= file_info.path then return end
-      if not (M._left_buf  and vim.api.nvim_buf_is_valid(M._left_buf))  then return end
-      if not (M._right_buf and vim.api.nvim_buf_is_valid(M._right_buf)) then return end
-
-      M._current_old   = old_lines or {}
-      M._current_new   = new_lines or {}
-      M._current_hunks = diff_parser.parse(diff_text or "")
-      M.rerender()
+--- Keys for a vertical move of `count` rows that skips filler rows on `side`.
+local function vertical_keys(side, dir)
+  if not S.layout then return dir > 0 and "j" or "k" end
+  local items = S.layout.items
+  local row = vim.api.nvim_win_get_cursor(0)[1]
+  local start = row
+  for _ = 1, vim.v.count1 do
+    local nxt = row + dir
+    while items[nxt] and items[nxt].row and not S.model.rows[items[nxt].row][side] do
+      nxt = nxt + dir
     end
+    if not items[nxt] then break end
+    row = nxt
+  end
+  local n = math.abs(row - start)
+  if n == 0 then return "" end
+  -- `normal!` keeps 'curswant', so the column is remembered across short lines.
+  return string.format("<Cmd>normal! %d%s<CR>", n, dir > 0 and "j" or "k")
+end
 
-    get_old_content(repo_root, file_info, function(lines) old_lines = lines; done() end)
-    get_new_content(repo_root, file_info, function(lines) new_lines = lines; done() end)
-    git.get_diff(repo_root, file_info.path, file_info.staged or false, function(text, _)
-      diff_text = text or ""
-      done()
-    end)
+function M.stage_hunk(reverse)
+  local src = S.source
+  if not (src and S.model) then return end
+  if src.kind ~= "worktree" or src.status == "untracked" then
+    notify("hunks can be staged only in working-tree diffs of tracked files")
+    return
+  end
+  if reverse and not src.staged then
+    notify("this diff is unstaged — use " .. config.get().keymaps.stage_hunk .. " to stage a hunk")
+    return
+  end
+  if not reverse and src.staged then
+    notify("this diff is already staged — use " .. config.get().keymaps.unstage_hunk .. " to unstage a hunk")
+    return
+  end
+  local block = block_at_cursor()
+  if not block then
+    notify("no change under the cursor")
+    return
+  end
+  local patch, err = engine.block_patch(S.model, block, src.path)
+  if not patch then
+    notify(err, vim.log.levels.WARN)
+    return
+  end
+  git.apply_to_index(S.root, patch, reverse, function(ok, gerr)
+    if not ok then
+      log.warn("%s hunk in %s failed: %s\n%s", reverse and "unstage" or "stage", src.path, gerr or "", patch)
+      notify((reverse and "unstage" or "stage") .. " failed: " .. (gerr or "?"), vim.log.levels.ERROR)
+      return
+    end
+    log.info("%s hunk %d in %s", reverse and "unstaged" or "staged", block.first, src.path)
+    M.refresh_content()
+    sidebar().refresh()
   end)
-
-  if not ok then
-    vim.notify("diff.nvim: live refresh failed: " .. tostring(err), vim.log.levels.WARN)
-  end
 end
 
---- Open the diff view for a file from the file panel.
---- Wrapped in pcall for crash resilience.
---- All independent git calls are fired simultaneously:
----   is_binary + get_old_content + get_new_content + get_diff  (4 parallel)
---- @param repo_root string
---- @param file_info table   {path, status, staged}
-function M.open_file_diff(repo_root, file_info)
-  M._request_gen = M._request_gen + 1
-  local this_request = M._request_gen
-
-  local ok, err = pcall(function()
-    -- Fire all 4 operations in parallel.  We only render when all 4 complete.
-    -- If binary is detected we notify and bail (the other results are discarded).
-    local pending = 4
-    local old_lines, new_lines, diff_text, is_bin
-
-    local function done()
-      -- A newer file was selected while these jobs were in flight; drop the
-      -- results rather than rendering them over the current view.
-      if this_request ~= M._request_gen then return end
-
-      pending = pending - 1
-      if pending > 0 then return end
-
-      if is_bin then
-        vim.notify("diff.nvim: binary file — " .. file_info.path, vim.log.levels.INFO)
-        return
-      end
-
-      local open_ok, open_err = pcall(function()
-        -- Filetype is resolved inside M.open, which has the file content needed
-        -- for content-dependent extensions (.ts, .h, shebang scripts).
-        M.open({
-          repo_root   = repo_root,
-          file_path   = file_info.path,
-          old_lines   = old_lines  or {},
-          new_lines   = new_lines  or {},
-          diff_text   = diff_text  or "",
-          file_status = file_info.status,
-        })
-      end)
-      if not open_ok then
-        vim.notify("diff.nvim: error rendering diff: " .. tostring(open_err), vim.log.levels.ERROR)
-        close_diff_wins()
-        return
-      end
-
-      -- For unstaged working-tree files, watch the file on disk so the diff
-      -- view live-updates whenever the file is saved externally.
-      if not file_info.staged and file_info.status ~= "untracked" then
-        local abs_path = repo_root .. "/" .. file_info.path
-        start_file_watcher(abs_path, repo_root, file_info)
-      else
-        -- Staged / untracked files don't benefit from disk watching; clear any
-        -- previous watcher that may have been left over.
-        stop_file_watcher()
-      end
+--- New-side line for item `idx`. Rows that exist only on the old side (and
+--- fillers) have no new line, so the nearest one below, then above, is used.
+local function new_line_near(idx)
+  local items = S.layout.items
+  for _, step in ipairs({ 1, -1 }) do
+    local i = idx
+    while items[i] do
+      local item = items[i]
+      if item.sep then return engine.separator_span(S.model, item.sep).new[1] end
+      local row = S.model.rows[item.row]
+      if row.new then return row.new end
+      i = i + step
     end
+  end
+  return 1
+end
 
-    git.is_binary(repo_root, file_info.path, function(bin)
-      is_bin = bin
-      done()
-    end)
+function M.goto_file()
+  local src = S.source
+  if not src then return end
+  if src.status == "deleted" then
+    notify("the file was deleted; there is nothing to open")
+    return
+  end
+  local line = S.layout and new_line_near(cursor_idx()) or 1
+  log.debug("goto %s:%d", src.path, line)
+  sidebar().open_in_editor(S.root .. "/" .. src.path, line)
+end
 
-    get_old_content(repo_root, file_info, function(lines)
-      old_lines = lines
-      done()
-    end)
+function M.goto_neighbor(dir)
+  if not (S.source and S.navigator) then return end
+  local nxt = S.navigator(S.source, dir)
+  if not nxt then
+    vim.api.nvim_echo({ { dir > 0 and "diff.nvim: last file" or "diff.nvim: first file", "WarningMsg" } }, false, {})
+    return
+  end
+  M.open(S.root, nxt, S.navigator)
+end
 
-    get_new_content(repo_root, file_info, function(lines)
-      new_lines = lines
-      done()
-    end)
-
-    if file_info.status == "untracked" then
-      git.get_untracked_diff(repo_root, file_info.path, function(text, _)
-        diff_text = text or ""
-        done()
-      end)
+local function leave_note(side)
+  return function()
+    if not S.model then return end
+    local first, last
+    local mode = vim.fn.mode()
+    if mode == "v" or mode == "V" or mode == "\22" then
+      -- Leave visual mode first: '< and '> only update when it ends.
+      vim.cmd([[execute "normal! \<Esc>"]])
+      first, last = vim.fn.getpos("'<")[2], vim.fn.getpos("'>")[2]
     else
-      git.get_diff(repo_root, file_info.path, file_info.staged or false, function(text, _)
-        diff_text = text or ""
-        done()
-      end)
+      first = vim.api.nvim_win_get_cursor(0)[1]
+      last = first
     end
-  end)
+    if last < first then first, last = last, first end
 
-  if not ok then
-    vim.notify("diff.nvim: unexpected error: " .. tostring(err), vim.log.levels.ERROR)
-    close_diff_wins()
+    local lines = {}
+    for i = first, last do
+      local row = row_of_item(item_at(i))
+      if row and row[side] then table.insert(lines, row[side]) end
+    end
+    if #lines == 0 then
+      notify("cannot leave a note on a filler or separator line", vim.log.levels.WARN)
+      return
+    end
+    require("diff.annotations").prompt_note({
+      file_path  = S.source.path,
+      line_start = lines[1],
+      line_end   = lines[#lines],
+      side       = side,
+      repo_root  = S.root,
+    })
+  end
+end
+
+--- Re-draw note markers after a note is added or removed.
+function M.refresh_annotations()
+  if not S.layout then return end
+  for _, side in ipairs(SIDES) do
+    if S.panes[side] and valid_buf(S.bufs[side]) then decorate_notes(side) end
   end
 end
 
 -- ---------------------------------------------------------------------------
--- Open diff for a commit (with crash protection)
+-- Keymaps (installed once per pane buffer; they read the current state)
 -- ---------------------------------------------------------------------------
 
---- Open a diff view scoped to a specific commit.
---- When file_path is known all three git operations (diff, old content, new
---- content) are fired simultaneously instead of sequentially.
---- @param repo_root    string
---- @param hash         string
---- @param file_path    string|nil
---- @param file_status  string|nil  "A","M","D" etc.
-function M.open_commit_diff(repo_root, hash, file_path, file_status)
-  M._request_gen = M._request_gen + 1
-  local this_request = M._request_gen
+setup_keymaps = function(buf, side)
+  local km = config.get().keymaps or {}
+  local function map(mode, key, rhs, desc, extra)
+    if not key or key == "" then return end
+    vim.keymap.set(mode, key, rhs, vim.tbl_extend("force",
+      { buffer = buf, nowait = true, silent = true, desc = desc .. " (diff)" }, extra or {}))
+  end
 
-  local ok, err = pcall(function()
-    --- True while this request is still the most recent one issued.
-    local function is_current() return this_request == M._request_gen end
+  map({ "n", "v" }, km.leave_note, leave_note(side), "Leave note")
+  map("n", km.toggle_notes, function() require("diff.annotations").toggle_notes(S.root) end, "Toggle notes panel")
+  map("n", km.next_hunk, function() M.jump_hunk(1) end, "Next hunk")
+  map("n", km.prev_hunk, function() M.jump_hunk(-1) end, "Previous hunk")
+  map("n", km.next_file, function() M.goto_neighbor(1) end, "Next file")
+  map("n", km.prev_file, function() M.goto_neighbor(-1) end, "Previous file")
+  map("n", km.goto_file, M.goto_file, "Open file at this line")
+  map("n", km.stage_hunk, function() M.stage_hunk(false) end, "Stage hunk")
+  map("n", km.unstage_hunk, function() M.stage_hunk(true) end, "Unstage hunk")
+  map("n", km.expand_context, function() M.expand("cursor") end, "Expand context here")
+  map("n", km.expand_all, function() M.expand("all") end, "Show all context")
+  map("n", km.collapse_all, function() M.expand("reset") end, "Collapse context")
 
-    local function fetch_side(ref, path, cb)
-      if not path or path:match("%(all files%)") then
-        cb({})
-        return
-      end
-      git.get_file_at_ref(repo_root, ref, path, function(lines, ferr)
-        cb(ferr and {} or lines)
-      end)
-    end
+  -- Filler rows hold no content, so vertical moves step over them.
+  for key, dir in pairs({ j = 1, k = -1, ["<Down>"] = 1, ["<Up>"] = -1 }) do
+    map("n", key, function() return vertical_keys(side, dir) end, "Move, skipping filler rows", { expr = true })
+  end
 
-    local function open_when_ready(fp, diff_text_val, old_lines_val, new_lines_val)
-      local open_ok, open_err = pcall(function()
-        local status = nil
-        if file_status then
-          if file_status == "A" then status = "added"
-          elseif file_status == "D" then status = "deleted"
-          end
-        end
-        M.open({
-          repo_root   = repo_root,
-          file_path   = fp or hash:sub(1, 7),
-          old_lines   = old_lines_val  or {},
-          new_lines   = new_lines_val  or {},
-          diff_text   = diff_text_val  or "",
-          file_status = status,
-        })
-      end)
-      if not open_ok then
-        vim.notify("diff.nvim: error rendering commit diff: " .. tostring(open_err), vim.log.levels.ERROR)
-        close_diff_wins()
-      end
-    end
+  -- l expands a separator; anywhere else it is the ordinary motion (and
+  -- returning "l" keeps any count the user typed).
+  map("n", "l", function()
+    local item = item_at(vim.api.nvim_win_get_cursor(0)[1])
+    if item and item.sep then return "<Cmd>lua require('diff.diff_view').expand('cursor')<CR>" end
+    return "l"
+  end, "Expand separator / move right", { expr = true })
 
-    if file_path then
-      -- All 3 operations are independent when we know the file path:
-      -- fire them simultaneously instead of sequentially.
-      local pending = 3
-      local old_lines, new_lines, diff_text
-      local aborted = false  -- set on error to prevent open_when_ready on partial data
+  map("n", "q", function()
+    M.close()
+    sidebar().focus_panel()
+  end, "Close diff view")
+end
 
-      local function done()
-        if aborted or not is_current() then return end
-        pending = pending - 1
-        if pending > 0 then return end
-        open_when_ready(file_path, diff_text, old_lines, new_lines)
-      end
+-- ---------------------------------------------------------------------------
+-- Lifecycle
+-- ---------------------------------------------------------------------------
 
-      fetch_side(hash .. "^", file_path, function(lines) old_lines = lines; done() end)
-      fetch_side(hash,        file_path, function(lines) new_lines = lines; done() end)
-      git.get_commit_diff(repo_root, hash, file_path, function(text, cb_err)
-        if cb_err then
-          aborted = true
-          vim.notify("diff.nvim: commit diff error: " .. cb_err, vim.log.levels.ERROR)
-          return
-        end
-        diff_text = text
-        done()
-      end)
-    else
-      -- No file path known: need diff text first to extract it
-      git.get_commit_diff(repo_root, hash, nil, function(diff_text, cb_err)
-        if not is_current() then return end
-        if cb_err then
-          vim.notify("diff.nvim: commit diff error: " .. cb_err, vim.log.levels.ERROR)
-          return
-        end
+function M.is_open()
+  return S.source ~= nil
+end
 
-        local fp = nil
-        for line in (diff_text or ""):gmatch("[^\n]+") do
-          local m = line:match("^%+%+%+ b/(.+)$")
-          if m then fp = m break end
-        end
-        fp = fp or (hash:sub(1, 7) .. " (all files)")
+function M.current_source()
+  return S.source
+end
 
-        -- Now that we have fp, fetch old/new in parallel
-        local pending = 2
-        local old_lines, new_lines
+--- Internal state, exposed for the test suite only.
+function M._state()
+  return S
+end
 
-        local function done()
-          if not is_current() then return end
-          pending = pending - 1
-          if pending > 0 then return end
-          open_when_ready(fp, diff_text, old_lines, new_lines)
-        end
-
-        fetch_side(hash .. "^", fp, function(lines) old_lines = lines; done() end)
-        fetch_side(hash,        fp, function(lines) new_lines = lines; done() end)
-      end)
-    end
-  end)
-
-  if not ok then
-    vim.notify("diff.nvim: unexpected error in commit diff: " .. tostring(err), vim.log.levels.ERROR)
-    close_diff_wins()
+--- Close the view: windows, buffers, sources and watchers. Safe to call when
+--- the tab has already been closed underneath it.
+function M.close()
+  local had_view = S.source ~= nil
+  stop_watcher()
+  destroy_sources()
+  if valid_win(S.header_win) then pcall(vim.api.nvim_win_close, S.header_win, true) end
+  if valid_win(S.extra_win) then pcall(vim.api.nvim_win_close, S.extra_win, true) end
+  local host = sidebar().get_main_win()
+  if valid_win(host) then sidebar().show_placeholder(host) end
+  -- Buffers go last: deleting a displayed buffer would close its window.
+  for _, buf in pairs(S.bufs) do
+    if valid_buf(buf) then pcall(vim.api.nvim_buf_delete, buf, { force = true }) end
+  end
+  if valid_buf(S.header_buf) then pcall(vim.api.nvim_buf_delete, S.header_buf, { force = true }) end
+  local gen = S.open_gen
+  S = fresh_state()
+  S.open_gen = gen + 1 -- invalidate loads still in flight
+  if had_view then
+    log.debug("view closed")
+    fire_view_changed()
   end
 end
+
+-- Horizontal scroll sync. 'scrollbind' handles the vertical direction
+-- natively; horizontal binding would need the global 'scrollopt', so leftcol
+-- is mirrored here instead.
+local aug = vim.api.nvim_create_augroup("DiffNvimView", { clear = true })
+vim.api.nvim_create_autocmd("WinScrolled", {
+  group = aug,
+  callback = function()
+    if not (valid_win(S.panes.old) and valid_win(S.panes.new)) then return end
+    for win, delta in pairs(vim.v.event) do
+      local id = tonumber(win)
+      if id and (id == S.panes.old or id == S.panes.new) and delta.leftcol ~= 0 then
+        local other = id == S.panes.old and S.panes.new or S.panes.old
+        local leftcol = vim.fn.getwininfo(id)[1].leftcol
+        vim.api.nvim_win_call(other, function() vim.fn.winrestview({ leftcol = leftcol }) end)
+        return
+      end
+    end
+  end,
+})
+
+-- The index or HEAD moved (staging from the CLI, a commit, a checkout): the
+-- working-tree diff may be stale on either side.
+vim.api.nvim_create_autocmd("User", {
+  group = aug,
+  pattern = "DiffNvimGitChanged",
+  callback = function()
+    if S.source and S.source.kind == "worktree" then M.refresh_content() end
+  end,
+})
 
 return M

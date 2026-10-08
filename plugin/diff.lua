@@ -28,13 +28,11 @@ vim.api.nvim_create_user_command("DiffNvimPreviewBranch", function()
 end, { desc = "Preview another branch's commits without checking it out" })
 
 vim.api.nvim_create_user_command("DiffNvimNotes", function()
-  local git = require("diff.git")
-  local cwd = vim.fn.getcwd()
-  git.get_repo_root(cwd, function(root, err)
-    if err or not root then
-      vim.notify("diff.nvim: not in a git repository", vim.log.levels.WARN)
-      return
-    end
-    require("diff.annotations").toggle_notes(root)
+  require("diff")._with_repo(function(info)
+    require("diff.annotations").toggle_notes(info.root)
   end)
 end, { desc = "Toggle diff.nvim notes panel" })
+
+vim.api.nvim_create_user_command("DiffNvimLog", function()
+  vim.cmd("tabnew " .. vim.fn.fnameescape(require("diff.log").path()))
+end, { desc = "Open the diff.nvim log file (set log_level = \"debug\" for detail)" })

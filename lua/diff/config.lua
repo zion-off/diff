@@ -8,6 +8,7 @@ M.defaults = {
   notes_path = nil, -- nil = XDG default (ignored; kept for backward compat)
   auto_refresh = true,
   mouse = true, -- enable mouse interactivity in the sidebar (clicks open/toggle)
+  log_level = "warn", -- trace | debug | info | warn | error | off  (see :DiffNvimLog)
   keymaps = {
     toggle_sidebar       = "<leader>gs",
     toggle_sidebar_panel = "<leader>gS",
@@ -18,11 +19,17 @@ M.defaults = {
     collapse             = "z",
     next_hunk            = "]c",
     prev_hunk            = "[c",
+    next_file            = "]f",
+    prev_file            = "[f",
+    goto_file            = "gf",
+    stage_hunk           = "s",
+    unstage_hunk         = "u",
     leave_note           = "<leader>n",
     toggle_notes         = "<leader>N",
     preview_branch       = "<leader>gb",
     expand_context       = "zo",
     expand_all           = "zR",
+    collapse_all         = "zM",
     commit_tooltip       = "K",
   },
   highlights = {},

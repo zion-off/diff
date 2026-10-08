@@ -1,89 +1,46 @@
+--- diff.nvim — commit history panel.
+---
+--- refresh() fetches the commit list into S.commits; expanding a commit
+--- fetches its details once into S.details. render() draws from those caches,
+--- so expanding/collapsing a cached commit, resizing and re-marking the
+--- active file never wait on git.
 local M = {}
 
 local git    = require("diff.git")
-local config = require("diff.config")
 local util   = require("diff.util")
+local log    = require("diff.log").scope("commit_panel")
 
-local NS = vim.api.nvim_create_namespace("diff_nvim_commit_panel")
--- Separate namespace for the cursor highlight so it can be cleared/redrawn on
--- every cursor move without disturbing the content highlights in NS.
+local NS        = vim.api.nvim_create_namespace("diff_nvim_commit_panel")
+-- Separate namespace for the two-line cursor highlight, redrawn on every move.
 local CURSOR_NS = vim.api.nvim_create_namespace("diff_nvim_commit_cursor")
+local NS_ACTIVE = vim.api.nvim_create_namespace("diff_nvim_commit_active")
 
--- ---------------------------------------------------------------------------
--- Module-level state
--- ---------------------------------------------------------------------------
+local COMMIT_LIMIT = 50
+local META_INDENT  = "  "
 
--- Module-level references for re-render (declared early so `render`, defined
--- below, closes over the same upvalues that `setup`/`refresh` assign to).
-local _buf, _win, _repo_root, _commits
--- Width the panel was last rendered at, so repeated resize events (e.g. a
--- height-only split change) don't trigger redundant re-renders.
-local _last_width
-
--- line_map[lnr] = { type = "commit"|"commit_file", commit = <commit>,
---                   file = <file_info> (for commit_file type) }
-local line_map = {}
-
--- header_pair[lnr] = { l1, l2 } — for any line belonging to a commit, the two
--- header line numbers (subject + author/date) of that commit. Used to highlight
--- both header lines when the cursor lands anywhere in the commit block.
-local header_pair = {}
-
--- expanded[hash] = true/false
-local expanded = {}
-
--- cached file lists per commit hash
-local file_cache = {}
-
--- cached full commit message bodies per commit hash (string[])
-local body_cache = {}
-
--- cached aggregate stat summary per commit hash (string, e.g.
--- "3 files changed, 40 insertions(+), 12 deletions(-)")
-local stat_cache = {}
-
--- Track the currently open tooltip window so rapid K presses don't stack
--- multiple tooltips and so cleanup is always possible.
-M._tooltip_win     = nil
-M._tooltip_buf     = nil
--- Monotonic counter to detect stale callbacks from superseded tooltip requests.
-M._tooltip_req_id  = 0
-
--- ---------------------------------------------------------------------------
--- Ref badge helpers
--- ---------------------------------------------------------------------------
-
---- Classify a ref string and return the appropriate highlight group.
---- @param ref string
---- @return string  highlight group name
-local function ref_hl(ref)
-  if ref == "HEAD" or ref:match("^HEAD %->") then
-    return "DiffNvimRefHead"
-  elseif ref:match("^tag:") then
-    return "DiffNvimRefTag"
-  elseif ref:match("^origin/") or ref:match("^%a[%w%-]+/") then
-    return "DiffNvimRefRemote"
-  else
-    return "DiffNvimRefBranch"
-  end
+local function fresh_state()
+  return {
+    buf = nil, win = nil, root = nil, ref = nil,
+    commits  = nil, -- commit list from the last refresh
+    expanded = {},  -- hash -> true
+    details  = {},  -- hash -> { body, files, added, deleted }
+    loading  = {},  -- hash -> true while details are being fetched
+    line_map = {},  -- lnr -> { type, key?, commit, file? }
+    header_pair = {}, -- lnr -> { l1, l2 } header lines of the commit owning lnr
+    active = nil,
+    gen = 0,
+  }
 end
 
--- ---------------------------------------------------------------------------
--- Render
--- ---------------------------------------------------------------------------
+local S = fresh_state()
 
--- Multibyte-safe truncation (head-keeping). Provided by the shared util module.
-local trunc = util.trunc
+M._tooltip_win    = nil
+M._tooltip_buf    = nil
+M._tooltip_req_id = 0
 
 local STATUS_BADGE = {
-  modified  = "M",
-  added     = "A",
-  deleted   = "D",
-  renamed   = "R",
-  copied    = "C",
-  unmerged  = "U",
-  untracked = "?",
-  unknown   = "·",
+  modified = "M", added = "A", deleted = "D", renamed = "R",
+  copied = "C", unmerged = "U", untracked = "?", unknown = "·",
 }
 
 local STATUS_HL = {
@@ -97,16 +54,30 @@ local STATUS_HL = {
   unknown   = "DiffNvimStatusUntracked",
 }
 
---- Build the right-aligned diffstat segment for a commit file, e.g. "  +12 -3".
---- Returns: text, add_range {s,e}|nil, del_range {s,e}|nil (byte offsets within text).
-local function commit_diffstat_segment(f)
-  local st = f.stat
-  if not st then return "", nil, nil end
-  if st.binary then return "  bin", nil, nil end
-  local added, deleted = st.added or 0, st.deleted or 0
+local function ref_hl(ref)
+  if ref == "HEAD" or ref:match("^HEAD %->") then
+    return "DiffNvimRefHead"
+  elseif ref:match("^tag:") then
+    return "DiffNvimRefTag"
+  elseif ref:match("^origin/") or ref:match("^%a[%w%-]+/") then
+    return "DiffNvimRefRemote"
+  end
+  return "DiffNvimRefBranch"
+end
+
+local function file_key(hash, path)
+  return "cfile:" .. hash .. ":" .. path
+end
+
+local function valid()
+  return S.buf and vim.api.nvim_buf_is_valid(S.buf) and S.win and vim.api.nvim_win_is_valid(S.win)
+end
+
+--- "+12 -3" with byte ranges relative to the returned text.
+local function stat_text(added, deleted, lead)
+  added, deleted = added or 0, deleted or 0
   if added == 0 and deleted == 0 then return "", nil, nil end
-  local text = "  "
-  local add_range, del_range
+  local text, add_range, del_range = lead or "", nil, nil
   if added > 0 then
     local s = #text
     text = text .. "+" .. added
@@ -121,272 +92,176 @@ local function commit_diffstat_segment(f)
   return text, add_range, del_range
 end
 
---- Render commits into buf and populate line_map.
---- @param buf     integer
---- @param commits table[]
-local function render(buf, commits)
-  vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
-  vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
-  line_map = {}
-  header_pair = {}
+-- ---------------------------------------------------------------------------
+-- Render
+-- ---------------------------------------------------------------------------
 
-  local lines    = {}
-  local hl_queue = {}
+local function build(width)
+  local lines, hl, map, pairs_ = {}, {}, {}, {}
 
-  local cfg     = config.get()
-  local panel_w = (_win and vim.api.nvim_win_is_valid(_win))
-      and vim.api.nvim_win_get_width(_win)
-      or (cfg.sidebar_width or 40)
-  _last_width = panel_w
+  local function push(line, meta)
+    table.insert(lines, line)
+    map[#lines] = meta
+    return #lines - 1
+  end
 
-  local HASH_W = 7
-  -- Indentation for the dim metadata line beneath each subject. Aligns roughly
-  -- under the subject text (arrow "▸ " + hash + space).
-  local META_INDENT = "  "
-
-  for _, commit in ipairs(commits) do
-    -- Expand/collapse indicator
-    local is_expanded = expanded[commit.hash] or false
+  for _, commit in ipairs(S.commits or {}) do
+    local is_expanded = S.expanded[commit.hash] and S.details[commit.hash]
     local arrow = is_expanded and "▾ " or "▸ "
+    local hash_str = commit.short_hash or commit.hash:sub(1, 7)
 
-    local hash_str = commit.short_hash or commit.hash:sub(1, HASH_W)
+    -- Line 1: arrow + hash + subject
+    local seg = arrow .. hash_str .. "  "
+    local line1 = seg .. util.trunc(commit.subject or "", math.max(8, width - #seg))
+    local r1 = push(line1, { type = "commit", key = "commit:" .. commit.hash, commit = commit })
+    table.insert(hl, { r1, "DiffNvimCommitHash", #arrow, #arrow + #hash_str })
+    table.insert(hl, { r1, "DiffNvimCommitSubject", #seg, #line1 })
 
-    -- ----- Line 1: arrow + hash + full-width subject -----
-    local seg_hash    = arrow .. hash_str .. "  "
-    local subject_w   = math.max(8, panel_w - #seg_hash)
-    local subject_str = trunc(commit.subject or "", subject_w)
-    local line1       = seg_hash .. subject_str
-
-    table.insert(lines, line1)
-    local l1   = #lines
-    local l1_0 = l1 - 1
-    line_map[l1] = { type = "commit", commit = commit }
-
-    -- Highlight hash (after the arrow) and subject.
-    local hash_col_s = #arrow
-    table.insert(hl_queue, { l1_0, "DiffNvimCommitHash", hash_col_s, hash_col_s + #hash_str })
-    table.insert(hl_queue, { l1_0, "DiffNvimCommitSubject", #seg_hash, #line1 })
-
-    -- ----- Line 2: dim "author · time" + ref pills -----
-    local author = trunc(commit.author or "", math.max(8, math.floor(panel_w / 2)))
-    local time   = commit.time or ""
-    local meta   = META_INDENT .. author
-    if time ~= "" then
-      meta = meta .. " · " .. time
-    end
-
-    -- Append ref pills (e.g. [HEAD] [main]) if they fit.
-    local ref_segments = {}
-    for _, r in ipairs(commit.refs or {}) do
-      local pill = " [" .. r .. "]"
-      if vim.fn.strdisplaywidth(meta .. pill) <= panel_w then
-        local start_col = #meta
+    -- Line 2: dim "author · time" + ref pills that fit
+    local meta = META_INDENT .. util.trunc(commit.author or "", math.max(8, math.floor(width / 2)))
+    if (commit.time or "") ~= "" then meta = meta .. " · " .. commit.time end
+    local meta_end = #meta
+    local pills = {}
+    for _, ref in ipairs(commit.refs or {}) do
+      local pill = " [" .. ref .. "]"
+      if vim.fn.strdisplaywidth(meta .. pill) <= width then
+        table.insert(pills, { #meta, #meta + #pill, ref_hl(ref) })
         meta = meta .. pill
-        table.insert(ref_segments, { s = start_col, e = #meta, hl = ref_hl(r) })
       end
     end
+    local r2 = push(meta, { type = "commit", meta_line = true, commit = commit })
+    table.insert(hl, { r2, "DiffNvimCommitMeta", 0, meta_end })
+    for _, p in ipairs(pills) do table.insert(hl, { r2, p[3], p[1], p[2] }) end
 
-    table.insert(lines, meta)
-    local l2   = #lines
-    local l2_0 = l2 - 1
-    -- The metadata line belongs to the same commit so clicking it still works.
-    line_map[l2] = { type = "commit", commit = commit }
-
-    -- Both header lines highlight together when the cursor is on either one
-    -- (or anywhere in this commit's expanded block).
-    local pair = { l1, l2 }
-    header_pair[l1] = pair
-    header_pair[l2] = pair
-
-    -- Dim the whole author/time portion.
-    local meta_end = #META_INDENT + #author + (time ~= "" and (#" · " + #time) or 0)
-    table.insert(hl_queue, { l2_0, "DiffNvimCommitMeta", 0, meta_end })
-    -- Color the ref pills.
-    for _, seg in ipairs(ref_segments) do
-      table.insert(hl_queue, { l2_0, seg.hl, seg.s, seg.e })
-    end
-
-    -- ----- Expanded: full commit message body, then the file list -----
+    local first = r1 + 1
     if is_expanded then
-      -- Expanded content is flush with the metadata (author) line beneath each
-      -- commit subject, so it reads as a continuation of that commit block.
-      local indent = META_INDENT
+      local d = S.details[commit.hash]
+      local avail = math.max(8, width - #META_INDENT)
 
-      -- Full commit message, untruncated. The collapsed row only shows a
-      -- truncated subject, so render the entire message here starting at line 1
-      -- (the subject) followed by the description. The subject line(s) get the
-      -- subject highlight; the rest get the dim body highlight.
-      local body = body_cache[commit.hash]
-      if body and #body > 0 then
-        local avail = math.max(8, panel_w - #indent)
-        for i = 1, #body do
-          local raw = body[i]
-          local hl  = (i == 1) and "DiffNvimCommitSubject" or "DiffNvimCommitBody"
-          if raw == "" then
-            table.insert(lines, "")
-            line_map[#lines] = { type = "commit_body", commit = commit }
-          else
-            -- Word-wrap at space boundaries; long words are hard-broken.
-            for _, chunk in ipairs(util.wrap(raw, avail)) do
-              local bline = indent .. chunk
-              table.insert(lines, bline)
-              local bl = #lines
-              line_map[bl] = { type = "commit_body", commit = commit }
-              table.insert(hl_queue, { bl - 1, hl, #indent, #bline })
-            end
-          end
-        end
-        -- Blank spacer between message and stat/file list.
-        table.insert(lines, "")
-        line_map[#lines] = { type = "commit_body", commit = commit }
-      end
-
-      -- Aggregate stat summary, rendered compactly as "+N -M" (green / red).
-      local stat = stat_cache[commit.hash]
-      if stat and stat ~= "" then
-        local ins = tonumber(stat:match("(%d+) insertions?%(%+%)")) or 0
-        local del = tonumber(stat:match("(%d+) deletions?%(%-?%)")) or 0
-        if ins > 0 or del > 0 then
-          local stat_line = indent
-          local add_range, del_range
-          if ins > 0 then
-            local s = #stat_line
-            stat_line = stat_line .. "+" .. ins
-            add_range = { s, #stat_line }
-          end
-          if del > 0 then
-            if ins > 0 then stat_line = stat_line .. " " end
-            local s = #stat_line
-            stat_line = stat_line .. "-" .. del
-            del_range = { s, #stat_line }
-          end
-
-          table.insert(lines, stat_line)
-          local sl_0 = #lines - 1
-          line_map[#lines] = { type = "commit_body", commit = commit }
-          if add_range then
-            table.insert(hl_queue, { sl_0, "DiffNvimStatAdded", add_range[1], add_range[2] })
-          end
-          if del_range then
-            table.insert(hl_queue, { sl_0, "DiffNvimStatRemoved", del_range[1], del_range[2] })
+      for i, raw in ipairs(d.body) do
+        if raw == "" then
+          push("", { type = "commit_body", blank = true, commit = commit })
+        else
+          for _, chunk in ipairs(util.wrap(raw, avail)) do
+            local line = META_INDENT .. chunk
+            local r = push(line, { type = "commit_body", commit = commit })
+            table.insert(hl, { r, i == 1 and "DiffNvimCommitSubject" or "DiffNvimCommitBody", #META_INDENT, #line })
           end
         end
       end
+      if #d.body > 0 then push("", { type = "commit_body", blank = true, commit = commit }) end
 
-      -- Changed-file list, rendered as a directory tree (same structure as the
-      -- file panel). Base indent is META_INDENT; each tree depth nests further.
-      if file_cache[commit.hash] then
-        local tree = util.build_file_tree(file_cache[commit.hash])
+      local stat, add_range, del_range = stat_text(d.added, d.deleted, META_INDENT)
+      if stat ~= "" then
+        local r = push(stat, { type = "commit_body", commit = commit })
+        if add_range then table.insert(hl, { r, "DiffNvimStatAdded", add_range[1], add_range[2] }) end
+        if del_range then table.insert(hl, { r, "DiffNvimStatRemoved", del_range[1], del_range[2] }) end
+      end
 
-        local render_tree_node  -- forward declaration for mutual recursion
-
-        local function render_tree_dir(node, depth)
-          local display, cur = util.compact_dir_chain(node)
-          local pad   = indent .. string.rep("  ", depth)
-          local avail = math.max(1, panel_w - #pad - 1)
-          local name  = util.trunc_middle(display, avail)
-          local dline = pad .. name .. "/"
-          table.insert(lines, dline)
-          local dl = #lines
-          line_map[dl] = { type = "commit_dir", commit = commit }
-          table.insert(hl_queue, { dl - 1, "Comment", #pad, #pad + #name + 1 })
-          for _, child in ipairs(util.sort_tree_children(cur.children)) do
-            render_tree_node(child, depth + 1)
-          end
-        end
-
-        render_tree_node = function(node, depth)
-          if not node.file then
-            render_tree_dir(node, depth)
-            return
-          end
-          local f     = node.file
-          local pad   = indent .. string.rep("  ", depth)
-          local badge = STATUS_BADGE[f.status] or "·"
-
-          local stat_text, add_range, del_range = commit_diffstat_segment(f)
-          local right_w = 3 + #stat_text  -- "[X]" is 3 cols
-
-          local avail = math.max(1, panel_w - #pad - right_w - 1)
-          local name  = util.trunc_middle(node.name, avail)
-          local name_w = vim.fn.strdisplaywidth(name)
-          local gap   = math.max(1, panel_w - #pad - name_w - right_w)
-          local fline = pad .. name .. string.rep(" ", gap) .. "[" .. badge .. "]" .. stat_text
-
-          table.insert(lines, fline)
-          local flnr   = #lines
-          local flnr_0 = flnr - 1
-          line_map[flnr] = { type = "commit_file", commit = commit, file = f }
-
-          table.insert(hl_queue, { flnr_0, "DiffNvimCommitFileEntry", #pad, #pad + #name })
-          local badge_hl  = STATUS_HL[f.status] or "DiffNvimStatusUntracked"
-          local badge_col = #fline - #stat_text - 3
-          table.insert(hl_queue, { flnr_0, badge_hl, badge_col, badge_col + 3 })
-
-          local stat_base = #fline - #stat_text
-          if add_range then
-            table.insert(hl_queue, { flnr_0, "DiffNvimStatAdded",
-              stat_base + add_range[1], stat_base + add_range[2] })
-          end
-          if del_range then
-            table.insert(hl_queue, { flnr_0, "DiffNvimStatRemoved",
-              stat_base + del_range[1], stat_base + del_range[2] })
-          end
-        end
-
-        for _, child in ipairs(util.sort_tree_children(tree.children)) do
-          render_tree_node(child, 0)
-        end
+      local render_node
+      local function render_dir(node, depth)
+        local display, cur = util.compact_dir_chain(node)
+        local pad = META_INDENT .. string.rep("  ", depth)
+        local name = util.trunc_middle(display, math.max(1, width - #pad - 1))
+        local r = push(pad .. name .. "/", { type = "commit_dir", commit = commit })
+        table.insert(hl, { r, "Comment", #pad, #pad + #name + 1 })
+        for _, child in ipairs(util.sort_tree_children(cur.children)) do render_node(child, depth + 1) end
+      end
+      render_node = function(node, depth)
+        if not node.file then return render_dir(node, depth) end
+        local f = node.file
+        local pad = META_INDENT .. string.rep("  ", depth)
+        local st, a_r, d_r = stat_text(f.stat and f.stat.added, f.stat and f.stat.deleted, "  ")
+        if f.stat and f.stat.binary then st, a_r, d_r = "  bin", nil, nil end
+        local right_w = 3 + #st
+        local name = util.trunc_middle(node.name, math.max(1, width - #pad - right_w - 1))
+        local gap = math.max(1, width - #pad - vim.fn.strdisplaywidth(name) - right_w)
+        local line = pad .. name .. string.rep(" ", gap) .. "[" .. (STATUS_BADGE[f.status] or "·") .. "]" .. st
+        local r = push(line, { type = "commit_file", key = file_key(commit.hash, f.path), commit = commit, file = f })
+        table.insert(hl, { r, "DiffNvimCommitFileEntry", #pad, #pad + #name })
+        local badge_col = #line - #st - 3
+        table.insert(hl, { r, STATUS_HL[f.status] or "DiffNvimStatusUntracked", badge_col, badge_col + 3 })
+        local base = #line - #st
+        if a_r then table.insert(hl, { r, "DiffNvimStatAdded", base + a_r[1], base + a_r[2] }) end
+        if d_r then table.insert(hl, { r, "DiffNvimStatRemoved", base + d_r[1], base + d_r[2] }) end
+      end
+      for _, child in ipairs(util.sort_tree_children(util.build_file_tree(d.files).children)) do
+        render_node(child, 0)
       end
     end
 
-    -- Map every line of this commit (header + any expanded body/file lines)
-    -- back to the two header lines so the cursor highlight spans them together.
-    for ln = l1, #lines do
-      header_pair[ln] = pair
-    end
+    local pair = { first, first + 1 }
+    for ln = first, #lines do pairs_[ln] = pair end
   end
 
-  if #lines == 0 then
-    table.insert(lines, "  (no commits)")
-    line_map[1] = { type = "empty" }
-  end
-
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-
-  for _, h in ipairs(hl_queue) do
-    pcall(vim.api.nvim_buf_add_highlight, buf, NS, h[2], h[1], h[3], h[4])
-  end
-
-  vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
-
-  -- Re-apply the cursor highlight: header_pair was just rebuilt, so the spanned
-  -- lines may have shifted (e.g. a commit was expanded/collapsed).
-  if M._redraw_cursor then M._redraw_cursor() end
+  if #lines == 0 then push("  (no commits)", { type = "empty" }) end
+  return lines, hl, map, pairs_
 end
 
--- Highlight both header lines (subject + author/date) of the commit the cursor
--- is currently on. Redraws into CURSOR_NS on every cursor move.
-local function highlight_cursor_commit(buf, win)
-  if not (buf and vim.api.nvim_buf_is_valid(buf)) then return end
-  if not (win and vim.api.nvim_win_is_valid(win)) then return end
-  vim.api.nvim_buf_clear_namespace(buf, CURSOR_NS, 0, -1)
-  local lnr  = vim.api.nvim_win_get_cursor(win)[1]
-  local pair = header_pair[lnr]
+local function highlight_cursor_commit()
+  if not valid() then return end
+  vim.api.nvim_buf_clear_namespace(S.buf, CURSOR_NS, 0, -1)
+  local pair = S.header_pair[vim.api.nvim_win_get_cursor(S.win)[1]]
   if not pair then return end
   for _, l in ipairs(pair) do
-    pcall(vim.api.nvim_buf_set_extmark, buf, CURSOR_NS, l - 1, 0, {
-      line_hl_group = "DiffNvimCommitCursor",
-      priority = 10,
+    pcall(vim.api.nvim_buf_set_extmark, S.buf, CURSOR_NS, l - 1, 0, {
+      line_hl_group = "DiffNvimCommitCursor", priority = 10,
     })
   end
 end
 
+local function apply_active()
+  if not (S.buf and vim.api.nvim_buf_is_valid(S.buf)) then return end
+  vim.api.nvim_buf_clear_namespace(S.buf, NS_ACTIVE, 0, -1)
+  if not S.active then return end
+  for lnr, meta in pairs(S.line_map) do
+    if meta.key == S.active then
+      vim.api.nvim_buf_set_extmark(S.buf, NS_ACTIVE, lnr - 1, 0, {
+        line_hl_group = "DiffNvimActiveFile",
+        virt_text = { { "▎", "DiffNvimActiveSign" } }, virt_text_pos = "overlay",
+      })
+      return
+    end
+  end
+end
+
+--- Put the cursor back on the same entry after the line layout changed.
+local function restore_cursor(prev)
+  local target, fallback
+  for lnr, meta in pairs(S.line_map) do
+    if prev.key and meta.key == prev.key then target = lnr break end
+    if prev.hash and meta.key == "commit:" .. prev.hash then fallback = lnr end
+  end
+  target = math.min(target or fallback or prev.row, vim.api.nvim_buf_line_count(S.buf))
+  pcall(vim.api.nvim_win_set_cursor, S.win, { target, 0 })
+end
+
+--- Draw the cached commits into the panel at the window's current width.
+function M.render()
+  if not valid() then return end
+  local row = vim.api.nvim_win_get_cursor(S.win)[1]
+  local cur = S.line_map[row]
+  local prev = { row = row, key = cur and cur.key, hash = cur and cur.commit and cur.commit.hash }
+
+  local lines, hl, map, header_pair = build(vim.api.nvim_win_get_width(S.win))
+  S.line_map, S.header_pair = map, header_pair
+
+  vim.bo[S.buf].modifiable = true
+  vim.api.nvim_buf_clear_namespace(S.buf, NS, 0, -1)
+  vim.api.nvim_buf_set_lines(S.buf, 0, -1, false, lines)
+  vim.bo[S.buf].modifiable = false
+  for _, h in ipairs(hl) do
+    pcall(vim.api.nvim_buf_add_highlight, S.buf, NS, h[2], h[1], h[3], h[4])
+  end
+  restore_cursor(prev)
+  highlight_cursor_commit()
+  apply_active()
+end
+
 -- ---------------------------------------------------------------------------
--- Commit tooltip (K key)
+-- Commit tooltip (K)
 -- ---------------------------------------------------------------------------
 
---- Close any existing tooltip, cleaning up module state.
 local function close_tooltip()
   M._tooltip_req_id = M._tooltip_req_id + 1
   if M._tooltip_win and vim.api.nvim_win_is_valid(M._tooltip_win) then
@@ -396,423 +271,215 @@ local function close_tooltip()
   M._tooltip_buf = nil
 end
 
---- Show a floating window with the full commit message for hash.
---- Tracked in M._tooltip_win so rapid invocations never stack.
---- Uses a monotonic request counter to discard stale callbacks.
---- @param repo_root string
---- @param hash      string
-local function show_commit_tooltip(repo_root, hash)
-  -- Close any pre-existing tooltip before starting the async fetch
+local function open_tooltip(lines)
+  if #lines == 0 then lines = { "(empty commit message)" } end
+  local width = 0
+  for _, l in ipairs(lines) do width = math.max(width, vim.fn.strdisplaywidth(l)) end
+  width = math.max(1, math.min(width + 2, 80))
+  local height = math.max(1, math.min(#lines, math.floor(vim.o.lines * 0.6)))
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].buftype   = "nofile"
+  vim.bo[buf].bufhidden = "wipe"
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+
+  local ok, win = pcall(vim.api.nvim_open_win, buf, true, {
+    relative = "editor", width = width, height = height,
+    row = math.max(0, math.floor((vim.o.lines - height) / 2)),
+    col = math.max(0, math.floor((vim.o.columns - width) / 2)),
+    style = "minimal", border = "rounded", title = " Commit ", title_pos = "center",
+  })
+  if not ok then
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    return
+  end
+  M._tooltip_win, M._tooltip_buf = win, buf
+  vim.wo[win].wrap = true
+  vim.wo[win].linebreak = true
+
+  for _, key in ipairs({ "q", "<Esc>" }) do
+    vim.keymap.set("n", key, close_tooltip, { buffer = buf, nowait = true, silent = true, desc = "Close tooltip (diff)" })
+  end
+  vim.api.nvim_create_autocmd("BufLeave", {
+    buffer = buf, once = true,
+    callback = function()
+      vim.schedule(function() if M._tooltip_buf == buf then close_tooltip() end end)
+    end,
+  })
+end
+
+local function show_commit_tooltip(hash)
   close_tooltip()
-
-  -- Snapshot the current request ID; if another K press fires before this
-  -- callback completes, M._tooltip_req_id is incremented and we discard.
+  local d = S.details[hash]
+  if d then
+    open_tooltip(vim.deepcopy(d.body))
+    return
+  end
   M._tooltip_req_id = M._tooltip_req_id + 1
-  local my_req_id = M._tooltip_req_id
-
-  -- Wrap the entire async callback in xpcall so an error inside never leaves
-  -- M._tooltip_win pointing at a dead/inconsistent state.
-  git.run({ "show", "--no-patch", "--format=%B", hash }, repo_root, function(lines, stderr, code)
-    local ok = xpcall(function()
-      -- Stale callback: a newer K press has superseded this one
-      if my_req_id ~= M._tooltip_req_id then return end
-
-      if code ~= 0 then
-        vim.notify("diff.nvim: " .. (stderr or "cannot fetch commit message"), vim.log.levels.WARN)
-        return
-      end
-
-      -- Strip trailing empty lines
-      while #lines > 0 and lines[#lines] == "" do
-        table.remove(lines)
-      end
-      if #lines == 0 then
-        lines = { "(empty commit message)" }
-      end
-
-      -- Calculate window dimensions
-      local max_width = 80
-      local max_height = math.floor(vim.o.lines * 0.6)
-      local width = 0
-      for _, l in ipairs(lines) do
-        width = math.max(width, vim.fn.strdisplaywidth(l))
-      end
-      width = math.max(1, math.min(width + 2, max_width))
-      local height = math.max(1, math.min(#lines, max_height))
-
-      -- Clamp to viewport bounds
-      local row = math.max(0, math.floor((vim.o.lines - height) / 2))
-      local col = math.max(0, math.floor((vim.o.columns - width) / 2))
-
-      local buf = vim.api.nvim_create_buf(false, true)
-      vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
-      vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
-      vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-      vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
-
-      -- The request ID check at the top of the xpcall body already guarantees
-      -- this callback belongs to the current tooltip request; no additional
-      -- per-buffer validity guard is needed here.
-
-      local ok_win, win = pcall(vim.api.nvim_open_win, buf, true, {
-        relative  = "editor",
-        width     = width,
-        height    = height,
-        row       = row,
-        col       = col,
-        style     = "minimal",
-        border    = "rounded",
-        title     = " Commit ",
-        title_pos = "center",
-      })
-      if not ok_win then
-        pcall(vim.api.nvim_buf_delete, buf, { force = true })
-        return
-      end
-
-      -- Validate immediately; open_win can theoretically succeed but return an
-      -- invalid win if the editor is closing.
-      if not vim.api.nvim_win_is_valid(win) then
-        pcall(vim.api.nvim_buf_delete, buf, { force = true })
-        return
-      end
-
-      M._tooltip_win = win
-      M._tooltip_buf = buf
-
-      pcall(vim.api.nvim_set_option_value, "wrap",          true,  { win = win })
-      pcall(vim.api.nvim_set_option_value, "linebreak",     true,  { win = win })
-      pcall(vim.api.nvim_set_option_value, "sidescroll",    0,     { win = win })
-      pcall(vim.api.nvim_set_option_value, "sidescrolloff", 0,     { win = win })
-      pcall(vim.api.nvim_set_option_value, "number",        false, { win = win })
-
-      -- Block horizontal movement/scroll
-      local nop_keys = { "<ScrollWheelRight>", "<ScrollWheelLeft>", "<Left>", "<Right>", "zh", "zl" }
-      for _, key in ipairs(nop_keys) do
-        vim.keymap.set("n", key, "<Nop>", { buffer = buf, silent = true, desc = "(disabled) (diff)" })
-      end
-
-      -- Close on q/Esc: always clears module state
-      local function do_close()
-        close_tooltip()
-      end
-      for _, key in ipairs({ "q", "<Esc>" }) do
-        vim.keymap.set("n", key, do_close,
-          { buffer = buf, nowait = true, silent = true, desc = "Close tooltip (diff)" })
-      end
-
-      -- BufLeave: auto-close so tooltip dismisses when focus moves away.
-      -- Capture the buffer reference so the scheduled callback only closes
-      -- THIS tooltip and not a newer one that may have been opened in the gap.
-      local captured_buf = buf
-      vim.api.nvim_create_autocmd("BufLeave", {
-        buffer  = buf,
-        once    = true,
-        callback = function()
-          vim.schedule(function()
-            if M._tooltip_buf == captured_buf then
-              close_tooltip()
-            end
-          end)
-        end,
-      })
-    end, function(err_msg)
-      -- xpcall error handler: clean up state and notify user
-      close_tooltip()
-      vim.notify("diff.nvim: tooltip error: " .. tostring(err_msg), vim.log.levels.ERROR)
-    end)
+  local req = M._tooltip_req_id
+  git.run({ "show", "--no-patch", "--format=%B", hash }, S.root, function(lines, stderr, code)
+    if req ~= M._tooltip_req_id then return end
+    if code ~= 0 then
+      log.warn("cannot read message of %s: %s", hash, stderr)
+      vim.notify("diff.nvim: " .. (stderr ~= "" and stderr or "cannot fetch commit message"), vim.log.levels.WARN)
+      return
+    end
+    open_tooltip(lines)
   end)
+end
+
+-- ---------------------------------------------------------------------------
+-- Navigation (]f / [f in the diff view)
+-- ---------------------------------------------------------------------------
+
+local function to_source(hash, f)
+  return { kind = "commit", hash = hash, path = f.path, old_path = f.old_path, status = f.status }
+end
+
+function M.navigator(source, dir)
+  local d = S.details[source.hash]
+  if not d then return nil end
+  local files = {}
+  local function walk(node)
+    for _, child in ipairs(util.sort_tree_children(node.children)) do
+      if child.file then table.insert(files, child.file) else walk(child) end
+    end
+  end
+  walk(util.build_file_tree(d.files))
+  for i, f in ipairs(files) do
+    if f.path == source.path then
+      return files[i + dir] and to_source(source.hash, files[i + dir]) or nil
+    end
+  end
+  return nil
 end
 
 -- ---------------------------------------------------------------------------
 -- Public API
 -- ---------------------------------------------------------------------------
 
---- Wire up keymaps for the commit panel buffer.
---- @param buf       integer
---- @param win       integer
---- @param repo_root string
-function M.setup(buf, win, repo_root)
-  _buf = buf
-  _win = win
-  _repo_root = repo_root
-
-  -- Reset state on each setup (prevents leaks between open/close cycles)
-  expanded = {}
-  file_cache = {}
-  body_cache = {}
-  stat_cache = {}
-  line_map = {}
-  _commits = nil
-  _last_width = nil
-  -- Close any open tooltip from previous session and reset the request counter
-  close_tooltip()
-  M._tooltip_req_id = 0
-
-  local cfg  = config.get()
-  local km   = cfg.keymaps or {}
-  local opts = { buffer = buf, nowait = true, silent = true }
-
-  -- The commit cursor highlight spans two lines (subject + author/date), so the
-  -- single-line built-in 'cursorline' would be redundant/conflicting here.
-  pcall(vim.api.nvim_set_option_value, "cursorline", false, { win = win })
-
-  -- Highlight both header lines of the commit under the cursor as it moves.
-  M._redraw_cursor = function()
-    highlight_cursor_commit(_buf, _win)
+local function toggle_commit(commit)
+  local hash = commit.hash
+  if S.expanded[hash] then
+    S.expanded[hash] = nil
+    M.render()
+    return
   end
-  local aug = vim.api.nvim_create_augroup("DiffNvimCommitCursor", { clear = true })
-  vim.api.nvim_create_autocmd({ "CursorMoved", "BufEnter" }, {
-    group  = aug,
-    buffer = buf,
-    callback = function()
-      highlight_cursor_commit(buf, win)
-    end,
-  })
-
-  -- Re-render on window resize so truncation/wrapping tracks the panel's
-  -- actual (possibly user-resized) width instead of the configured default.
-  -- Skips when the width hasn't actually changed (e.g. a height-only split
-  -- change elsewhere in the tab still lists this window in v:event.windows).
-  -- Re-render changes the panel's total line count (word-wrapped expanded
-  -- commit bodies reflow), so the cursor is re-anchored to the same commit
-  -- hash it was on rather than left on a now-unrelated line.
-  local function maybe_rerender_for_resize()
-    if not vim.api.nvim_win_is_valid(win) then return end
-    if not vim.api.nvim_buf_is_valid(buf) then return end
-    local w = vim.api.nvim_win_get_width(win)
-    if w == _last_width then return end
-
-    local cur_lnr = vim.api.nvim_win_get_cursor(win)[1]
-    local cur_meta = line_map[cur_lnr]
-    local cur_hash = cur_meta and cur_meta.commit and cur_meta.commit.hash
-
-    render(buf, _commits or {})
-
-    if cur_hash then
-      local line_count = vim.api.nvim_buf_line_count(buf)
-      for lnr = 1, line_count do
-        local meta = line_map[lnr]
-        if meta and meta.commit and meta.commit.hash == cur_hash then
-          pcall(vim.api.nvim_win_set_cursor, win, { lnr, 0 })
-          break
-        end
-      end
+  S.expanded[hash] = true
+  if S.details[hash] then
+    M.render()
+    return
+  end
+  if S.loading[hash] then return end
+  S.loading[hash] = true
+  local elapsed = require("diff.log").timer()
+  git.get_commit_details(S.root, hash, function(details, err)
+    S.loading[hash] = nil
+    if not details then
+      S.expanded[hash] = nil
+      log.warn("cannot read commit %s: %s", hash, err or "?")
+      vim.notify("diff.nvim: " .. (err or "cannot read commit"), vim.log.levels.WARN)
+      return
     end
-  end
-
-  vim.api.nvim_create_autocmd("WinResized", {
-    group = aug,
-    callback = function()
-      if not vim.tbl_contains(vim.v.event.windows or {}, win) then return end
-      maybe_rerender_for_resize()
-    end,
-  })
-  -- WinResized only fires for the current tabpage; a terminal resize (or
-  -- `:set columns`) while the sidebar's tab isn't focused wouldn't otherwise
-  -- be picked up until the next data refresh.
-  vim.api.nvim_create_autocmd("VimResized", {
-    group = aug,
-    callback = maybe_rerender_for_resize,
-  })
-
-  -- Activate the entry on line `lnr`: expand/collapse a commit, or open a
-  -- commit file's diff. Shared by <CR> and mouse clicks.
-  local function activate_line(lnr)
-    local meta = line_map[lnr]
-    if not meta then return end
-
-    if meta.type == "commit" or meta.type == "commit_body" then
-      local hash = meta.commit.hash
-      if expanded[hash] then
-        expanded[hash] = false
-        render(buf, _commits or {})
-      elseif file_cache[hash] and body_cache[hash] and stat_cache[hash] ~= nil then
-        expanded[hash] = true
-        render(buf, _commits or {})
-      else
-        -- Fetch the changed-file list, full commit message, and stat summary in
-        -- parallel; expand once all have arrived so everything renders together.
-        local pending = 3
-        local failed  = false
-        local function done()
-          pending = pending - 1
-          if pending > 0 or failed then return end
-          if not vim.api.nvim_buf_is_valid(buf) then return end
-          expanded[hash] = true
-          render(buf, _commits or {})
-        end
-
-        if file_cache[hash] then
-          pending = pending - 1
-        else
-          git.get_commit_files(repo_root, hash, function(files, err)
-            if err then
-              vim.notify("diff.nvim: " .. err, vim.log.levels.WARN)
-              failed = true
-              -- Still count this fetch as settled. Returning early here used to
-              -- strand `pending` above zero, and because the caller only reaches
-              -- this branch when the caches are empty, the commit could never be
-              -- expanded again for the rest of the session.
-              done()
-              return
-            end
-            file_cache[hash] = files or {}
-            done()
-          end)
-        end
-
-        if body_cache[hash] then
-          pending = pending - 1
-        else
-          git.get_commit_body(repo_root, hash, function(body, err)
-            if err then
-              -- Body is non-critical; degrade gracefully to file list only.
-              body_cache[hash] = {}
-            else
-              body_cache[hash] = body or {}
-            end
-            done()
-          end)
-        end
-
-        if stat_cache[hash] ~= nil then
-          pending = pending - 1
-        else
-          git.get_commit_stat(repo_root, hash, function(summary, _)
-            -- Stat is non-critical; cache empty string on failure.
-            stat_cache[hash] = summary or ""
-            done()
-          end)
-        end
-
-        -- If everything was already cached above, render immediately.
-        if pending == 0 and not failed then
-          if vim.api.nvim_buf_is_valid(buf) then
-            expanded[hash] = true
-            render(buf, _commits or {})
-          end
-        end
-      end
-    elseif meta.type == "commit_file" then
-      local ok, dv_err = pcall(function()
-        local dv = require("diff.diff_view")
-        dv.open_commit_diff(repo_root, meta.commit.hash, meta.file.path, meta.file.status_char)
-      end)
-      if not ok then
-        vim.notify("diff.nvim: error opening commit diff: " .. tostring(dv_err), vim.log.levels.ERROR)
-      end
-    end
-  end
-
-  -- <CR>: toggle commit expansion or open file diff
-  vim.keymap.set("n", km.open_diff or "<CR>", function()
-    if not _win or not vim.api.nvim_win_is_valid(_win) then return end
-    activate_line(vim.api.nvim_win_get_cursor(_win)[1])
-  end, vim.tbl_extend("force", opts, { desc = "Expand commit / open file diff (diff)" }))
-
-  -- Mouse clicks are handled by the single global dispatcher in sidebar.lua.
-  -- A buffer-local <LeftMouse> map used to live here, and because it returned
-  -- early for any click outside this window it swallowed the event entirely:
-  -- while the panel had focus you could not click into another window or grab
-  -- a window separator to resize.
-
-  -- Expose the row activator so the global click dispatcher can reach it.
-  M.activate_line = activate_line
-
-  -- j/k: the author/date line is part of the same two-line header as the subject
-  -- above it (and highlights together with it), so stopping the cursor there is
-  -- redundant. Skip it when moving vertically. Other rows (subject, expanded
-  -- body, file entries) remain individually navigable.
-  local function is_meta_line(lnr)
-    -- A meta line is the second entry of a header pair (pair[2] == lnr).
-    local pair = header_pair[lnr]
-    return pair and pair[2] == lnr and pair[1] ~= lnr
-  end
-  -- A row is skippable when it carries no information of its own: the meta line
-  -- (highlighted together with the subject above it) and the blank spacers
-  -- inside an expanded commit body.
-  local function is_skippable(lnr, lines)
-    if is_meta_line(lnr) then return true end
-    return (lines[lnr] or ""):match("^%s*$") ~= nil
-  end
-
-  local function move(dir)
-    if not _win or not vim.api.nvim_win_is_valid(_win) then return end
-    if not _buf or not vim.api.nvim_buf_is_valid(_buf) then return end
-    local lines = vim.api.nvim_buf_get_lines(_buf, 0, -1, false)
-    local last  = #lines
-    local row   = vim.api.nvim_win_get_cursor(_win)[1]
-
-    -- Honour a count prefix: `10j` must move ten rows, not one. Each step
-    -- skips over non-informative rows before landing.
-    for _ = 1, vim.v.count1 do
-      local target = row + dir
-      while target >= 1 and target <= last and is_skippable(target, lines) do
-        target = target + dir
-      end
-      if target < 1 or target > last then break end
-      row = target
-    end
-
-    pcall(vim.api.nvim_win_set_cursor, _win, { row, 0 })
-  end
-  vim.keymap.set("n", "j", function() move(1) end,
-    vim.tbl_extend("force", opts, { desc = "Next row, skip meta line (diff)" }))
-  vim.keymap.set("n", "k", function() move(-1) end,
-    vim.tbl_extend("force", opts, { desc = "Prev row, skip meta line (diff)" }))
-  vim.keymap.set("n", "<Down>", function() move(1) end,
-    vim.tbl_extend("force", opts, { desc = "Next row, skip meta line (diff)" }))
-  vim.keymap.set("n", "<Up>", function() move(-1) end,
-    vim.tbl_extend("force", opts, { desc = "Prev row, skip meta line (diff)" }))
-
-  -- Block horizontal-scroll KEYS (keyboard). The horizontal mouse wheel is
-  -- handled globally in sidebar.lua because wheel events act on the window under
-  -- the cursor regardless of focus, which a buffer-local map cannot catch.
-  -- Content is truncated to the panel width, so scrolling right only reveals
-  -- blank space; keep the view pinned to column 1.
-  for _, key in ipairs({ "zh", "zl", "zH", "zL" }) do
-    vim.keymap.set("n", key, "<Nop>",
-      vim.tbl_extend("force", opts, { desc = "(disabled) (diff)" }))
-  end
-
-  -- K: show full commit message tooltip
-  vim.keymap.set("n", km.commit_tooltip or "K", function()
-    if not _win or not vim.api.nvim_win_is_valid(_win) then return end
-    local lnr  = vim.api.nvim_win_get_cursor(_win)[1]
-    local meta = line_map[lnr]
-    if not meta then return end
-    -- Find the commit (works for both commit and commit_file rows)
-    local commit = meta.commit
-    if commit then
-      show_commit_tooltip(repo_root, commit.hash)
-    end
-  end, vim.tbl_extend("force", opts, { desc = "Show full commit message (diff)" }))
-
-  -- 'q': close the entire diff.nvim interface
-  vim.keymap.set("n", "q", function()
-    require("diff.sidebar").close()
-  end, vim.tbl_extend("force", opts, { desc = "Close (diff)" }))
+    S.details[hash] = details
+    log.debug("details for %s: %d files in %.1f ms", hash:sub(1, 7), #details.files, elapsed())
+    M.render()
+  end)
 end
 
---- Fetch recent commits and re-render the panel.
---- @param buf       integer
---- @param win       integer
---- @param repo_root string
---- @param ref       string|nil  Branch to source commits from (preview mode);
----   nil sources from HEAD (live mode).
-function M.refresh(buf, win, repo_root, ref)
-  _buf = buf
-  _win = win
-  _repo_root = repo_root
+function M.activate_line(lnr)
+  local meta = S.line_map[lnr]
+  if not meta then return end
+  if meta.type == "commit" or meta.type == "commit_body" then
+    toggle_commit(meta.commit)
+  elseif meta.type == "commit_file" then
+    require("diff.diff_view").open(S.root, to_source(meta.commit.hash, meta.file), M.navigator)
+  end
+end
 
-  git.get_commits(repo_root, 50, function(commits, err)
+function M.mark_active(data)
+  data = data or {}
+  S.active = data.kind == "commit" and file_key(data.hash, data.path) or nil
+  apply_active()
+end
+
+--- Rows that carry no information of their own: the metadata line (it
+--- highlights together with the subject above) and blank spacers.
+local function skippable(lnr)
+  local meta = S.line_map[lnr]
+  return meta and (meta.meta_line or meta.blank) or false
+end
+
+function M.setup(buf, win, repo_root)
+  local keep = S
+  S = fresh_state()
+  S.buf, S.win, S.root = buf, win, repo_root
+  if keep.root == repo_root then
+    S.commits, S.expanded, S.details, S.active, S.ref = keep.commits, keep.expanded, keep.details, keep.active, keep.ref
+  end
+  close_tooltip()
+
+  -- The two-line commit highlight replaces 'cursorline'.
+  pcall(vim.api.nvim_set_option_value, "cursorline", false, { win = win })
+  local aug = vim.api.nvim_create_augroup("DiffNvimCommitCursor", { clear = true })
+  vim.api.nvim_create_autocmd({ "CursorMoved", "BufEnter" }, {
+    group = aug, buffer = buf, callback = highlight_cursor_commit,
+  })
+
+  local km = require("diff.config").get().keymaps or {}
+  local function map(key, fn, desc, extra)
+    if not key or key == "" then return end
+    vim.keymap.set("n", key, fn, vim.tbl_extend("force",
+      { buffer = buf, nowait = true, silent = true, desc = desc .. " (diff)" }, extra or {}))
+  end
+
+  map(km.open_diff, function()
+    if valid() then M.activate_line(vim.api.nvim_win_get_cursor(S.win)[1]) end
+  end, "Expand commit / open file diff")
+
+  for key, dir in pairs({ j = 1, k = -1, ["<Down>"] = 1, ["<Up>"] = -1 }) do
+    map(key, function()
+      local row = vim.api.nvim_win_get_cursor(0)[1]
+      local last = vim.api.nvim_buf_line_count(buf)
+      local start = row
+      for _ = 1, vim.v.count1 do
+        local t = row + dir
+        while t >= 1 and t <= last and skippable(t) do t = t + dir end
+        if t < 1 or t > last then break end
+        row = t
+      end
+      if row == start then return "" end
+      return string.format("<Cmd>normal! %d%s<CR>", math.abs(row - start), dir > 0 and "j" or "k")
+    end, "Move, skip meta/blank rows", { expr = true })
+  end
+
+  map(km.commit_tooltip, function()
+    local meta = S.line_map[vim.api.nvim_win_get_cursor(0)[1]]
+    if meta and meta.commit then show_commit_tooltip(meta.commit.hash) end
+  end, "Show full commit message")
+
+  map("q", function() require("diff.sidebar").close() end, "Close")
+
+  if S.commits then M.render() end
+end
+
+--- Fetch the commit list and re-render.
+--- @param ref string|nil  Branch to read history from (preview mode); nil = HEAD.
+function M.refresh(ref)
+  S.gen = S.gen + 1
+  local gen = S.gen
+  if ref ~= S.ref then
+    S.expanded, S.ref = {}, ref
+  end
+  git.get_commits(S.root, COMMIT_LIMIT, function(commits, err)
+    if gen ~= S.gen then return end
     if err then
+      log.warn("git log failed: %s", err)
       vim.notify("diff.nvim: commits error: " .. err, vim.log.levels.WARN)
     end
-    if not vim.api.nvim_buf_is_valid(buf) then return end
-    _commits = commits or {}
-    render(buf, _commits)
+    S.commits = commits or {}
+    M.render()
   end, ref)
 end
 
