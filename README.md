@@ -18,6 +18,7 @@ A NeoVim plugin that replicates the Git source-control UX of VSCode's SCM sideba
 | **Filler lines** | Grey visual-only placeholders keep both panes aligned |
 | **Real line numbers** | The gutter shows file line numbers, not pane row numbers |
 | **Scroll sync** | Native `scrollbind` / `cursorbind` |
+| **Line wrapping** | Long lines wrap at word boundaries, GitHub-style; the shorter side of each row is padded so both panes stay row-aligned (split view needs Neovim ≥ 0.10) |
 | **Gutter indicators** | Coloured `▍` strip marks changed regions |
 | **Hunk staging** | Stage or unstage the change under the cursor straight from the diff |
 | **Live updates** | Panels follow `git` activity from anywhere (CLI, other tools); the open diff follows edits on disk, keeping your place |
@@ -88,6 +89,13 @@ require("diff").setup({
 
   -- Lines of context around each change (nil shows whole files).
   context_lines = 3,
+
+  -- Soft-wrap long lines in the diff panes (default: true). In the split view
+  -- the shorter side of each row is padded to the taller side's height, so the
+  -- panes stay aligned while scrolling. Split panes narrower than 20 text
+  -- columns scroll horizontally instead. Needs Neovim 0.10+ in the split view;
+  -- on 0.9 split panes stay unwrapped.
+  wrap = true,
 
   -- Log verbosity: "trace" | "debug" | "info" | "warn" (default) | "error" | "off".
   -- The log lives at stdpath("log")/diff.nvim.log; open it with :DiffNvimLog.

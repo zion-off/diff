@@ -5,6 +5,7 @@ M.defaults = {
   sidebar_width = 40,
   notes_width = 40,          -- width of the notes right-side split
   context_lines = 3, -- lines of context around each hunk (nil = show all)
+  wrap = true, -- soft-wrap long lines in the diff panes, keeping split panes row-aligned
   notes_path = nil, -- nil = XDG default (ignored; kept for backward compat)
   auto_refresh = true,
   mouse = true, -- enable mouse interactivity in the sidebar (clicks open/toggle)

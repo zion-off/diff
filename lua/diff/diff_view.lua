@@ -23,6 +23,7 @@ local NS       = vim.api.nvim_create_namespace("diff_nvim_diff")
 local NS_WORDS = vim.api.nvim_create_namespace("diff_nvim_words")
 local NS_NOTES = vim.api.nvim_create_namespace("diff_nvim_notes_markers")
 local NS_HEAD  = vim.api.nvim_create_namespace("diff_nvim_header")
+local NS_WRAP  = vim.api.nvim_create_namespace("diff_nvim_wrap")
 
 -- Highlight priorities relative to tree-sitter's 100.
 local PRIORITY_LINE_BG   = 50   -- below syntax so colours show through
@@ -33,6 +34,12 @@ local EXPAND_STEP = 10
 local WATCH_DEBOUNCE_MS = 150
 
 local SIDES = { "old", "new" }
+
+-- Aligning wrapped split panes needs per-line screen heights (Neovim 0.10+).
+local CAN_ALIGN_WRAP = vim.api.nvim_win_text_height ~= nil
+-- Split panes narrower than this scroll horizontally instead: wrapping into a
+-- sliver is unreadable, and measuring lines that wrap dozens of times is slow.
+local MIN_WRAP_WIDTH = 20
 
 -- ---------------------------------------------------------------------------
 -- State
@@ -49,6 +56,7 @@ local function fresh_state()
     sources = {},               -- side -> syntax Source
     words = {},                 -- model row -> word ranges (lazy)
     lnum_width = 1,
+    wrap_widths = {},           -- side -> pane width the wrap padding was computed for
     watcher = nil, watch_timer = nil,
     -- open_gen counts opens, refresh_gen counts in-place refreshes. They are
     -- separate so a background refresh (watcher, index change) can never
@@ -150,12 +158,31 @@ end
 
 local STATUSCOL = "%s%#LineNr#%{v:lua.require'diff.diff_view'.statuscol()} "
 
+--- Whether panes soft-wrap. Split panes wrap only when their rows can be
+--- kept aligned; otherwise scrollbind would drift apart.
+local warned_no_align = false
+local function wraps(split)
+  if not config.get().wrap then return false end
+  if split and not CAN_ALIGN_WRAP then
+    if not warned_no_align then
+      log.warn("wrap needs Neovim 0.10+ in a split diff; lines stay unwrapped")
+      warned_no_align = true
+    end
+    return false
+  end
+  return true
+end
+
+local function set_wrap(win, wrap)
+  set_opts(win, { wrap = wrap, linebreak = wrap, breakindent = wrap })
+end
+
 local function pane_opts(win, bound)
+  set_wrap(win, wraps(bound))
   set_opts(win, {
     number         = true,
     relativenumber = false,
     statuscolumn   = STATUSCOL,
-    wrap           = false,
     foldcolumn     = "0",
     signcolumn     = "yes:1",
     cursorline     = true,
@@ -377,6 +404,87 @@ local function render_header()
   end
 end
 
+--- Pad item row `r` of `side` with inline virtual text so it wraps onto
+--- exactly `target` screen lines. Measuring rather than computing the length
+--- keeps 'linebreak', 'breakindent' and 'showbreak' exact; the largest pad
+--- that still fits is used so the band fills the row's last screen line.
+local function pad_to_height(side, r, row, target, width)
+  local win, buf = S.panes[side], S.bufs[side]
+  local line = row[side] and S.model[side].lines[row[side]] or ""
+  -- Fillers draw their pattern; text rows rely on the row's line background.
+  local char, hl = " ", nil
+  if not row[side] then char, hl = "░", "DiffNvimFillerChar" end
+  local id
+  local function height_with(n)
+    id = vim.api.nvim_buf_set_extmark(buf, NS_WRAP, r, #line, {
+      id = id, virt_text = { { string.rep(char, n), hl } }, virt_text_pos = "inline",
+    })
+    return vim.api.nvim_win_text_height(win, { start_row = r, end_row = r }).all
+  end
+  -- A screen line holds at most `width` cells, so `hi` always overflows.
+  local lo, hi = 0, width * (target + 1)
+  while hi - lo > 1 do
+    local mid = math.floor((lo + hi) / 2)
+    if height_with(mid) <= target then lo = mid else hi = mid end
+  end
+  height_with(lo)
+end
+
+--- Keep wrapped split panes row-aligned. 'scrollbind' pairs buffer lines, so
+--- both sides of a row must wrap onto the same number of screen lines: the
+--- shorter side is padded to the taller one's height. Padding inside the line
+--- (rather than virtual lines below it) leaves no filler lines for 'scrollbind'
+--- to step through at different rates.
+local function align_wrapped()
+  for _, side in ipairs(SIDES) do
+    if valid_buf(S.bufs[side]) then vim.api.nvim_buf_clear_namespace(S.bufs[side], NS_WRAP, 0, -1) end
+  end
+  S.wrap_widths = {}
+  local wins = S.panes
+  if not (S.layout and valid_win(wins.old) and valid_win(wins.new) and wraps(true)) then return end
+
+  local elapsed = require("diff.log").timer()
+  -- 'statuscolumn' width (and so the text width) is only settled by a redraw.
+  vim.cmd("redraw")
+  local text_width = {}
+  for _, side in ipairs(SIDES) do
+    local info = vim.fn.getwininfo(wins[side])[1]
+    text_width[side] = math.max(1, info.width - info.textoff)
+    S.wrap_widths[side] = info.width
+  end
+  local room = math.min(text_width.old, text_width.new) >= MIN_WRAP_WIDTH
+  for _, side in ipairs(SIDES) do set_wrap(wins[side], room) end
+  if not room then
+    log.debug("panes too narrow to wrap (%d/%d columns); scrolling horizontally", text_width.old, text_width.new)
+    return
+  end
+
+  local m, padded = S.model, 0
+  for i, item in ipairs(S.layout.items) do
+    local row = row_of_item(item)
+    if row then
+      local height = {}
+      for _, side in ipairs(SIDES) do
+        local line = row[side] and m[side].lines[row[side]] or ""
+        -- Bytes never undercount display cells except for tabs, so a short
+        -- tab-free line cannot wrap and needs no measuring.
+        if #line <= text_width[side] and not line:find("\t", 1, true) then
+          height[side] = 1
+        else
+          height[side] = vim.api.nvim_win_text_height(wins[side], { start_row = i - 1, end_row = i - 1 }).all
+        end
+      end
+      if height.old ~= height.new then
+        local short = height.old < height.new and "old" or "new"
+        pad_to_height(short, i - 1, row, math.max(height.old, height.new), text_width[short])
+        padded = padded + 1
+      end
+    end
+  end
+  log.debug("wrap alignment %s: %d rows padded at widths %d/%d in %.1f ms",
+    S.source.path, padded, text_width.old, text_width.new, elapsed())
+end
+
 --- Bind each visible pane to its syntax source.
 local function bind_syntax()
   for _, side in ipairs(SIDES) do
@@ -492,6 +600,7 @@ local function render(anchor, offset)
   end
   bind_syntax()
   render_header()
+  align_wrapped()
   place_cursor(resolve_anchor(anchor), offset)
   log.debug("render %s: %d rows, %d items in %.1f ms", S.source.path, #m.rows, #S.layout.items, elapsed())
 end
@@ -602,6 +711,7 @@ local function show_binary(root, source, navigator)
   local buf = S.bufs.new
   vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
   vim.api.nvim_buf_clear_namespace(buf, NS_NOTES, 0, -1)
+  vim.api.nvim_buf_clear_namespace(buf, NS_WRAP, 0, -1)
   set_lines(buf, { "", "  Binary file — no text diff to show." })
   render_header()
   name_buffers()
@@ -1030,6 +1140,23 @@ vim.api.nvim_create_autocmd("WinScrolled", {
         local other = id == S.panes.old and S.panes.new or S.panes.old
         local leftcol = vim.fn.getwininfo(id)[1].leftcol
         vim.api.nvim_win_call(other, function() vim.fn.winrestview({ leftcol = leftcol }) end)
+        return
+      end
+    end
+  end,
+})
+
+-- Wrapping depends on the pane width, so a width change re-aligns the rows.
+-- Height-only resizes (a split elsewhere in the tab) leave wrapping as it was.
+vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
+  group = aug,
+  callback = function()
+    if not (S.layout and next(S.wrap_widths)) then return end
+    for side, width in pairs(S.wrap_widths) do
+      local win = S.panes[side]
+      if valid_win(win) and vim.api.nvim_win_get_width(win) ~= width then
+        log.debug("%s pane width %d -> %d; re-aligning wrapped rows", side, width, vim.api.nvim_win_get_width(win))
+        align_wrapped()
         return
       end
     end
