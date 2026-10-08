@@ -11,12 +11,17 @@ A NeoVim plugin that replicates the Git source-control UX of VSCode's SCM sideba
 | **File Status Panel** | Staged & unstaged changes with collapsible sections, status badges, right-aligned |
 | **Commit Graph Panel** | Recent commit history with `HEAD`, branch, remote, and tag ref badges |
 | **Branch preview** | Browse another branch's commits without checking it out — pick from a floating list with `<leader>gb` |
-| **Split Diff View** | Side-by-side old/new diff with syntax highlighting preserved via Tree-sitter/LSP |
+| **Split Diff View** | Side-by-side old/new diff computed in-process with Neovim's built-in xdiff — no `git diff` subprocess |
+| **Accurate syntax highlighting** | Tree-sitter parses each whole file once (asynchronously on 0.11+), so collapsed context never breaks highlighting |
 | **Line-level colours** | Subtle red for removed, green for added — layered on top of syntax colours |
 | **Word-level highlights** | Darker red/green marks the exact tokens that changed within a line |
 | **Filler lines** | Grey visual-only placeholders keep both panes aligned |
-| **Scroll sync** | Both panes scroll together via `WinScrolled` with recursion guard |
+| **Real line numbers** | The gutter shows file line numbers, not pane row numbers |
+| **Scroll sync** | Native `scrollbind` / `cursorbind` |
 | **Gutter indicators** | Coloured `▍` strip marks changed regions |
+| **Hunk staging** | Stage or unstage the change under the cursor straight from the diff |
+| **Live updates** | Panels follow `git` activity from anywhere (CLI, other tools); the open diff follows edits on disk, keeping your place |
+| **Fast navigation** | `]f` / `[f` move between files, `gf` jumps to the real file at the same line |
 | **Annotation notes** | Select lines, press `<leader>n`, type a note — saved to an XDG Markdown file |
 | **Notes panel** | Toggle with `<leader>N`; `dd` deletes a note, `q` closes |
 
@@ -24,7 +29,7 @@ A NeoVim plugin that replicates the Git source-control UX of VSCode's SCM sideba
 
 ## Requirements
 
-- NeoVim ≥ 0.9
+- NeoVim ≥ 0.9 (developed and tested on 0.11; asynchronous tree-sitter parsing needs 0.11, older versions parse synchronously)
 - `git` on `$PATH`
 - No external plugin dependencies
 
@@ -81,6 +86,13 @@ require("diff").setup({
   -- open (if not already enabled) and restores it on close.
   mouse = true,
 
+  -- Lines of context around each change (nil shows whole files).
+  context_lines = 3,
+
+  -- Log verbosity: "trace" | "debug" | "info" | "warn" (default) | "error" | "off".
+  -- The log lives at stdpath("log")/diff.nvim.log; open it with :DiffNvimLog.
+  log_level = "warn",
+
   -- Keybinding overrides (set any to false/"" to disable)
   keymaps = {
     toggle_sidebar       = "<leader>gs",
@@ -92,9 +104,18 @@ require("diff").setup({
     collapse             = "z",
     next_hunk            = "]c",
     prev_hunk            = "[c",
+    next_file            = "]f",
+    prev_file            = "[f",
+    goto_file            = "gf",
+    stage_hunk           = "s",
+    unstage_hunk         = "u",
     leave_note           = "<leader>n",
     toggle_notes         = "<leader>N",
     preview_branch       = "<leader>gb",
+    expand_context       = "zo",
+    expand_all           = "zR",
+    collapse_all         = "zM",
+    commit_tooltip       = "K",
   },
 
   -- Highlight colour overrides — any valid :hi attribute table
@@ -127,10 +148,12 @@ require("diff").setup({
 
 | Key | Action |
 |---|---|
-| `<CR>` / click | Open diff for file / toggle section collapse |
-| `s` | Stage file |
+| `<CR>` / click | Open diff for file / toggle section or directory |
+| `s` | Stage file (the cursor moves on to the next file) |
 | `u` | Unstage file |
-| `z` | Toggle section collapse |
+| `z` | Toggle directory / section collapse |
+
+The file shown in the diff view is marked with `▎` in the panel.
 
 ### Commit Graph Panel
 
@@ -156,14 +179,21 @@ Opened with `<leader>gb` (or `:DiffNvimPreviewBranch`).
 
 | Key | Action |
 |---|---|
-| `]c` | Next change chunk |
-| `[c` | Previous change chunk |
-| `zo` | Expand context (+10 lines) |
-| `l` | Expand collapsed separator line (otherwise normal `l` motion) |
+| `]c` / `[c` | Next / previous change |
+| `]f` / `[f` | Next / previous file (same panel section, or same commit) |
+| `gf` | Open the real file at this line, in the window the interface was opened from |
+| `s` | Stage the change under the cursor (unstaged working-tree diffs) |
+| `u` | Unstage the change under the cursor (staged diffs) |
+| `l` / `zo` | Reveal 10 more lines at each edge of the collapsed section under the cursor (`zo` uses the nearest one) |
 | `zR` | Show all context |
+| `zM` | Collapse back to the configured context |
 | `<leader>n` | Leave a note on current / visual selection |
 | `<leader>N` | Toggle notes panel |
 | `q` | Close diff view |
+
+`j` / `k` step over filler rows. The cursor starts on the first change, and stays on its line when the file changes on disk.
+
+Hunk staging uses zero-context patches. A change directly next to a final line without a trailing newline cannot be expressed that way; the plugin says so instead of guessing, and the whole file can still be staged from the panel.
 
 ### Notes Panel
 
@@ -183,6 +213,8 @@ Opened with `<leader>gb` (or `:DiffNvimPreviewBranch`).
 | `:DiffNvimToggle` | Toggle sidebar |
 | `:DiffNvimPreviewBranch` | Preview another branch's commits without checking it out |
 | `:DiffNvimNotes` | Toggle notes panel |
+| `:DiffNvimRefresh` | Re-fetch the panels |
+| `:DiffNvimLog` | Open the log file |
 
 ---
 
@@ -272,6 +304,40 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimRefTag` | Tag badge |
 | `DiffNvimNoteHeader` | `## Note` heading in notes panel |
 | `DiffNvimNoteText` | Note body text |
+| `DiffNvimActiveFile` | Panel row of the file shown in the diff view |
+| `DiffNvimActiveSign` | `▎` marker on that row |
+| `DiffNvimHeader` | Filename bar above the diff |
+| `DiffNvimSeparator` | Collapsed-context marker |
+
+---
+
+## Events
+
+The plugin fires `User` autocommands that other code can hook into:
+
+| Pattern | When | `data` |
+|---|---|---|
+| `DiffNvimViewChanged` | The diff view opened another file, or closed | `{ kind, path, staged, hash }`, or `{}` when closed |
+| `DiffNvimGitChanged` | The repository's index or HEAD changed | — |
+
+---
+
+## Troubleshooting
+
+Set `log_level = "debug"` and run `:DiffNvimLog`. The log records every git command with its duration, watcher events, and how long each diff took to load and render.
+
+---
+
+## Development
+
+Run the test suite with:
+
+```sh
+tests/run.sh            # all specs
+tests/run.sh interface  # specs whose file name contains "interface"
+```
+
+Each spec runs in its own headless Neovim and creates throwaway git repositories, so the tests need `nvim` and `git` on `$PATH` and nothing else.
 
 ---
 
