@@ -22,6 +22,7 @@ local function fresh_state()
     line_map = {},       -- lnr -> { type, key, section, file?, dir_key? }
     active = nil,        -- key of the file shown in the diff view
     gen = 0,
+    width = nil,    -- width of the last render
   }
 end
 
@@ -216,7 +217,8 @@ end
 function M.render()
   if not valid() then return end
   local prev = cursor_identity()
-  local lines, hl, map = build(vim.api.nvim_win_get_width(S.win))
+  S.width = vim.api.nvim_win_get_width(S.win)
+  local lines, hl, map = build(S.width)
   S.line_map = map
 
   vim.bo[S.buf].modifiable = true
@@ -228,6 +230,12 @@ function M.render()
   end
   restore_cursor(prev)
   apply_active()
+end
+
+--- Re-render after a resize, but only when the width changed: a height-only
+--- resize (a split elsewhere in the tab) leaves every line as it was.
+function M.on_resize()
+  if valid() and vim.api.nvim_win_get_width(S.win) ~= S.width then M.render() end
 end
 
 -- ---------------------------------------------------------------------------

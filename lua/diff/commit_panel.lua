@@ -29,6 +29,7 @@ local function fresh_state()
     header_pair = {}, -- lnr -> { l1, l2 } header lines of the commit owning lnr
     active = nil,
     gen = 0,
+    width = nil,    -- width of the last render
   }
 end
 
@@ -243,7 +244,8 @@ function M.render()
   local cur = S.line_map[row]
   local prev = { row = row, key = cur and cur.key, hash = cur and cur.commit and cur.commit.hash }
 
-  local lines, hl, map, header_pair = build(vim.api.nvim_win_get_width(S.win))
+  S.width = vim.api.nvim_win_get_width(S.win)
+  local lines, hl, map, header_pair = build(S.width)
   S.line_map, S.header_pair = map, header_pair
 
   vim.bo[S.buf].modifiable = true
@@ -256,6 +258,12 @@ function M.render()
   restore_cursor(prev)
   highlight_cursor_commit()
   apply_active()
+end
+
+--- Re-render after a resize, but only when the width changed: a height-only
+--- resize (a split elsewhere in the tab) leaves every line as it was.
+function M.on_resize()
+  if valid() and vim.api.nvim_win_get_width(S.win) ~= S.width then M.render() end
 end
 
 -- ---------------------------------------------------------------------------

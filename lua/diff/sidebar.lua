@@ -498,19 +498,20 @@ function M.setup_auto_refresh()
   vim.api.nvim_clear_autocmds({ group = aug })
 
   -- Panels are rendered to their window width: re-render from cached data
-  -- (no git) whenever a panel is resized, e.g. while dragging a separator.
+  -- (no git) when a panel's width changes, e.g. while dragging a separator.
+  -- VimResized carries no window list and may change every width.
   vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
     group = aug,
     callback = function()
       if not M.is_open() or M._sidebar_hidden then return end
       local resized = vim.v.event and vim.v.event.windows or {}
-      local all = #resized == 0
+      local affects_panels = #resized == 0
       for _, w in ipairs(resized) do
-        if w == M._file_win or w == M._commit_win then all = true end
+        if w == M._file_win or w == M._commit_win then affects_panels = true end
       end
-      if all then
-        file_panel.render()
-        commit_panel.render()
+      if affects_panels then
+        file_panel.on_resize()
+        commit_panel.on_resize()
       end
     end,
   })

@@ -229,6 +229,14 @@ return {
       local l = vim.api.nvim_buf_get_lines(sidebar._file_buf, panel_row("b%.lua") - 1, panel_row("b%.lua"), false)[1]
       return vim.fn.strdisplaywidth(l) == 55
     end, "badge should be right-aligned at the new width")
+    local renders = 0
+    local orig_render = fp.render
+    fp.render = function(...) renders = renders + 1; return orig_render(...) end
+    vim.api.nvim_win_set_height(sidebar._file_win, vim.api.nvim_win_get_height(sidebar._file_win) - 2)
+    vim.cmd("doautocmd WinResized")
+    fp.render = orig_render
+    H.eq(renders, 0, "a height-only resize must not re-render the panel")
+
     local marks = vim.api.nvim_buf_get_extmarks(sidebar._file_buf,
       vim.api.nvim_create_namespace("diff_nvim_file_panel_active"), 0, -1, {})
     H.eq(#marks, 1)
