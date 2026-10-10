@@ -8,6 +8,7 @@ local M = {}
 local file_panel   = require("diff.file_panel")
 local commit_panel = require("diff.commit_panel")
 local config       = require("diff.config")
+local git          = require("diff.git")
 local log          = require("diff.log").scope("sidebar")
 
 local uv = vim.uv or vim.loop
@@ -26,6 +27,8 @@ M._commit_buf     = nil
 M._main_win       = nil   -- main area (diff view host)
 M._repo_root      = nil
 M._git_dir        = nil
+M._home           = nil   -- {root, git_dir} the interface was opened in; _repo_root/_git_dir
+                          -- differ while another worktree's changes are shown
 M._saved_layout   = nil   -- tab + window to return to on close
 M._sidebar_hidden = false
 M._saved_mouse    = nil   -- previous global 'mouse' value (restored on close)
@@ -301,6 +304,7 @@ function M.open(info)
 
   local elapsed = require("diff.log").timer()
   M._repo_root, M._git_dir = info.root, info.git_dir
+  M._home = info
   M._sidebar_hidden = false
   local cfg = config.get()
 
@@ -479,8 +483,47 @@ end
 -- Branch preview
 -- ---------------------------------------------------------------------------
 
-function M.set_preview_branch(branch)
-  log.info("preview branch: %s", branch or "(live)")
+--- Switch the panels to another work tree: its changes and its commits.
+--- @param info {root: string, git_dir: string}
+local function switch_root(info)
+  if info.root == M._repo_root then return end
+  log.info("showing worktree %s", info.root)
+  M._repo_root, M._git_dir = info.root, info.git_dir
+  require("diff.diff_view").close()
+  file_panel.set_root(info.root)
+  commit_panel.set_root(info.root)
+  if require("diff.config").get().auto_refresh then start_watcher() end
+end
+
+local function same_path(a, b)
+  return (uv.fs_realpath(a) or a) == (uv.fs_realpath(b) or b)
+end
+
+--- @param branch   string|nil  Branch to preview; nil returns to live mode.
+--- @param worktree string|nil  Worktree the branch is checked out in. Its
+---   changes are shown live rather than the branch's history.
+function M.set_preview_branch(branch, worktree)
+  log.info("preview branch: %s (worktree %s)", branch or "(live)", worktree or "-")
+  if worktree and M._home and same_path(worktree, M._home.root) then
+    -- Back to the tree the interface was opened in.
+    M._preview_branch = nil
+    switch_root(M._home)
+    M.refresh()
+    return
+  end
+  if worktree then
+    git.get_repo_info(worktree, function(info, err)
+      if err or not info then
+        vim.notify("diff.nvim: cannot open worktree " .. worktree .. ": " .. tostring(err), vim.log.levels.WARN)
+        return
+      end
+      if not M.is_open() then return end
+      M._preview_branch = nil
+      switch_root(info)
+      M.refresh()
+    end)
+    return
+  end
   M._preview_branch = branch
   M.refresh()
 end

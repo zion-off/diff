@@ -328,6 +328,30 @@ return {
     H.eq(vim.api.nvim_buf_get_lines(S().bufs.new, 0, -1, false), { "return 13" })
   end },
 
+  { "selecting a branch checked out in another worktree shows that worktree's changes", function()
+    local wt = vim.fn.resolve(vim.fn.tempname())
+    H.git(repo, "worktree", "add", "-q", "-b", "wt-branch", wt)
+    H.write(wt, "only-in-wt.lua", "return 0\n")
+    local branches
+    require("diff.git").list_branches(repo, function(b) branches = b end)
+    H.wait(function() return branches end, "branches")
+    local entry
+    for _, b in ipairs(branches) do if b.name == "wt-branch" then entry = b end end
+    H.eq(entry and vim.fn.resolve(entry.worktree), wt, "worktree path missing from branch list")
+
+    sidebar.set_preview_branch("wt-branch", entry.worktree)
+    H.wait(function() return pcall(panel_row, "only%-in%-wt%.lua") end, "worktree changes in file panel")
+    H.eq(sidebar._preview_branch, nil)
+
+    -- Back to the tree the interface was opened in.
+    sidebar.set_preview_branch("main", repo)
+    H.wait(function()
+      return sidebar._repo_root == repo and not pcall(panel_row, "only%-in%-wt%.lua") and pcall(panel_row, "a%.lua")
+    end, "home changes: " .. sidebar._repo_root .. "\n"
+      .. table.concat(vim.api.nvim_buf_get_lines(sidebar._file_buf, 0, -1, false), "\n"))
+    H.git(repo, "worktree", "remove", "--force", wt)
+  end },
+
   { "closing tears everything down and restores user mappings", function()
     local tabs = #vim.api.nvim_list_tabpages()
     require("diff").toggle()

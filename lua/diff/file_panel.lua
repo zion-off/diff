@@ -320,6 +320,14 @@ local function stage(action)
   end)
 end
 
+--- Point the panel at another work tree (a linked worktree), dropping the data
+--- of the previous one.
+function M.set_root(root)
+  S.gen = S.gen + 1
+  S.root, S.status, S.active, S.preview = root, nil, nil, nil
+  S.collapsed_dirs = {}
+end
+
 --- Wire up keymaps for the panel buffer.
 function M.setup(buf, win, repo_root)
   local keep = S

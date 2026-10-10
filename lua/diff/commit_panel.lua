@@ -419,6 +419,14 @@ local function skippable(lnr)
   return meta and (meta.meta_line or meta.blank) or false
 end
 
+--- Point the panel at another work tree (a linked worktree), dropping the data
+--- of the previous one.
+function M.set_root(root)
+  S.gen = S.gen + 1
+  S.root, S.ref = root, nil
+  S.commits, S.expanded, S.details, S.loading, S.active = nil, {}, {}, {}, nil
+end
+
 function M.setup(buf, win, repo_root)
   local keep = S
   S = fresh_state()

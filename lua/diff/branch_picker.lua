@@ -3,7 +3,9 @@
 --- A zero-dependency floating-window list of branches with incremental
 --- substring filtering. Selecting a branch puts the interface into
 --- "preview mode" (commits sourced from that branch, working-tree file panel
---- emptied). Selecting the current branch returns to live mode.
+--- emptied). Selecting the current branch returns to live mode. A branch that
+--- is checked out in another worktree is passed on with that worktree's path,
+--- so its working-tree changes can be shown instead.
 local M = {}
 
 local git = require("diff.git")
@@ -22,7 +24,7 @@ local state = nil
 --   filtered   = table[],   -- currently displayed subset
 --   query      = string,    -- current filter text
 --   cursor     = integer,   -- 1-based index into `filtered`
---   on_select  = fun(branch|nil),  -- called with chosen branch (nil = current/live)
+--   on_select  = fun(branch|nil, worktree|nil),  -- called with chosen branch (nil = current/live)
 --   current    = string|nil,-- name of the real current branch
 -- }
 
@@ -75,7 +77,7 @@ local function render()
   else
     for i, b in ipairs(state.filtered) do
       local marker = (i == state.cursor) and "▶ " or "  "
-      local flag   = b.is_head and " (current)" or ""
+      local flag   = b.is_head and " (current)" or (b.worktree and " (worktree)" or "")
       local line   = marker .. b.name .. flag
       table.insert(lines, line)
 
@@ -134,7 +136,7 @@ local function accept()
   if sel.is_head then
     cb(nil)
   else
-    cb(sel.name)
+    cb(sel.name, sel.worktree)
   end
 end
 
@@ -189,8 +191,9 @@ end
 
 --- Open the branch picker.
 --- @param repo_root string
---- @param on_select fun(branch: string|nil)
----   Called with the chosen branch name, or nil to return to live mode.
+--- @param on_select fun(branch: string|nil, worktree: string|nil)
+---   Called with the chosen branch name (and the worktree it is checked out
+---   in, if any), or nil to return to live mode.
 function M.open(repo_root, on_select)
   M.close()
 

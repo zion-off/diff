@@ -116,11 +116,13 @@ end
 --- List local and remote branches, sorted by most-recent commit.
 --- @param root     string
 --- @param callback fun(branches: table[], err: string|nil)
----   Each entry: { name = string, is_head = boolean, is_remote = boolean }
+---   Each entry: { name = string, is_head = boolean, is_remote = boolean,
+---   worktree = string|nil }. `worktree` is the path of the worktree the branch
+---   is checked out in, when that is not the current one.
 function M.list_branches(root, callback)
   -- Fields: %(HEAD) "*" for current branch; full %(refname) to reliably tell
   -- local (refs/heads/…) from remote (refs/remotes/…); short name for display.
-  local fmt = "%(HEAD)" .. SEP .. "%(refname)" .. SEP .. "%(refname:short)"
+  local fmt = "%(HEAD)" .. SEP .. "%(refname)" .. SEP .. "%(refname:short)" .. SEP .. "%(worktreepath)"
   M.run(
     { "for-each-ref", "--sort=-committerdate", "--format=" .. fmt,
       "refs/heads", "refs/remotes" },
@@ -134,7 +136,7 @@ function M.list_branches(root, callback)
       local branches = {}
       for _, line in ipairs(lines) do
         if line ~= "" then
-          local head_mark, full, name = line:match("^(.-)" .. SEP .. "(.-)" .. SEP .. "(.+)$")
+          local head_mark, full, name, worktree = line:match("^(.-)" .. SEP .. "(.-)" .. SEP .. "(.-)" .. SEP .. "(.*)$")
           if name and name ~= "" then
             local is_remote = full:match("^refs/remotes/") ~= nil
             -- Skip the symbolic "origin/HEAD -> origin/main" pointer.
@@ -143,6 +145,7 @@ function M.list_branches(root, callback)
                 name      = name,
                 is_head   = (head_mark == "*"),
                 is_remote = is_remote,
+                worktree  = (head_mark ~= "*" and worktree ~= "") and worktree or nil,
               })
             end
           end

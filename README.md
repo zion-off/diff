@@ -243,6 +243,14 @@ The picker marks your current branch with `(current)`; selecting it returns to
 normal live mode. Preview mode is read-only and is cleared when the interface is
 closed.
 
+### Worktrees
+
+Branches checked out in another git worktree are marked `(worktree)`. Selecting
+one switches the interface to that worktree: the file panel shows its staged and
+unstaged changes (diffs, staging and hunk staging all act on it) and the commit
+panel its history. Pick the branch of the worktree you opened the interface in
+to switch back.
+
 ---
 
 ## Notes Storage Format
