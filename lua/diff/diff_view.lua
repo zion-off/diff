@@ -57,6 +57,7 @@ local function fresh_state()
     words = {},                 -- model row -> word ranges (lazy)
     lnum_width = 1,
     wrap_widths = {},           -- side -> pane width the wrap padding was computed for
+    synced_view = nil,          -- view both split panes were last left showing
     watcher = nil, watch_timer = nil,
     -- open_gen counts opens, refresh_gen counts in-place refreshes. They are
     -- separate so a background refresh (watcher, index change) can never
@@ -159,7 +160,7 @@ end
 local STATUSCOL = "%s%#LineNr#%{v:lua.require'diff.diff_view'.statuscol()} "
 
 --- Whether panes soft-wrap. Split panes wrap only when their rows can be
---- kept aligned; otherwise scrollbind would drift apart.
+--- kept aligned; otherwise the scroll sync would drift apart.
 local warned_no_align = false
 local function wraps(split)
   if not config.get().wrap then return false end
@@ -188,7 +189,7 @@ local function pane_opts(win, bound)
     cursorline     = true,
     list           = false,
     winbar         = "",
-    scrollbind     = bound,
+    scrollbind     = false, -- the scroll sync below keeps split panes together
     cursorbind     = bound,
     diff           = false,
   })
@@ -430,10 +431,10 @@ local function pad_to_height(side, r, row, target, width)
   height_with(lo)
 end
 
---- Keep wrapped split panes row-aligned. 'scrollbind' pairs buffer lines, so
---- both sides of a row must wrap onto the same number of screen lines: the
+--- Keep wrapped split panes row-aligned. The scroll sync pairs buffer lines,
+--- so both sides of a row must wrap onto the same number of screen lines: the
 --- shorter side is padded to the taller one's height. Padding inside the line
---- (rather than virtual lines below it) leaves no filler lines for 'scrollbind'
+--- (rather than virtual lines below it) leaves no filler lines for the panes
 --- to step through at different rates.
 local function align_wrapped()
   for _, side in ipairs(SIDES) do
@@ -558,6 +559,100 @@ local function capture_anchor(win)
   return { side = other, line = row[other] }, offset
 end
 
+-- Scroll sync. 'scrollbind' cannot keep split panes locked: it follows only
+-- the focused window, while the mouse wheel scrolls whichever pane is under
+-- the pointer, and it drops the part-way offset 'smoothscroll' leaves in a
+-- wrapped top line. Instead, whichever pane scrolled has its view copied onto
+-- the other. Rows wrap onto equal heights (see align_wrapped), so the same top
+-- line with the same number of its screen lines scrolled past shows the same
+-- rows in both panes.
+
+--- Screen lines of buffer row `r` (0-based) holding virtual columns before `vcol`.
+local function lines_before(win, r, vcol)
+  if vcol <= 0 or not CAN_ALIGN_WRAP then return 0 end
+  return vim.api.nvim_win_text_height(win, { start_row = r, end_row = r, end_vcol = vcol }).all
+end
+
+--- Virtual column where screen line `n` (0-based) of buffer row `r` begins.
+--- Searching the measurement keeps 'breakindent', 'showbreak' and padding exact.
+local function line_start_vcol(win, r, n)
+  if n <= 0 then return 0 end
+  local lo, hi = 0, 2 ^ 31
+  while hi - lo > 1 do
+    local mid = math.floor((lo + hi) / 2)
+    if lines_before(win, r, mid) <= n then lo = mid else hi = mid end
+  end
+  return lo
+end
+
+--- What `win` shows: its top line, how many screen lines of that line are
+--- scrolled past, and its horizontal scroll.
+local function pane_view(win)
+  local view = vim.api.nvim_win_call(win, vim.fn.winsaveview)
+  local skipcol = view.skipcol or 0
+  return {
+    topline = view.topline,
+    skipped = skipcol > 0 and lines_before(win, view.topline - 1, skipcol) or 0,
+    leftcol = view.leftcol,
+  }
+end
+
+local function same_view(a, b)
+  return a ~= nil and b ~= nil
+    and a.topline == b.topline and a.skipped == b.skipped and a.leftcol == b.leftcol
+end
+
+--- Line of `win`'s cursor and which of that line's screen lines it is on.
+local function cursor_spot(win)
+  local lnum = vim.api.nvim_win_get_cursor(win)[1]
+  local vcol = vim.api.nvim_win_call(win, function() return vim.fn.virtcol(".", true)[1] end)
+  return lnum, math.max(lines_before(win, lnum - 1, vcol) - 1, 0)
+end
+
+--- Show `view` in `win`, moving its cursor onto the screen line `lead`'s
+--- cursor is on. Left behind, it could fall outside the new view (the wheel
+--- over the other pane moves only that pane's cursor), and Neovim would
+--- scroll the window back to it.
+local function show_view(win, view, lead)
+  local restore = {
+    topline = view.topline,
+    skipcol = line_start_vcol(win, view.topline - 1, view.skipped),
+    leftcol = view.leftcol,
+  }
+  local lnum, line = cursor_spot(lead)
+  local own_lnum, own_line = cursor_spot(win)
+  if lnum ~= own_lnum or line ~= own_line then
+    local vcol = line_start_vcol(win, lnum - 1, line)
+    restore.lnum = lnum
+    restore.col = math.max(vim.fn.virtcol2col(win, lnum, vcol + 1) - 1, 0)
+  end
+  vim.api.nvim_win_call(win, function() vim.fn.winrestview(restore) end)
+end
+
+--- Bring the split panes back to one view. `lead` names the pane to follow;
+--- by default it is the one that left the synced view, or when both did (a
+--- cursorbind scroll alongside the focused pane's own) the focused one.
+local function sync_scroll(lead)
+  local old, new = S.panes.old, S.panes.new
+  if not (S.layout and valid_win(old) and valid_win(new)) then return end
+  local view = { [old] = pane_view(old), [new] = pane_view(new) }
+  if not same_view(view[old], view[new]) then
+    if not lead then
+      local old_moved = not same_view(view[old], S.synced_view)
+      local new_moved = not same_view(view[new], S.synced_view)
+      lead = new
+      if old_moved ~= new_moved then
+        lead = old_moved and old or new
+      elseif vim.api.nvim_get_current_win() == old then
+        lead = old
+      end
+    end
+    show_view(lead == old and new or old, view[lead], lead)
+    view[old], view[new] = view[lead], view[lead]
+  end
+  S.synced_view = view[new]
+end
+
 local function place_cursor(idx, offset)
   idx = math.max(1, math.min(idx, #S.layout.items))
   for _, win in pairs(S.panes) do
@@ -573,6 +668,7 @@ local function place_cursor(idx, offset)
       end)
     end
   end
+  sync_scroll(S.panes.new)
 end
 
 --- Render the current model into the panes and restore the cursor.
@@ -1139,25 +1235,8 @@ function M.close()
   end
 end
 
--- Horizontal scroll sync. 'scrollbind' handles the vertical direction
--- natively; horizontal binding would need the global 'scrollopt', so leftcol
--- is mirrored here instead.
 local aug = vim.api.nvim_create_augroup("DiffNvimView", { clear = true })
-vim.api.nvim_create_autocmd("WinScrolled", {
-  group = aug,
-  callback = function()
-    if not (valid_win(S.panes.old) and valid_win(S.panes.new)) then return end
-    for win, delta in pairs(vim.v.event) do
-      local id = tonumber(win)
-      if id and (id == S.panes.old or id == S.panes.new) and delta.leftcol ~= 0 then
-        local other = id == S.panes.old and S.panes.new or S.panes.old
-        local leftcol = vim.fn.getwininfo(id)[1].leftcol
-        vim.api.nvim_win_call(other, function() vim.fn.winrestview({ leftcol = leftcol }) end)
-        return
-      end
-    end
-  end,
-})
+vim.api.nvim_create_autocmd("WinScrolled", { group = aug, callback = function() sync_scroll() end })
 
 -- Wrapping depends on the pane width, so a width change re-aligns the rows.
 -- Height-only resizes (a split elsewhere in the tab) leave wrapping as it was.

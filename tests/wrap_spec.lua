@@ -36,6 +36,32 @@ local function assert_aligned()
   end
 end
 
+--- Screen lines of `win`'s top line scrolled out of view ('smoothscroll').
+local function skipped(win)
+  local view = vim.api.nvim_win_call(win, vim.fn.winsaveview)
+  if view.skipcol == 0 then return 0 end
+  return vim.api.nvim_win_text_height(win, { start_row = view.topline - 1, end_row = view.topline - 1, end_vcol = view.skipcol }).all
+end
+
+--- Both panes show the same rows on the same screen lines.
+local function assert_same_screen()
+  vim.cmd("redraw")
+  local old, new = pane("old"), pane("new")
+  local top = vim.fn.getwininfo(new)[1].topline
+  H.eq(vim.fn.getwininfo(old)[1].topline, top, "topline")
+  H.eq(skipped(old), skipped(new), "screen lines of topline " .. top .. " scrolled past")
+  for r = top + 1, math.min(top + 5, #S().layout.items) do
+    H.eq(vim.fn.screenpos(old, r, 1).row, vim.fn.screenpos(new, r, 1).row, "screen row of line " .. r)
+  end
+end
+
+--- Scroll the focused pane with `keys` (or run `fn`), then let the panes sync.
+--- WinScrolled fires from the main loop, which a test never returns to.
+local function scroll(keys)
+  if type(keys) == "function" then keys() else vim.cmd("normal! " .. vim.keycode(keys)) end
+  vim.api.nvim_exec_autocmds("WinScrolled", {})
+end
+
 local function pads(side)
   return vim.api.nvim_buf_get_extmarks(S().bufs[side], NS_WRAP, 0, -1, { details = true })
 end
@@ -68,15 +94,46 @@ return {
     local old, new = pane("old"), pane("new")
     vim.api.nvim_set_current_win(new)
     for _ = 1, 30 do
-      vim.cmd([[execute "normal! \<C-e>"]])
-      vim.cmd("redraw")
+      scroll("<C-e>")
       local top = vim.fn.getwininfo(new)[1].topline
       if top >= #S().layout.items then break end
-      H.eq(vim.fn.getwininfo(old)[1].topline, top, "topline")
-      H.eq(vim.fn.screenpos(old, top + 1, 1).row, vim.fn.screenpos(new, top + 1, 1).row,
-        "row below topline " .. top)
+      assert_same_screen()
     end
-    vim.cmd("normal! gg")
+    H.eq(vim.wo[old].scrollbind, false, "'scrollbind' would fight the sync")
+    scroll("gg")
+  end },
+
+  { "scrolling the unfocused pane (the mouse wheel) moves the focused one", function()
+    local old, new = pane("old"), pane("new")
+    vim.api.nvim_set_current_win(new)
+    scroll(function() vim.api.nvim_win_call(old, function() vim.fn.winrestview({ topline = 15, lnum = 16 }) end) end)
+    H.eq(vim.fn.getwininfo(old)[1].topline, 15, "the scrolled pane leads")
+    assert_same_screen()
+    -- Left on line 1, the focused pane's cursor would make Neovim scroll it back.
+    H.eq(vim.api.nvim_win_get_cursor(new)[1], 16, "focused cursor follows into view")
+    scroll("gg")
+  end },
+
+  { "'smoothscroll' part-way offsets match, even at unequal pane widths", function()
+    local old, new = pane("old"), pane("new")
+    vim.api.nvim_win_set_width(old, vim.api.nvim_win_get_width(new) + 3)
+    vim.cmd("doautocmd WinResized")
+    H.ok(S().wrap_widths.old ~= S().wrap_widths.new, "widths should differ")
+    vim.wo[old].smoothscroll, vim.wo[new].smoothscroll = true, true
+    vim.api.nvim_set_current_win(new)
+    local partway = 0
+    for _ = 1, 40 do
+      scroll("<C-e>")
+      if vim.fn.winsaveview().skipcol > 0 then partway = partway + 1 end
+      assert_same_screen()
+    end
+    H.ok(partway > 0, "should have stopped part-way through a wrapped row")
+    for _, keys in ipairs({ "<C-u>", "<C-d>", "<C-d>", "<C-u>", "<C-u>" }) do
+      scroll(keys)
+      assert_same_screen()
+    end
+    vim.wo[old].smoothscroll, vim.wo[new].smoothscroll = false, false
+    scroll("gg")
   end },
 
   { "a width change re-aligns the rows", function()

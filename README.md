@@ -17,7 +17,7 @@ A NeoVim plugin that replicates the Git source-control UX of VSCode's SCM sideba
 | **Word-level highlights** | Darker red/green marks the exact tokens that changed within a line |
 | **Filler lines** | Grey visual-only placeholders keep both panes aligned |
 | **Real line numbers** | The gutter shows file line numbers, not pane row numbers |
-| **Scroll sync** | Native `scrollbind` / `cursorbind` |
+| **Scroll sync** | Split panes stay locked together, whether you scroll with the keyboard, the mouse wheel over either pane, or with `smoothscroll` on |
 | **Line wrapping** | Long lines wrap at word boundaries, GitHub-style; the shorter side of each row is padded so both panes stay row-aligned (split view needs Neovim ≥ 0.10) |
 | **Gutter indicators** | Coloured `▍` strip marks changed regions |
 | **Hunk staging** | Stage or unstage the change under the cursor straight from the diff |
