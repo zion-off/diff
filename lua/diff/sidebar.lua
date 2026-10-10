@@ -102,10 +102,22 @@ end
 -- mapping of the key are untouched. The row is read after Neovim has
 -- processed the click.
 local LEFT_MOUSE = normalize_lhs("<LeftMouse>")
+local LEFT_DRAG  = normalize_lhs("<LeftDrag>")
+
+-- Set once the pointer moves with the button held. The click is read after
+-- the fact, so by then a drag (resizing the panels, say) may have carried the
+-- pointer onto a row; that row was never clicked.
+local dragged = false
 
 local function on_mouse_key(key)
+  if key == LEFT_DRAG then
+    dragged = true
+    return
+  end
   if key ~= LEFT_MOUSE then return end
+  dragged = false
   vim.schedule(function()
+    if dragged then return end
     local mp = vim.fn.getmousepos()
     local target
     if mp.winid == M._commit_win then
