@@ -95,7 +95,8 @@ end
 -- Mouse
 -- ---------------------------------------------------------------------------
 
--- A click on a panel row activates it, even when another window had focus.
+-- A click on a panel row activates it (and one on a diff view's "hidden lines"
+-- row expands it), even when another window had focus.
 -- vim.on_key observes the click without mapping <LeftMouse>, so Neovim's own
 -- handling (focus, cursor placement, separator drag-resize) and any user
 -- mapping of the key are untouched. The row is read after Neovim has
@@ -111,6 +112,10 @@ local function on_mouse_key(key)
       target = commit_panel
     elseif mp.winid == M._file_win then
       target = file_panel
+    end
+    if not target and mp.line >= 1 and mp.winid ~= 0 then
+      require("diff.diff_view").click(mp.winid, mp.line)
+      return
     end
     -- line is 0 on a separator or status line: leave those to Neovim.
     if target and mp.line >= 1 and is_valid_win(mp.winid) then

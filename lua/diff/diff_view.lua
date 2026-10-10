@@ -874,6 +874,19 @@ function M.expand(what)
   render(anchor, offset)
 end
 
+--- A mouse click on row `line` of pane `win`: a "hidden lines" separator
+--- expands one step, like `expand_context` on it.
+--- @return boolean handled
+function M.click(win, line)
+  if not (S.layout and side_of_win(win)) then return false end
+  local item = S.layout.items[line]
+  if not (item and item.sep) then return false end
+  vim.api.nvim_set_current_win(win)
+  pcall(vim.api.nvim_win_set_cursor, win, { line, 0 })
+  M.expand("cursor")
+  return true
+end
+
 local function block_at_cursor()
   local row = row_of_item(item_at(cursor_idx()))
   return row and row.block and S.model.blocks[row.block] or nil

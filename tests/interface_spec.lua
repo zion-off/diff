@@ -149,6 +149,21 @@ return {
     H.eq(#S().layout.items, items_before)
   end },
 
+  { "clicking a separator row expands it", function()
+    local win = pane("new")
+    vim.api.nvim_set_current_win(win)
+    local sep_idx = find_item(function(it, i) return it.sep and i > 5 end)
+    vim.api.nvim_win_set_cursor(win, { sep_idx, 0 })
+    local items_before = #S().layout.items
+    -- A click on an ordinary row does nothing.
+    H.eq(dv.click(win, find_item(function(it) return it.row end)), false)
+    H.eq(#S().layout.items, items_before)
+    H.eq(dv.click(win, sep_idx), true)
+    H.eq(#S().layout.items, items_before + 20, "one click reveals 10 lines at each edge")
+    press("zM")
+    H.eq(#S().layout.items, items_before)
+  end },
+
   { "]c and [c move between changes; j skips filler rows", function()
     vim.api.nvim_set_current_win(pane("new"))
     vim.api.nvim_win_set_cursor(0, { 1, 0 })
