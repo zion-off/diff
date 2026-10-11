@@ -358,6 +358,22 @@ local function on_mouse_move()
   end)
 end
 
+-- Whether pointer moves are wanted (mouse support on, interface open).
+local hover_enabled = false
+
+--- 'mousemoveevent' on only while the interface tab is current: elsewhere it
+--- would cost the user's other tabs (it can cut pending mappings short).
+local function sync_mousemove()
+  local want = hover_enabled and get_diff_tab() ~= nil and get_diff_tab() == vim.api.nvim_get_current_tabpage()
+  if want and M._saved_mousemove == nil then
+    M._saved_mousemove = vim.o.mousemoveevent
+    vim.o.mousemoveevent = true
+  elseif not want and M._saved_mousemove ~= nil then
+    vim.o.mousemoveevent = M._saved_mousemove
+    M._saved_mousemove = nil
+  end
+end
+
 local function on_mouse_key(key)
   if key == MOUSE_MOVE then
     on_mouse_move()
@@ -529,9 +545,14 @@ local function layout_two_panels()
 end
 
 --- Create the commit panel window below the file panel.
+--- Returns false when there is no room for it (E36).
 local function create_commit_panel()
   vim.api.nvim_set_current_win(M._file_win)
-  vim.cmd("rightbelow split")
+  local ok, err = pcall(vim.cmd, "rightbelow split")
+  if not ok then
+    log.warn("no room for the commit panel: %s", tostring(err))
+    return false
+  end
   M._commit_win = vim.api.nvim_get_current_win()
   M._commit_buf = make_panel_buf("diff://commit-panel")
   vim.api.nvim_win_set_buf(M._commit_win, M._commit_buf)
@@ -543,6 +564,7 @@ local function create_commit_panel()
   else
     layout_two_panels()
   end
+  return true
 end
 
 --- Remember the commit panel's height, to restore when it comes back.
@@ -551,9 +573,14 @@ local function save_commit_height()
 end
 
 --- Create the mode bar window above the file panel, at a fixed height.
+--- Skipped when there is no room for it: the panels matter more.
 local function create_mode_bar()
   vim.api.nvim_set_current_win(M._file_win)
-  vim.cmd("leftabove " .. mode_bar.HEIGHT .. " split")
+  local ok, err = pcall(vim.cmd, "leftabove " .. mode_bar.HEIGHT .. " split")
+  if not ok then
+    log.warn("no room for the mode bar: %s", tostring(err))
+    return
+  end
   M._bar_win = vim.api.nvim_get_current_win()
   M._bar_buf = make_panel_buf("diff://mode-bar")
   vim.api.nvim_win_set_buf(M._bar_win, M._bar_buf)
@@ -566,17 +593,23 @@ end
 
 --- Create the panel windows by splitting off `anchor`: the mode bar, the file
 --- panel, and below it the commit panel unless in branch mode.
+--- Returns false when there is no room; the caller rolls back.
 local function create_panels(anchor, width)
   local position = config.get().sidebar_position == "right" and "botright" or "topleft"
   vim.api.nvim_set_current_win(anchor)
-  vim.cmd(position .. " " .. width .. " vsplit")
+  local ok, err = pcall(vim.cmd, position .. " " .. width .. " vsplit")
+  if not ok then
+    log.warn("no room for the sidebar: %s", tostring(err))
+    return false
+  end
   M._file_win = vim.api.nvim_get_current_win()
   M._file_buf = make_panel_buf("diff://file-panel")
   vim.api.nvim_win_set_buf(M._file_win, M._file_buf)
   set_panel_win_opts(M._file_win)
   file_panel.setup(M._file_buf, M._file_win, M._repo_root)
   create_mode_bar()
-  if not M._branch_mode then create_commit_panel() end
+  if not M._branch_mode then return create_commit_panel() end
+  return true
 end
 
 --- Fill `win` with the "select a file" placeholder.
@@ -625,9 +658,7 @@ function M.open(info)
       M._saved_mouse = cur
       vim.o.mouse = "a"
     end
-    -- Deliver pointer moves (for hover) while the interface is open.
-    M._saved_mousemove = vim.o.mousemoveevent
-    vim.o.mousemoveevent = true
+    hover_enabled = true
     vim.on_key(on_mouse_key, mouse_ns)
   end
 
@@ -644,9 +675,14 @@ function M.open(info)
     pcall(vim.api.nvim_buf_delete, tabnew_buf, { force = true })
   end
 
-  create_panels(M._main_win, cfg.sidebar_width or 40)
-  layout_two_panels()
+  if not create_panels(M._main_win, cfg.sidebar_width or 40) then
+    vim.notify("diff.nvim: not enough room to open the interface", vim.log.levels.WARN)
+    M.close()
+    return
+  end
   vim.api.nvim_set_current_win(M._file_win)
+  -- Pointer moves are delivered while the interface tab is current.
+  sync_mousemove()
 
   if cfg.auto_refresh then start_watcher() end
 
@@ -663,10 +699,15 @@ function M.open(info)
 end
 
 --- Close the interface and return to where it was opened from.
-function M.close()
+--- @param opts table|nil  { tab_gone = true }: the interface tab was already
+---   closed (:tabclose); only clean up, without moving between tabs.
+local function close_interface(opts)
   restore_global_maps()
   vim.on_key(nil, mouse_ns)
+  hover_enabled = false
   refresh_epoch, refreshing, queued_scope = refresh_epoch + 1, 0, nil
+  hover_win, hover_line = nil, nil
+  destroy_edge()
   M._preview_branch = nil
   M._branch_mode = false
   pcall(function() require("diff.branch_picker").close() end)
@@ -681,7 +722,7 @@ function M.close()
 
   local diff_tab = get_diff_tab()
   local saved = M._saved_layout
-  if saved and vim.api.nvim_tabpage_is_valid(saved.tabpage) then
+  if not opts.tab_gone and saved and vim.api.nvim_tabpage_is_valid(saved.tabpage) then
     vim.api.nvim_set_current_tabpage(saved.tabpage)
     if is_valid_win(saved.win) then vim.api.nvim_set_current_win(saved.win) end
   end
@@ -696,13 +737,17 @@ function M.close()
     vim.o.mouse = M._saved_mouse
     M._saved_mouse = nil
   end
-  if M._saved_mousemove ~= nil then
-    vim.o.mousemoveevent = M._saved_mousemove
-    M._saved_mousemove = nil
-  end
-  hover_win, hover_line = nil, nil
-  destroy_edge()
+  sync_mousemove()
   log.info("closed interface")
+end
+
+function M.close(opts)
+  -- Closing the tab fires TabClosed, which must not close again.
+  if M._closing then return end
+  M._closing = true
+  local ok, err = pcall(close_interface, opts or {})
+  M._closing = false
+  if not ok then error(err, 0) end
 end
 
 function M.toggle(info)
@@ -751,7 +796,14 @@ function M.toggle_sidebar_panel()
   end
   if not target then return end
 
-  create_panels(target, (M._panel_sizes and M._panel_sizes.width) or cfg.sidebar_width or 40)
+  if not create_panels(target, (M._panel_sizes and M._panel_sizes.width) or cfg.sidebar_width or 40) then
+    for _, win in ipairs({ M._bar_win, M._file_win, M._commit_win }) do
+      if is_valid_win(win) then pcall(vim.api.nvim_win_close, win, true) end
+    end
+    clear_panel_state()
+    vim.notify("diff.nvim: not enough room for the sidebar", vim.log.levels.WARN)
+    return
+  end
   M._sidebar_hidden = false
   M.refresh()
   if is_valid_win(caller_win) then pcall(vim.api.nvim_set_current_win, caller_win) end
@@ -888,8 +940,11 @@ function M.toggle_branch_mode()
       save_commit_height()
       if is_valid_win(M._commit_win) then pcall(vim.api.nvim_win_close, M._commit_win, true) end
       M._commit_win, M._commit_buf = nil, nil
-    else
-      create_commit_panel()
+    elseif not create_commit_panel() then
+      M._branch_mode = true
+      vim.notify("diff.nvim: not enough room for the commit panel", vim.log.levels.WARN)
+      pcall(vim.api.nvim_set_current_win, caller_win)
+      return
     end
     if not is_valid_win(caller_win) then caller_win = M._file_win end
     pcall(vim.api.nvim_set_current_win, caller_win)
@@ -981,11 +1036,22 @@ function M.setup_auto_refresh()
   })
 
   -- Hover state belongs to the pointer: drop it when the pointer leaves the
-  -- interface.
+  -- interface, and deliver pointer moves only while its tab is current.
   vim.api.nvim_create_autocmd({ "FocusLost", "TabLeave" }, {
     group = aug,
     callback = function()
       if M.is_open() then clear_hover() end
+    end,
+  })
+  vim.api.nvim_create_autocmd("TabEnter", { group = aug, callback = function() sync_mousemove() end })
+  -- :tabclose of the interface tab: clean up what close() would have.
+  vim.api.nvim_create_autocmd("TabClosed", {
+    group = aug,
+    callback = function()
+      if M._main_win and not get_diff_tab() then
+        log.info("interface tab closed")
+        M.close({ tab_gone = true })
+      end
     end,
   })
 

@@ -92,10 +92,10 @@ require("diff").setup({
   -- toggles it. Hovering tints whatever a click would act on (rows, "hidden
   -- lines" separators) and highlights the window edge you can drag to resize
   -- (edges need Neovim 0.11+).
-  -- Only enables Neovim's 'mouse' and 'mousemoveevent' options while the
-  -- interface is open and restores them on close. With 'mousemoveevent' on,
-  -- moving the mouse in the middle of a key sequence (after <leader>, say)
-  -- cancels it.
+  -- Only enables Neovim's 'mouse' option while the interface is open, and
+  -- 'mousemoveevent' only while its tab is the current one, restoring both.
+  -- With 'mousemoveevent' on, moving the mouse in the middle of a key
+  -- sequence (after <leader>, say) cancels it.
   mouse = true,
 
   -- Lines of context around each change (nil shows whole files).

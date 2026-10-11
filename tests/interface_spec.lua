@@ -611,4 +611,37 @@ return {
       H.ok(not vim.api.nvim_buf_get_name(b):match("^diff://"), "leaked buffer " .. vim.api.nvim_buf_get_name(b))
     end
   end },
+
+  { "'mousemoveevent' is only on in the interface tab; :tabclose cleans up", function()
+    require("diff").open()
+    H.wait(function() return sidebar.is_open() end, "open")
+    H.eq(vim.o.mousemoveevent, true)
+    local diff_tab = vim.api.nvim_get_current_tabpage()
+    vim.cmd("tabnew")
+    H.eq(vim.o.mousemoveevent, false, "other tabs keep the user's setting")
+    vim.api.nvim_set_current_tabpage(diff_tab)
+    H.eq(vim.o.mousemoveevent, true)
+    vim.cmd("tabclose")
+    H.eq(sidebar.is_open(), false)
+    H.eq(vim.o.mousemoveevent, false)
+    H.eq(vim.fn.maparg("<leader>gb", "n", false, true).desc, "user mapping")
+    vim.cmd("tabonly")
+  end },
+
+  { "a terminal too small for the interface leaves nothing behind", function()
+    local lines = vim.o.lines
+    vim.o.lines = 6
+    local tabs = #vim.api.nvim_list_tabpages()
+    local notified
+    local notify = vim.notify
+    vim.notify = function(msg) notified = msg end
+    require("diff").open()
+    vim.wait(200)
+    vim.notify = notify
+    vim.o.lines = lines
+    H.ok(notified and notified:match("not enough room"), tostring(notified))
+    H.eq(#vim.api.nvim_list_tabpages(), tabs)
+    H.eq(sidebar.is_open(), false)
+    H.eq(vim.o.mousemoveevent, false)
+  end },
 }
