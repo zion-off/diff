@@ -1,5 +1,7 @@
 --- diff.nvim — interface layout: a dedicated tab with the sidebar panels
 --- (file status on top, commits below) and a main area for the diff view.
+--- In branch mode the file panel lists the branch's changes and takes the
+--- whole sidebar; the commit panel is closed.
 ---
 --- Also owns what is shared across the interface: the git-directory watcher,
 --- refresh scheduling, mouse activation and the interface-scoped keymaps.
@@ -34,6 +36,7 @@ M._sidebar_hidden = false
 M._saved_mouse    = nil   -- previous global 'mouse' value (restored on close)
 M._panel_sizes    = nil   -- {width, file_height} kept across a hide/show toggle
 M._preview_branch = nil   -- when set, panels source data from this branch
+M._branch_mode    = false -- file panel shows the branch's changes; no commit panel
 
 local watcher, watch_timer, refresh_timer
 local mouse_ns = vim.api.nvim_create_namespace("diff_nvim_mouse")
@@ -222,7 +225,7 @@ function M.is_open()
   if M._sidebar_hidden then
     return is_valid_win(M._main_win)
   end
-  return is_valid_win(M._file_win) and is_valid_win(M._commit_win)
+  return is_valid_win(M._file_win) and (M._branch_mode or is_valid_win(M._commit_win))
 end
 
 --- A scratch buffer for a sidebar panel, reusing one of the same name (it
@@ -266,7 +269,19 @@ local function layout_two_panels()
   pcall(vim.api.nvim_win_set_height, M._file_win, file_h)
 end
 
---- Create the two panel windows by splitting off `anchor`.
+--- Create the commit panel window below the file panel.
+local function create_commit_panel()
+  vim.api.nvim_set_current_win(M._file_win)
+  vim.cmd("rightbelow split")
+  M._commit_win = vim.api.nvim_get_current_win()
+  M._commit_buf = make_panel_buf("diff://commit-panel")
+  vim.api.nvim_win_set_buf(M._commit_win, M._commit_buf)
+  set_panel_win_opts(M._commit_win)
+  commit_panel.setup(M._commit_buf, M._commit_win, M._repo_root)
+end
+
+--- Create the panel windows by splitting off `anchor`: the file panel, and
+--- below it the commit panel unless in branch mode.
 local function create_panels(anchor, width)
   local position = config.get().sidebar_position == "right" and "botright" or "topleft"
   vim.api.nvim_set_current_win(anchor)
@@ -274,16 +289,9 @@ local function create_panels(anchor, width)
   M._file_win = vim.api.nvim_get_current_win()
   M._file_buf = make_panel_buf("diff://file-panel")
   vim.api.nvim_win_set_buf(M._file_win, M._file_buf)
-
-  vim.cmd("rightbelow split")
-  M._commit_win = vim.api.nvim_get_current_win()
-  M._commit_buf = make_panel_buf("diff://commit-panel")
-  vim.api.nvim_win_set_buf(M._commit_win, M._commit_buf)
-
   set_panel_win_opts(M._file_win)
-  set_panel_win_opts(M._commit_win)
   file_panel.setup(M._file_buf, M._file_win, M._repo_root)
-  commit_panel.setup(M._commit_buf, M._commit_win, M._repo_root)
+  if not M._branch_mode then create_commit_panel() end
 end
 
 --- Fill `win` with the "select a file" placeholder.
@@ -360,6 +368,7 @@ function M.open(info)
   nmap(km.copy_notes_path, function() require("diff.annotations").copy_notes_path() end, "Copy notes path")
   nmap(km.toggle_notes, function() require("diff.annotations").toggle_notes(M._repo_root) end, "Toggle notes panel")
   nmap(km.preview_branch, M.pick_preview_branch, "Preview branch")
+  nmap(km.branch_changes, M.toggle_branch_mode, "Toggle branch changes")
 
   M.refresh()
   log.info("opened interface for %s (git dir %s) in %.1f ms", info.root, info.git_dir, elapsed())
@@ -370,6 +379,7 @@ function M.close()
   restore_global_maps()
   vim.on_key(nil, mouse_ns)
   M._preview_branch = nil
+  M._branch_mode = false
   pcall(function() require("diff.branch_picker").close() end)
   stop_watcher()
   stop_timer(refresh_timer)
@@ -418,7 +428,8 @@ function M.toggle_sidebar_panel()
     if is_valid_win(M._file_win) then
       M._panel_sizes = {
         width       = vim.api.nvim_win_get_width(M._file_win),
-        file_height = vim.api.nvim_win_get_height(M._file_win),
+        -- In branch mode the file panel is the whole sidebar: no split to keep.
+        file_height = not M._branch_mode and vim.api.nvim_win_get_height(M._file_win) or nil,
       }
     end
     for _, win in ipairs({ M._file_win, M._commit_win }) do
@@ -443,7 +454,9 @@ function M.toggle_sidebar_panel()
   if not target then return end
 
   create_panels(target, (M._panel_sizes and M._panel_sizes.width) or cfg.sidebar_width or 40)
-  if M._panel_sizes and M._panel_sizes.file_height then
+  if M._branch_mode then
+    -- The file panel is the whole sidebar.
+  elseif M._panel_sizes and M._panel_sizes.file_height then
     pcall(vim.api.nvim_win_set_height, M._file_win, M._panel_sizes.file_height)
   else
     layout_two_panels()
@@ -492,8 +505,33 @@ end
 --- Re-fetch git data for the visible panels.
 function M.refresh()
   if not M.is_open() or M._sidebar_hidden or not M._repo_root then return end
-  file_panel.refresh(M._preview_branch)
-  commit_panel.refresh(M._preview_branch)
+  file_panel.refresh(M._preview_branch, M._branch_mode)
+  if not M._branch_mode then commit_panel.refresh(M._preview_branch) end
+end
+
+--- Switch the file panel between the working-tree status and everything the
+--- branch (the previewed one, else HEAD) changed since its merge base with
+--- the base branch. The commit panel is closed while the branch's changes
+--- are shown.
+function M.toggle_branch_mode()
+  if not M.is_open() then return end
+  M._branch_mode = not M._branch_mode
+  log.info("branch mode %s", M._branch_mode and "on" or "off")
+  if M._branch_mode then file_panel.forget_base() end
+  if not M._sidebar_hidden then
+    local caller_win = vim.api.nvim_get_current_win()
+    if M._branch_mode then
+      commit_panel.close_tooltip()
+      if is_valid_win(M._commit_win) then pcall(vim.api.nvim_win_close, M._commit_win, true) end
+      M._commit_win, M._commit_buf = nil, nil
+    else
+      create_commit_panel()
+      layout_two_panels()
+    end
+    if not is_valid_win(caller_win) then caller_win = M._file_win end
+    pcall(vim.api.nvim_set_current_win, caller_win)
+  end
+  M.refresh()
 end
 
 -- ---------------------------------------------------------------------------

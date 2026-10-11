@@ -367,6 +367,43 @@ return {
     H.git(repo, "worktree", "remove", "--force", wt)
   end },
 
+  { "branch mode lists the branch's changes in a full-height panel, without the commit panel", function()
+    local base = vim.trim(H.git(repo, "rev-parse", "--abbrev-ref", "HEAD"))
+    H.git(repo, "checkout", "-q", "-b", "topic")
+    H.write(repo, "topic.lua", "return 'topic'\n")
+    H.git(repo, "add", "topic.lua")
+    H.git(repo, "commit", "-qm", "topic work", "--", "topic.lua")
+
+    local sidebar_h = vim.api.nvim_win_get_height(sidebar._file_win)
+      + vim.api.nvim_win_get_height(sidebar._commit_win) + 1
+    vim.api.nvim_set_current_win(sidebar._file_win)
+    press("<leader>gB")
+    H.wait(function() return pcall(panel_row, "topic%.lua") end, "branch changes listed")
+    H.ok(panel_row("Branch Changes vs " .. base .. " %(1%)"))
+    H.ok(not pcall(panel_row, "Staged"), "status sections should be gone")
+    H.eq(sidebar._commit_win, nil)
+    H.eq(vim.api.nvim_win_get_height(sidebar._file_win), sidebar_h)
+
+    open_file("topic%.lua", "topic.lua")
+    H.eq(S().source.kind, "range")
+    H.eq(vim.api.nvim_buf_get_lines(S().bufs.new, 0, -1, false), { "return 'topic'" })
+    H.ok(vim.api.nvim_buf_get_lines(S().header_buf, 0, 1, false)[1]:match("vs " .. base))
+
+    -- Previewing a branch shows that branch's changes: none, for the base itself.
+    sidebar.set_preview_branch(base)
+    H.wait(function() return pcall(panel_row, "Branch Changes vs .*%(0%)") end, "preview's branch changes")
+    sidebar.set_preview_branch(nil)
+    H.wait(function() return pcall(panel_row, "topic%.lua") end, "HEAD's branch changes again")
+
+    press("<leader>gB")
+    H.wait(function() return pcall(panel_row, "Staged") end, "status back")
+    H.ok(vim.api.nvim_win_is_valid(sidebar._commit_win), "commit panel back")
+    H.wait(function()
+      return vim.api.nvim_buf_get_lines(sidebar._commit_buf, 0, 1, false)[1]:match("topic work")
+    end, "commit panel filled")
+    H.git(repo, "checkout", "-q", base)
+  end },
+
   { "closing tears everything down and restores user mappings", function()
     local tabs = #vim.api.nvim_list_tabpages()
     require("diff").toggle()

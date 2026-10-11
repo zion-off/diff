@@ -8,6 +8,7 @@ M.defaults = {
   wrap = true, -- soft-wrap long lines in the diff panes, keeping split panes row-aligned
   notes_path = nil, -- nil = XDG default (ignored; kept for backward compat)
   auto_refresh = true,
+  base_branch = nil, -- branch mode compares against this; nil = origin/HEAD, else main or master
   mouse = true, -- enable mouse interactivity in the sidebar (clicks open/toggle)
   log_level = "warn", -- trace | debug | info | warn | error | off  (see :DiffNvimLog)
   keymaps = {
@@ -28,6 +29,7 @@ M.defaults = {
     leave_note           = "<leader>n",
     toggle_notes         = "<leader>N",
     preview_branch       = "<leader>gb",
+    branch_changes       = "<leader>gB",
     expand_context       = "zo",
     expand_all           = "zR",
     collapse_all         = "zM",

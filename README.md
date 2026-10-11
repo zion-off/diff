@@ -10,6 +10,7 @@ A NeoVim plugin that replicates the Git source-control UX of VSCode's SCM sideba
 |---|---|
 | **File Status Panel** | Staged & unstaged changes with collapsible sections, status badges, right-aligned |
 | **Commit Graph Panel** | Recent commit history with `HEAD`, branch, remote, and tag ref badges |
+| **Branch changes** | Press `<leader>gB` to see everything the branch changed since it left `main`, like a pull request's "Files changed" tab |
 | **Branch preview** | Browse another branch's commits without checking it out — pick from a floating list with `<leader>gb` |
 | **Split Diff View** | Side-by-side old/new diff computed in-process with Neovim's built-in xdiff — no `git diff` subprocess |
 | **Accurate syntax highlighting** | Tree-sitter parses each whole file once (asynchronously on 0.11+), so collapsed context never breaks highlighting |
@@ -81,6 +82,10 @@ require("diff").setup({
   -- Also watches .git/index via libuv fs_event for immediate refresh.
   auto_refresh = true,
 
+  -- Branch mode compares the branch against this branch (default: nil, which
+  -- uses the remote's default branch origin/HEAD, else a local main or master).
+  base_branch = nil,
+
   -- Mouse interactivity in the sidebar (default: true). Clicking a file opens
   -- its diff; clicking a commit expands/collapses it; clicking a section header
   -- toggles it. Only enables Neovim's 'mouse' option while the interface is
@@ -120,6 +125,7 @@ require("diff").setup({
     leave_note           = "<leader>n",
     toggle_notes         = "<leader>N",
     preview_branch       = "<leader>gb",
+    branch_changes       = "<leader>gB",
     expand_context       = "zo",
     expand_all           = "zR",
     collapse_all         = "zM",
@@ -151,6 +157,7 @@ require("diff").setup({
 | `<leader>gy` | Copy session notes file path to clipboard |
 | `<leader>N` | Toggle notes panel |
 | `<leader>gb` | Preview another branch (open branch picker) |
+| `<leader>gB` | Toggle branch mode (see [Branch Changes](#branch-changes)) |
 
 ### File Status Panel
 
@@ -225,6 +232,23 @@ Hunk staging uses zero-context patches. A change directly next to a final line w
 | `:DiffNvimLog` | Open the log file |
 
 ---
+
+## Branch Changes
+
+Press `<leader>gB` to switch the file panel into **branch mode**: instead of
+staged and unstaged changes it lists every file the branch changed since its
+merge base with the base branch — the same set a pull request's "Files changed"
+tab shows (`git diff <base>...HEAD`). Commits that landed on the base branch
+after the branch left it are not included, and uncommitted changes aren't either.
+The commit panel is closed and the file panel takes the whole sidebar. Press
+`<leader>gB` again to go back.
+
+Each file opens as one diff from the merge base to the branch's latest version.
+In preview mode, branch mode shows the previewed branch's changes.
+
+The base is the remote's default branch (`origin/HEAD`), falling back to a local
+`main` or `master`. Set `base_branch` to use a different one. It is looked up
+each time you enter branch mode.
 
 ## Branch Preview
 

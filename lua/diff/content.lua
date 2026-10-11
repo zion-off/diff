@@ -3,6 +3,8 @@
 --- A "source" describes what is being diffed:
 ---   { kind = "worktree", path, old_path?, status, staged }
 ---   { kind = "commit",   path, old_path?, status, hash }
+---   { kind = "range",    path, old_path?, status, old_blob, new_blob, base }
+---     (a branch's changes since its merge base with `base`)
 --- Both sides are returned as { lines = string[], eol = boolean }, read the
 --- same way (binary mode, CRs and trailing blank lines kept) so identical
 --- content always compares equal.
@@ -44,13 +46,17 @@ function M.looks_binary(content)
   return false
 end
 
-local function from_ref(root, ref, path, cb)
-  git.get_file_at_ref(root, ref, path, function(content, err)
+local function from_object(root, object, cb)
+  git.get_object(root, object, function(content, err)
     if not content then
-      log.debug("no content for %s:%s (%s)", ref, path, err or "?")
+      log.debug("no content for %s (%s)", object, err or "?")
     end
     cb(content or EMPTY)
   end)
+end
+
+local function from_ref(root, ref, path, cb)
+  from_object(root, ref .. ":" .. path, cb)
 end
 
 local function from_worktree(root, path, cb)
@@ -89,6 +95,9 @@ function M.load(root, source, cb)
   if source.kind == "commit" then
     if status == "added" then empty(set_old) else from_ref(root, source.hash .. "^", old_path, set_old) end
     if status == "deleted" then empty(set_new) else from_ref(root, source.hash, source.path, set_new) end
+  elseif source.kind == "range" then
+    if status == "added" then empty(set_old) else from_object(root, source.old_blob, set_old) end
+    if status == "deleted" then empty(set_new) else from_object(root, source.new_blob, set_new) end
   elseif source.staged then
     if status == "added" then empty(set_old) else from_ref(root, "HEAD", old_path, set_old) end
     if status == "deleted" then empty(set_new) else from_ref(root, "", source.path, set_new) end

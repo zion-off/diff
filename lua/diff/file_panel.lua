@@ -1,7 +1,9 @@
---- diff.nvim — file status panel (staged / unstaged changes as trees).
+--- diff.nvim — file status panel. Normally the staged / unstaged changes as
+--- trees; in branch mode, every change the branch made since its merge base
+--- with the base branch, as a pull request's "Files changed" tab shows them.
 ---
---- refresh() fetches git data into S.status; render() draws S.status into the
---- buffer. Collapsing, resizing and re-marking the active file only render,
+--- refresh() fetches git data into S.status and S.branch; render() draws them
+--- into the buffer. Collapsing, resizing and re-marking the active file only render,
 --- so they never wait on git.
 local M = {}
 
@@ -17,7 +19,10 @@ local function fresh_state()
     buf = nil, win = nil, root = nil,
     status  = nil,  -- { staged = file[], unstaged = file[] } from the last refresh
     preview = nil,  -- branch name while previewing
-    collapsed = { staged = false, unstaged = false },
+    branch_mode = false,
+    branch  = nil,  -- { base, head, files|nil, error|nil } changes since the merge base with the base branch
+    base    = nil,  -- { ref, name } of the base branch; false = none found, nil = not looked up
+    collapsed = { staged = false, unstaged = false, branch = false },
     collapsed_dirs = {}, -- "<section>:<dir path>" -> true
     line_map = {},       -- lnr -> { type, key, section, file?, dir_key? }
     active = nil,        -- key of the file shown in the diff view
@@ -47,11 +52,18 @@ local STATUS_HL = {
 local function file_hl(file, section)
   if file.status == "deleted" then return "DiffNvimDeletedFile" end
   if section == "staged" then return "DiffNvimStagedFile" end
+  if section == "branch" then return "DiffNvimCommitFileEntry" end
   return "DiffNvimUnstagedFile"
 end
 
 local function file_key(section, path)
   return "file:" .. section .. ":" .. path
+end
+
+--- Files listed in `section`: "staged", "unstaged" or "branch".
+local function section_files(section)
+  if section == "branch" then return S.branch and S.branch.files or {} end
+  return S.status and S.status[section] or {}
 end
 
 local function valid()
@@ -91,12 +103,6 @@ local function build(width)
     table.insert(lines, line)
     map[#lines] = meta
     return #lines - 1
-  end
-
-  if S.preview then
-    push(util.trunc("Preview: " .. S.preview, math.max(8, width)), { type = "preview_header", key = "preview" })
-    table.insert(hl, { 0, "DiffNvimSectionHeader", 0, -1 })
-    return lines, hl, map
   end
 
   local render_node
@@ -141,7 +147,7 @@ local function build(width)
   end
 
   local function render_section(section, label)
-    local files = S.status and S.status[section] or {}
+    local files = section_files(section)
     local r = push((S.collapsed[section] and "▶ " or "▼ ") .. label .. " (" .. #files .. ")",
       { type = "header", key = "header:" .. section, section = section })
     table.insert(hl, { r, "DiffNvimSectionHeader", 0, -1 })
@@ -151,6 +157,28 @@ local function build(width)
     end
   end
 
+  if S.preview then
+    push(util.trunc("Preview: " .. S.preview, math.max(8, width)), { type = "preview_header", key = "preview" })
+    table.insert(hl, { #lines - 1, "DiffNvimSectionHeader", 0, -1 })
+    if not S.branch_mode then return lines, hl, map end
+    push("", { type = "blank" })
+  end
+  if S.branch_mode then
+    local function note(text)
+      push(util.trunc("  " .. text, math.max(8, width)), { type = "blank" })
+      table.insert(hl, { #lines - 1, "Comment", 0, -1 })
+    end
+    if S.branch and S.branch.files then
+      render_section("branch", "Branch Changes vs " .. S.branch.base)
+    elseif S.branch then
+      note("Cannot compare with " .. S.branch.base .. ":")
+      note(S.branch.error or "?")
+    elseif S.base == false then
+      note("No base branch (origin/HEAD, main or")
+      note("master); set base_branch in setup().")
+    end
+    return lines, hl, map
+  end
   render_section("staged", "Staged Changes")
   push("", { type = "blank" })
   render_section("unstaged", "Changes")
@@ -249,11 +277,17 @@ local function ordered_files(section)
       if child.file then table.insert(out, child.file) else walk(child) end
     end
   end
-  walk(util.build_file_tree(S.status and S.status[section] or {}))
+  walk(util.build_file_tree(section_files(section)))
   return out
 end
 
 local function to_source(file, section)
+  if section == "branch" then
+    return {
+      kind = "range", path = file.path, old_path = file.old_path, status = file.status,
+      old_blob = file.old_blob, new_blob = file.new_blob, base = S.branch.base,
+    }
+  end
   return {
     kind = "worktree", path = file.path, old_path = file.old_path,
     status = file.status, staged = section == "staged",
@@ -262,7 +296,7 @@ end
 
 --- Next/previous file in display order within the same section.
 function M.navigator(source, dir)
-  local section = source.staged and "staged" or "unstaged"
+  local section = source.kind == "range" and "branch" or source.staged and "staged" or "unstaged"
   local files = ordered_files(section)
   for i, f in ipairs(files) do
     if f.path == source.path then
@@ -295,7 +329,13 @@ end
 --- Mark the file shown in the diff view (data from DiffNvimViewChanged).
 function M.mark_active(data)
   data = data or {}
-  S.active = data.kind == "worktree" and file_key(data.staged and "staged" or "unstaged", data.path) or nil
+  if data.kind == "worktree" then
+    S.active = file_key(data.staged and "staged" or "unstaged", data.path)
+  elseif data.kind == "range" then
+    S.active = file_key("branch", data.path)
+  else
+    S.active = nil
+  end
   apply_active()
 end
 
@@ -324,7 +364,7 @@ end
 --- of the previous one.
 function M.set_root(root)
   S.gen = S.gen + 1
-  S.root, S.status, S.active, S.preview = root, nil, nil, nil
+  S.root, S.status, S.active, S.preview, S.branch, S.base = root, nil, nil, nil, nil, nil
   S.collapsed_dirs = {}
 end
 
@@ -336,6 +376,7 @@ function M.setup(buf, win, repo_root)
   -- Keep fetched data and collapse state across a sidebar hide/show.
   if keep.root == repo_root then
     S.status, S.collapsed, S.collapsed_dirs, S.active = keep.status, keep.collapsed, keep.collapsed_dirs, keep.active
+    S.branch, S.base, S.branch_mode = keep.branch, keep.base, keep.branch_mode
   end
 
   local km = require("diff.config").get().keymaps or {}
@@ -382,15 +423,61 @@ function M.setup(buf, win, repo_root)
 
   map("q", function() require("diff.sidebar").close() end, "Close")
 
-  if S.status or S.preview then M.render() end
+  if S.status or S.preview or S.branch then M.render() end
 end
 
---- Fetch status and diffstat (in parallel) and re-render.
---- @param preview string|nil  Branch being previewed; no working-tree status then.
-function M.refresh(preview)
+--- Look the base branch up again on the next branch-mode refresh.
+function M.forget_base()
+  S.base = nil
+end
+
+--- Fetch what `head` changed since its merge base with the base branch.
+--- The base is looked up once per entry into branch mode.
+--- @param cb fun(branch: {base: string, head: string, files: table[]|nil, error: string|nil}|nil)
+---   nil when there is no base branch.
+local function fetch_branch(head, cb)
+  local root = S.root
+  local function with_base(base)
+    if not base then cb(nil) return end
+    git.get_branch_changes(root, base.ref, head, function(files, err)
+      if err then log.debug("branch changes for %s: %s", head, err) end
+      cb({ base = base.name, head = head, files = files, error = err })
+    end)
+  end
+  if S.base ~= nil then return with_base(S.base or nil) end
+  local configured = require("diff.config").get().base_branch
+  if configured then
+    S.base = { ref = configured, name = configured }
+    return with_base(S.base)
+  end
+  git.get_default_base(root, function(base)
+    log.debug("base branch: %s", base and base.ref or "(none)")
+    if root == S.root then S.base = base or false end
+    with_base(base)
+  end)
+end
+
+--- Fetch what the current mode shows and re-render: status and diffstat (in
+--- parallel), or in branch mode the branch's changes.
+--- @param preview     string|nil  Branch being previewed; no working-tree status
+---   then, and branch mode shows that branch's changes rather than HEAD's.
+--- @param branch_mode boolean|nil
+function M.refresh(preview, branch_mode)
   S.gen = S.gen + 1
   local gen = S.gen
-  S.preview = preview
+  local head = preview or "HEAD"
+  -- Another branch's changes must not linger while this one's load.
+  if S.branch and S.branch.head ~= head then S.branch = nil end
+  S.preview, S.branch_mode = preview, branch_mode or false
+  if S.branch_mode then
+    M.render()
+    fetch_branch(head, function(branch)
+      if gen ~= S.gen then return end
+      S.branch = branch
+      M.render()
+    end)
+    return
+  end
   if preview then
     S.status = nil
     M.render()

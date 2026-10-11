@@ -313,7 +313,13 @@ end
 --- against the working tree read in binary mode.
 --- @param callback fun(content: {lines: string[], eol: boolean}|nil, err: string|nil)
 function M.get_file_at_ref(root, ref, path, callback)
-  M.run({ "show", ref .. ":" .. path }, root, function(lines, stderr, code)
+  M.get_object(root, ref .. ":" .. path, callback)
+end
+
+--- Like get_file_at_ref, for any object name git accepts (a blob hash, say).
+--- @param callback fun(content: {lines: string[], eol: boolean}|nil, err: string|nil)
+function M.get_object(root, object, callback)
+  M.run({ "show", object }, root, function(lines, stderr, code)
     if code ~= 0 then
       callback(nil, stderr)
       return
@@ -390,22 +396,33 @@ end
 -- Commit details (message + changed files + per-file stats)
 -- ---------------------------------------------------------------------------
 
---- Parse `--numstat -z` output. jobstart reports NUL bytes as "\n" inside
---- each delivered line, so the records are recovered by splitting on "\n".
+--- Split `-z` output into its NUL-separated fields. jobstart reports NUL
+--- bytes as "\n" inside each delivered line, so the fields are recovered by
+--- splitting on "\n".
+local function z_fields(lines)
+  return vim.split(table.concat(lines, "\n"), "\n", { plain = true })
+end
+
+--- Read one `--numstat -z` record starting at fields[i] into `map`.
 --- Rename records are "a\td\t" followed by separate old and new path fields.
+--- @return integer|nil  index of the next record, nil when fields[i] is not one
+local function read_numstat_z(fields, i, map)
+  local a, d, path = fields[i]:match("^(%S+)\t(%S+)\t(.*)$")
+  if not a then return nil end
+  if path == "" then
+    path = fields[i + 2] -- rename: skip the old path, keep the new one
+    i = i + 2
+  end
+  if path and path ~= "" then map[path] = numstat_entry(a, d) end
+  return i + 1
+end
+
+--- Parse `--numstat -z` output.
 local function parse_numstat_z(lines)
-  local fields = vim.split(table.concat(lines, "\n"), "\n", { plain = true })
+  local fields = z_fields(lines)
   local map, i = {}, 1
   while i <= #fields do
-    local a, d, path = fields[i]:match("^(%S+)\t(%S+)\t(.*)$")
-    if a then
-      if path == "" then
-        path = fields[i + 2] -- rename: skip the old path, keep the new one
-        i = i + 2
-      end
-      if path and path ~= "" then map[path] = numstat_entry(a, d) end
-    end
-    i = i + 1
+    i = read_numstat_z(fields, i, map) or i + 1
   end
   return map
 end
@@ -484,6 +501,72 @@ function M.get_commit_details(root, hash, callback)
       if code == 0 then stats = parse_numstat_z(lines) end
       done()
     end)
+end
+
+-- ---------------------------------------------------------------------------
+-- Branch changes (everything a branch changed since it left its base)
+-- ---------------------------------------------------------------------------
+
+--- Find the branch a branch's changes are measured against: the remote's
+--- default branch (origin/HEAD), else a local main or master.
+--- @param callback fun(base: {ref: string, name: string}|nil)
+---   ref is the full refname (unambiguous in commands), name the short one.
+function M.get_default_base(root, callback)
+  local candidates = { "refs/remotes/origin/HEAD", "refs/heads/main", "refs/heads/master" }
+  local args = { "for-each-ref", "--format=%(refname)" .. SEP .. "%(symref)" }
+  M.run(vim.list_extend(args, candidates), root, function(lines, _, code)
+    local found = {}
+    for _, line in ipairs(code == 0 and lines or {}) do
+      local ref, symref = line:match("^(.-)" .. SEP .. "(.*)$")
+      if ref then found[ref] = symref ~= "" and symref or ref end
+    end
+    for _, c in ipairs(candidates) do
+      local ref = found[c]
+      if ref then
+        callback({ ref = ref, name = ref:gsub("^refs/heads/", ""):gsub("^refs/remotes/", "") })
+        return
+      end
+    end
+    callback(nil)
+  end)
+end
+
+--- List what `head` changed since its merge base with `base` — what a pull
+--- request's "Files changed" tab shows. One process: `--raw` supplies each
+--- file's old and new blob, which pins its content even if the branches move
+--- on; `--numstat` supplies the per-file counts.
+--- @param callback fun(files: table[]|nil, err: string|nil)
+---   Each file: { path, old_path|nil, status, status_char, old_blob, new_blob, stat|nil }
+function M.get_branch_changes(root, base, head, callback)
+  local args = { "diff", "--no-color", "--no-ext-diff", "--raw", "--numstat", "-z", "-M",
+    "--no-abbrev", base .. "..." .. head, "--" }
+  M.run(args, root, function(lines, stderr, code)
+    if code ~= 0 then
+      callback(nil, stderr ~= "" and stderr or "cannot diff " .. base .. "..." .. head)
+      return
+    end
+    local fields, files, stats, i = z_fields(lines), {}, {}, 1
+    while i <= #fields do
+      -- ":100644 100644 <old blob> <new blob> R085", then one or two paths.
+      local old_blob, new_blob, status_char = fields[i]:match("^:%d+ %d+ (%x+) (%x+) (%a)%d*$")
+      if status_char then
+        local f = {
+          path = fields[i + 1], status = parse_status_char(status_char), status_char = status_char,
+          old_blob = old_blob, new_blob = new_blob,
+        }
+        if status_char == "R" or status_char == "C" then
+          f.old_path, f.path = f.path, fields[i + 2]
+          i = i + 1
+        end
+        if f.path and f.path ~= "" then table.insert(files, f) end
+        i = i + 2
+      else
+        i = read_numstat_z(fields, i, stats) or i + 1
+      end
+    end
+    for _, f in ipairs(files) do f.stat = stats[f.path] end
+    callback(files, nil)
+  end)
 end
 
 -- ---------------------------------------------------------------------------

@@ -386,6 +386,7 @@ local function render_header()
   local text = "  " .. src.path
   if src.old_path and src.old_path ~= src.path then text = "  " .. src.old_path .. " → " .. src.path end
   if src.kind == "commit" then text = text .. "  @ " .. src.hash:sub(1, 7) end
+  if src.kind == "range" then text = text .. "  vs " .. src.base end
   if src.status == "added" or src.status == "untracked" then text = text .. "  (new file)" end
   if src.status == "deleted" then text = text .. "  (deleted)" end
   if src.binary then text = text .. "  (binary)" end
@@ -772,7 +773,9 @@ end
 
 local function name_buffers()
   local src = S.source
-  local tag = src.kind == "commit" and src.hash:sub(1, 7) or (src.staged and "index" or "worktree")
+  local tag = src.kind == "commit" and src.hash:sub(1, 7)
+    or src.kind == "range" and src.base .. "..."
+    or (src.staged and "index" or "worktree")
   for _, side in ipairs(SIDES) do
     if valid_buf(S.bufs[side]) then
       rename_buf(S.bufs[side],

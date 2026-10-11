@@ -74,6 +74,55 @@ return {
     H.eq({ d.added, d.deleted }, { 1, 0 })
   end },
 
+  { "branch changes: what the branch did since its merge base, not the base's later work", function()
+    local repo = H.repo({ ["edit.txt"] = "a\n", ["old.txt"] = "same\n", ["gone.txt"] = "x\n" })
+    H.git(repo, "branch", "-M", "main")
+    H.git(repo, "checkout", "-q", "-b", "feature")
+    H.write(repo, "edit.txt", "a\nb\n")
+    H.git(repo, "mv", "old.txt", "new.txt")
+    H.git(repo, "rm", "-q", "gone.txt")
+    H.write(repo, "added.txt", "fresh\n")
+    H.git(repo, "add", "-A")
+    H.git(repo, "commit", "-qm", "feature work")
+    -- Later work on main must not show up as reverted on the branch.
+    H.git(repo, "checkout", "-q", "main")
+    H.write(repo, "main-only.txt", "m\n")
+    H.git(repo, "add", "-A")
+    H.git(repo, "commit", "-qm", "main work")
+
+    local base = await(function(cb) git.get_default_base(repo, cb) end)
+    H.eq(base, { ref = "refs/heads/main", name = "main" })
+
+    local files, err = await(function(cb) git.get_branch_changes(repo, base.ref, "feature", cb) end)
+    H.ok(files, err)
+    local by_path = {}
+    for _, f in ipairs(files) do by_path[f.path] = f end
+    H.eq(vim.tbl_count(by_path), 4, vim.inspect(files))
+    H.eq(by_path["edit.txt"].status, "modified")
+    H.eq(by_path["edit.txt"].stat, { added = 1, deleted = 0, binary = false })
+    H.eq({ by_path["new.txt"].status, by_path["new.txt"].old_path }, { "renamed", "old.txt" })
+    H.eq(by_path["gone.txt"].status, "deleted")
+    H.eq(by_path["added.txt"].status, "added")
+
+    local old, new = await(function(cb)
+      content.load(repo, vim.tbl_extend("force", by_path["edit.txt"], { kind = "range", base = "main" }), cb)
+    end)
+    H.eq({ old.lines, new.lines }, { { "a" }, { "a", "b" } })
+
+    -- The remote's default branch wins over a local main.
+    H.git(repo, "update-ref", "refs/remotes/origin/trunk", "HEAD")
+    H.git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+    base = await(function(cb) git.get_default_base(repo, cb) end)
+    H.eq(base, { ref = "refs/remotes/origin/trunk", name = "origin/trunk" })
+
+    -- Unrelated history: an error, not a list.
+    H.git(repo, "checkout", "-q", "--orphan", "lonely")
+    H.git(repo, "commit", "-qm", "lonely")
+    files, err = await(function(cb) git.get_branch_changes(repo, "main", "lonely", cb) end)
+    H.eq(files, nil)
+    H.ok(err and err ~= "")
+  end },
+
   { "patches are applied to the index through stdin", function()
     local repo = H.repo({ ["f.txt"] = "a\nb\n" })
     local patch = "--- a/f.txt\n+++ b/f.txt\n@@ -2,1 +2,1 @@\n-b\n+B\n"
