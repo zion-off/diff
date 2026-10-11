@@ -141,6 +141,8 @@ local function build_defaults()
     DiffNvimModeClose       = { link = "WarningMsg" },
     DiffNvimModeTab         = { link = "Comment" },
     DiffNvimModeTabActive   = { bg = p.tab_active_bg, bold = true },
+    -- Mode bar item under the cursor, while the bar has keyboard focus
+    DiffNvimModeCursor      = { link = "CursorLine" },
 
     -- Winbar for diff panes
     DiffNvimWinbar          = { bold = true, link = "StatusLine" },

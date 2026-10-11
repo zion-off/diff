@@ -585,6 +585,24 @@ return {
     H.wait(function() return sidebar._preview_branch == nil and bar()[1]:match(vim.pesc(base)) end, "home again")
     H.ok(not bar()[1]:match("✕"))
 
+    -- The bar never scrolls its rows away, and a narrow sidebar shortens a label.
+    vim.api.nvim_set_current_win(sidebar._bar_win)
+    vim.api.nvim_win_set_cursor(sidebar._bar_win, { 2, 0 })
+    press("<C-e>")
+    H.eq(vim.fn.line("w0"), 1)
+    local width = vim.api.nvim_win_get_width(sidebar._bar_win)
+    vim.api.nvim_win_set_width(sidebar._bar_win, 24)
+    mb.render()
+    H.ok(bar()[2]:match("Branch %s*$"), vim.inspect(bar()))
+    vim.api.nvim_win_set_width(sidebar._bar_win, width)
+    mb.render()
+    -- <CR> on the active mode does nothing.
+    vim.api.nvim_win_set_cursor(sidebar._bar_win, { 2, (bar()[2]:find("Changes")) })
+    press("<CR>")
+    vim.wait(50)
+    H.eq(sidebar._branch_mode, false)
+    vim.api.nvim_set_current_win(sidebar._file_win)
+
     -- The branch opens the picker.
     H.ok(mb.click(1, 3))
     H.wait(function()

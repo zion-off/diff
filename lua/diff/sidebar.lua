@@ -123,6 +123,10 @@ local MOUSE_MOVE = normalize_lhs("<MouseMove>")
 -- pointer onto a row; that row was never clicked.
 local dragged = false
 
+-- The window focused before the latest click: Neovim focuses whatever is
+-- clicked, and a click on the mode bar should leave focus where it was.
+local focus_before_click
+
 --- The buffer line under the pointer, or nil. getmousepos() reports the last
 --- line for the empty rows below it, which nothing should react to.
 local function line_under_mouse(mp)
@@ -385,13 +389,16 @@ local function on_mouse_key(key)
   end
   if key ~= LEFT_MOUSE then return end
   dragged = false
+  -- on_key runs before Neovim handles the click.
+  focus_before_click = vim.api.nvim_get_current_win()
   vim.schedule(function()
     if dragged then return end
     local mp = vim.fn.getmousepos()
     if mp.winid == M._bar_win then
+      -- Focus goes back where it was; an item may then open the picker.
+      local back = focus_before_click ~= M._bar_win and focus_before_click or M._file_win
+      if is_valid_win(back) then vim.api.nvim_set_current_win(back) end
       local line = line_under_mouse(mp)
-      -- Focus goes back to the file panel; an item may then open the picker.
-      if line and is_valid_win(M._file_win) then vim.api.nvim_set_current_win(M._file_win) end
       if line then mode_bar.click(line, mp.wincol) end
       return
     end
@@ -585,7 +592,9 @@ local function create_mode_bar()
   M._bar_buf = make_panel_buf("diff://mode-bar")
   vim.api.nvim_win_set_buf(M._bar_win, M._bar_buf)
   set_panel_win_opts(M._bar_win)
-  for k, v in pairs({ winfixheight = true, cursorline = false }) do
+  -- Unwrapped, so a narrow sidebar clips its rows instead of wrapping them
+  -- out of its two-row window.
+  for k, v in pairs({ winfixheight = true, cursorline = false, wrap = false }) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = M._bar_win })
   end
   mode_bar.setup(M._bar_buf, M._bar_win)
@@ -1023,6 +1032,10 @@ function M.setup_auto_refresh()
       refresh_edge()
       if M._sidebar_hidden then return end
       local resized = vim.v.event and vim.v.event.windows or {}
+      -- winfixheight does not stop a mouse drag of the bar's bottom edge.
+      if is_valid_win(M._bar_win) and vim.api.nvim_win_get_height(M._bar_win) ~= mode_bar.HEIGHT then
+        pcall(vim.api.nvim_win_set_height, M._bar_win, mode_bar.HEIGHT)
+      end
       local affects_panels = #resized == 0
       for _, w in ipairs(resized) do
         if w == M._file_win or w == M._commit_win or w == M._bar_win then affects_panels = true end
