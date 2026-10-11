@@ -9,12 +9,14 @@ local TOKEN_CAP = 300 -- max tokens per side before capping LCS work
 --- Split a string into tokens: word-char runs, whitespace runs, or single chars.
 --- @param  s      string
 --- @return string[]
-function M.tokenize(s)
+--- @param max integer|nil  stop after this many tokens
+function M.tokenize(s, max)
   local tokens = {}
   local i = 1
   local len = #s
+  max = max or math.huge
 
-  while i <= len do
+  while i <= len and #tokens < max do
     -- Word characters
     local w_start, w_end = s:find("^%w+", i)
     if w_start then
@@ -91,33 +93,37 @@ end
 --- @param  width  number
 --- @return table[]
 local function backtrack(t, old, new, m, n, width)
-  local ops = {}
+  -- Collected end to start, then reversed (inserting at the front is
+  -- quadratic).
+  local rev = {}
   local i, j = m, n
 
   while i > 0 and j > 0 do
     if old[i] == new[j] then
-      table.insert(ops, 1, { type = "common", old_tok = old[i], new_tok = new[j] })
+      rev[#rev + 1] = { type = "common", old_tok = old[i], new_tok = new[j] }
       i = i - 1
       j = j - 1
     elseif (t[(i - 1) * width + j] or 0) >= (t[i * width + (j - 1)] or 0) then
-      table.insert(ops, 1, { type = "removed", old_tok = old[i] })
+      rev[#rev + 1] = { type = "removed", old_tok = old[i] }
       i = i - 1
     else
-      table.insert(ops, 1, { type = "added", new_tok = new[j] })
+      rev[#rev + 1] = { type = "added", new_tok = new[j] }
       j = j - 1
     end
   end
 
   while i > 0 do
-    table.insert(ops, 1, { type = "removed", old_tok = old[i] })
+    rev[#rev + 1] = { type = "removed", old_tok = old[i] }
     i = i - 1
   end
 
   while j > 0 do
-    table.insert(ops, 1, { type = "added", new_tok = new[j] })
+    rev[#rev + 1] = { type = "added", new_tok = new[j] }
     j = j - 1
   end
 
+  local ops = {}
+  for k = #rev, 1, -1 do ops[#ops + 1] = rev[k] end
   return ops
 end
 
@@ -133,18 +139,9 @@ end
 --- @param  new_line string
 --- @return table[], table[]   old_ranges, new_ranges
 function M.compute(old_line, new_line)
-  local old_tokens = M.tokenize(old_line)
-  local new_tokens = M.tokenize(new_line)
-
-  -- Cap token lists to keep the O(m*n) LCS bounded
-  local function cap_tokens(tokens, cap)
-    local out = {}
-    for i = 1, math.min(#tokens, cap) do out[i] = tokens[i] end
-    return out
-  end
-
-  local old_capped = cap_tokens(old_tokens, TOKEN_CAP)
-  local new_capped = cap_tokens(new_tokens, TOKEN_CAP)
+  -- Capped to keep the O(m*n) LCS bounded; tokenizing stops there too.
+  local old_capped = M.tokenize(old_line, TOKEN_CAP)
+  local new_capped = M.tokenize(new_line, TOKEN_CAP)
 
   local t, m, n, width = lcs_table(old_capped, new_capped)
   local ops = backtrack(t, old_capped, new_capped, m, n, width)

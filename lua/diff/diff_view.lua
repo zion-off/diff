@@ -1026,11 +1026,12 @@ function M.expand(what)
     offset = nil
   else
     local idx, items = cursor_idx(), S.layout.items
+    -- The nearest separator, looking outward from the cursor.
     local sep
     for d = 0, #items do
-      for _, i in ipairs({ idx + d, idx - d }) do
-        if items[i] and items[i].sep then sep = items[i].sep break end
-      end
+      local down, up = items[idx + d], items[idx - d]
+      if not down and not up then break end
+      sep = down and down.sep or up and up.sep
       if sep then break end
     end
     if not sep then return end
