@@ -90,10 +90,36 @@ function Source:has_parser()
   return self.parser ~= nil
 end
 
---- Replace the content in place; tree-sitter reparses incrementally.
+-- More changed regions than this are applied as one whole-buffer replace.
+local MAX_INCREMENTAL_HUNKS = 200
+
+local function join(lines)
+  if #lines == 0 then return "" end
+  return table.concat(lines, "\n") .. "\n"
+end
+
+--- Replace the content in place. Only the changed regions are written, so
+--- tree-sitter sees small edits and reparses incrementally instead of
+--- parsing the whole file again.
 function Source:update(lines)
+  local hunks = vim.diff(join(self.lines), join(lines), { result_type = "indices" }) or {}
+  if #hunks == 0 then return end
   self.lines = lines
-  vim.api.nvim_buf_set_lines(self.buf, 0, -1, false, lines)
+  -- Rows below an edit move: drop captures cached by row.
+  self.cache = {}
+  if #hunks > MAX_INCREMENTAL_HUNKS then
+    vim.api.nvim_buf_set_lines(self.buf, 0, -1, false, lines)
+  else
+    -- Bottom up, so earlier hunks' line numbers stay valid. An empty side
+    -- names the line before its gap.
+    for i = #hunks, 1, -1 do
+      local h = hunks[i]
+      local start = h[2] > 0 and h[1] - 1 or h[1]
+      local repl = {}
+      for k = 1, h[4] do repl[k] = lines[h[3] + k - 1] end
+      vim.api.nvim_buf_set_lines(self.buf, start, start + h[2], false, repl)
+    end
+  end
   self:parse()
 end
 

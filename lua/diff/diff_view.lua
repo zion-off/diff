@@ -965,7 +965,10 @@ function M.refresh_content()
       log.debug("dropping superseded refresh of %s", source.path)
       return
     end
-    if vim.deep_equal(old, S.model.old) and vim.deep_equal(new, S.model.new) then
+    -- Usually one side changed (the working tree, on a save); the other's
+    -- source keeps its parse.
+    local changed = { old = not vim.deep_equal(old, S.model.old), new = not vim.deep_equal(new, S.model.new) }
+    if not (changed.old or changed.new) then
       log.trace("refresh %s: unchanged", source.path)
       return
     end
@@ -986,8 +989,8 @@ function M.refresh_content()
     S.model = engine.compute(old, new)
     S.words = {}
     S.lnum_width = #tostring(math.max(#old.lines, #new.lines, 1))
-    if S.sources.old then S.sources.old:update(old.lines) end
-    if S.sources.new then S.sources.new:update(new.lines) end
+    if S.sources.old and changed.old then S.sources.old:update(old.lines) end
+    if S.sources.new and changed.new then S.sources.new:update(new.lines) end
     render(anchor, offset)
     log.debug("refreshed %s in place", source.path)
   end)

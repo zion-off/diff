@@ -19,6 +19,40 @@ local function groups(src, row)
 end
 
 return {
+  { "updates write only the changed lines, and the source matches the new content", function()
+    math.randomseed(3)
+    local lines = {}
+    for i = 1, 300 do lines[i] = "local v" .. i .. " = " .. i end
+    local src = syntax.source("x.lua", lines)
+    src:parse()
+    H.wait(function() return src.ready end, "parse")
+    for _ = 1, 40 do
+      local nxt, i = {}, 1
+      while i <= #lines do
+        local r = math.random()
+        if r < 0.03 then i = i + math.random(1, 4)
+        elseif r < 0.06 then for _ = 1, math.random(1, 3) do nxt[#nxt + 1] = "local fresh = " .. math.random(999) end
+        elseif r < 0.1 then nxt[#nxt + 1] = lines[i] .. " -- edited"; i = i + 1
+        else nxt[#nxt + 1] = lines[i]; i = i + 1 end
+      end
+      if #nxt == 0 then nxt = { "" } end
+      src:update(nxt)
+      H.eq(vim.api.nvim_buf_get_lines(src.buf, 0, -1, false), nxt)
+      lines = nxt
+    end
+    -- One edited line is one small write, not a whole-buffer replace.
+    local edited = vim.deepcopy(lines)
+    edited[100] = edited[100] .. " -- once more"
+    local changed = {}
+    vim.api.nvim_buf_attach(src.buf, false, {
+      on_lines = function(_, _, _, first, last_old, last_new) table.insert(changed, { first, last_old, last_new }) end,
+    })
+    src:update(edited)
+    H.eq(changed, { { 99, 100, 100 } })
+    H.eq(vim.api.nvim_buf_get_lines(src.buf, 0, -1, false), edited)
+    src:destroy()
+  end },
+
   { "lines inside a multi-line comment are highlighted as comment", function()
     local src = syntax.source("x.lua", LUA)
     H.eq(src.ft, "lua")
