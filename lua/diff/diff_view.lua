@@ -58,6 +58,7 @@ local function fresh_state()
     sources = {},               -- side -> syntax Source
     words = {},                 -- model row -> word ranges (lazy)
     lnum_width = 1,
+    sep_marks = {},             -- side -> { [row] = extmark id } of separators
     hover = nil,                -- layout row under the mouse pointer
     wrap_widths = {},           -- side -> pane width the wrap padding was computed for
     synced_view = nil,          -- view both split panes were last left showing
@@ -344,18 +345,22 @@ end
 
 local FILLER = string.rep("░", 400)
 
---- Persistent per-row decorations: line backgrounds, gutter signs, fillers and
---- separators. Word and syntax highlights are drawn lazily per visible row.
+--- Persistent per-row decorations: line backgrounds, gutter signs and
+--- separators. Word highlights, filler patterns and syntax are drawn lazily
+--- for the rows on screen: a filler's pattern as a persistent extmark costs
+--- ~30x a plain one, and a large insertion has tens of thousands of fillers.
 local function decorate(side)
   local buf = S.bufs[side]
   vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
+  local sep_marks = {}
+  S.sep_marks[side] = sep_marks
   local change_hl = side == "old" and "DiffNvimRemoved" or "DiffNvimAdded"
   local sign_hl   = side == "old" and "DiffNvimGutterRemoved" or "DiffNvimGutterAdded"
 
   for i, item in ipairs(S.layout.items) do
     local r = i - 1
     if item.sep then
-      vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
+      sep_marks[r] = vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
         line_hl_group = "DiffNvimSeparator",
         virt_text = separator_virt(side, item.sep), virt_text_pos = "overlay",
         priority = PRIORITY_LINE_BG,
@@ -364,9 +369,7 @@ local function decorate(side)
       local row = S.model.rows[item.row]
       if not row[side] then
         vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
-          line_hl_group = "DiffNvimFiller",
-          virt_text = { { FILLER, "DiffNvimFillerChar" } }, virt_text_pos = "overlay",
-          priority = PRIORITY_LINE_BG,
+          line_hl_group = "DiffNvimFiller", priority = PRIORITY_LINE_BG,
         })
       elseif row.change then
         vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
@@ -374,6 +377,21 @@ local function decorate(side)
           priority = PRIORITY_LINE_BG,
         })
       end
+    end
+  end
+end
+
+--- Redraw only the separators (their headings need the syntax parse).
+local function decorate_separators(side)
+  local buf = S.bufs[side]
+  for r, id in pairs(S.sep_marks[side] or {}) do
+    local item = S.layout.items[r + 1]
+    if item and item.sep then
+      pcall(vim.api.nvim_buf_set_extmark, buf, NS, r, 0, {
+        id = id, line_hl_group = "DiffNvimSeparator",
+        virt_text = separator_virt(side, item.sep), virt_text_pos = "overlay",
+        priority = PRIORITY_LINE_BG,
+      })
     end
   end
 end
@@ -724,7 +742,8 @@ local function render(anchor, offset)
   log.debug("render %s: %d rows, %d items in %.1f ms", S.source.path, #m.rows, #S.layout.items, elapsed())
 end
 
--- Word-level highlights, computed on demand for rows that are on screen.
+-- Filler patterns and word-level highlights, drawn on demand for the rows
+-- that are on screen.
 vim.api.nvim_set_decoration_provider(NS_WORDS, {
   on_win = function(_, _, buf)
     return S.layout ~= nil and side_of_buf(buf) ~= nil
@@ -733,6 +752,13 @@ vim.api.nvim_set_decoration_provider(NS_WORDS, {
     local side = side_of_buf(buf)
     local item = side and item_at(r + 1)
     local row = row_of_item(item)
+    if row and not row[side] then
+      pcall(vim.api.nvim_buf_set_extmark, buf, NS_WORDS, r, 0, {
+        virt_text = { { FILLER, "DiffNvimFillerChar" } }, virt_text_pos = "overlay",
+        priority = PRIORITY_LINE_BG, ephemeral = true,
+      })
+      return
+    end
     if not (row and row.change and row.old and row.new) then return end
     local w = S.words[item.row]
     if not w then
@@ -819,7 +845,7 @@ local function make_sources(old, new)
     if s then
       -- Separator headings need the parse; redraw them once it lands.
       s:on_ready(function()
-        if S.sources[side] == s and S.layout and valid_buf(S.bufs[side]) then decorate(side) end
+        if S.sources[side] == s and S.layout and valid_buf(S.bufs[side]) then decorate_separators(side) end
       end)
     end
   end

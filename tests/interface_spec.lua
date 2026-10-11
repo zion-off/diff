@@ -184,6 +184,14 @@ return {
     H.eq(cursor(), ins + 1)
   end },
 
+  { "a filler row shows its pattern", function()
+    local ins = find_item(function(it) return it.row and S().model.rows[it.row].new == 91 end)
+    vim.cmd("redraw")
+    local pos = vim.fn.screenpos(pane("old"), ins, 1)
+    H.ok(pos.row > 0, "filler row on screen")
+    H.eq(vim.fn.screenstring(pos.row, pos.col), "░")
+  end },
+
   { "s stages the hunk under the cursor and the view refreshes in place", function()
     vim.api.nvim_set_current_win(pane("new"))
     local wins = { pane("old"), pane("new") }
