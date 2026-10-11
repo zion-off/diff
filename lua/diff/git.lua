@@ -156,15 +156,6 @@ function M.list_branches(root, callback)
   )
 end
 
---- Name of the checked-out branch; nil when HEAD is detached.
---- @param callback fun(name: string|nil)
-function M.get_head_name(root, callback)
-  M.run({ "branch", "--show-current" }, root, function(lines, _, code)
-    local name = code == 0 and lines[1] and vim.trim(lines[1]) or ""
-    callback(name ~= "" and name or nil)
-  end)
-end
-
 -- ---------------------------------------------------------------------------
 -- Status
 -- ---------------------------------------------------------------------------

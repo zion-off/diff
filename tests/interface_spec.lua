@@ -509,6 +509,15 @@ return {
     H.git(repo, "checkout", "-q", base)
   end },
 
+  { "a burst of background refreshes runs one at a time", function()
+    vim.wait(300)
+    local calls = H.count_git(function()
+      for _ = 1, 10 do sidebar.refresh({ coalesce = true }) end
+    end, 400)
+    -- One refresh now and one queued: two rounds of status + diffstat + log.
+    H.ok(#calls <= 8, #calls .. " git processes: " .. vim.inspect(calls))
+  end },
+
   { "the mode bar shows the branch, switches modes and leaves a preview", function()
     local base = vim.trim(H.git(repo, "rev-parse", "--abbrev-ref", "HEAD"))
     local mb = require("diff.mode_bar")

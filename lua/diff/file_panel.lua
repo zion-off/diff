@@ -486,7 +486,16 @@ end
 --- @param preview     string|nil  Branch being previewed; no working-tree status
 ---   then, and branch mode shows that branch's changes rather than HEAD's.
 --- @param branch_mode boolean|nil
-function M.refresh(preview, branch_mode)
+--- @param on_done     fun()|nil  called once this refresh has finished (or
+---   been superseded by a newer one)
+function M.refresh(preview, branch_mode, on_done)
+  local function finish()
+    if on_done then
+      local f = on_done
+      on_done = nil
+      f()
+    end
+  end
   S.gen = S.gen + 1
   local gen = S.gen
   local head = preview or "HEAD"
@@ -496,15 +505,18 @@ function M.refresh(preview, branch_mode)
   if S.branch_mode then
     M.render()
     fetch_branch(head, function(branch)
-      if gen ~= S.gen then return end
-      S.branch = branch
-      M.render()
+      if gen == S.gen then
+        S.branch = branch
+        M.render()
+      end
+      finish()
     end)
     return
   end
   if preview then
     S.status = nil
     M.render()
+    finish()
     return
   end
 
@@ -515,7 +527,7 @@ function M.refresh(preview, branch_mode)
     pending = pending - 1
     if pending > 0 then return end
     -- A newer refresh started while this one was in flight.
-    if gen ~= S.gen then return end
+    if gen ~= S.gen then return finish() end
     for _, section in ipairs({ "staged", "unstaged" }) do
       for _, f in ipairs(status[section]) do
         f.stat = stats and stats[section][f.path] or nil
@@ -524,6 +536,7 @@ function M.refresh(preview, branch_mode)
     S.status = status
     M.render()
     log.debug("refreshed: %d staged, %d unstaged in %.1f ms", #status.staged, #status.unstaged, elapsed())
+    finish()
   end
 
   git.get_status(S.root, function(st, err)

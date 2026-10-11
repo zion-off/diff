@@ -511,13 +511,16 @@ end
 
 --- Fetch the commit list and re-render.
 --- @param ref string|nil  Branch to read history from (preview mode); nil = HEAD.
-function M.refresh(ref)
+--- @param on_done fun()|nil  called once the refresh has finished (or been
+---   superseded by a newer one)
+function M.refresh(ref, on_done)
   S.gen = S.gen + 1
   local gen = S.gen
   if ref ~= S.ref then
     S.expanded, S.ref = {}, ref
   end
   git.get_commits(S.root, COMMIT_LIMIT, function(commits, err)
+    if on_done then on_done() end
     if gen ~= S.gen then return end
     if err then
       log.warn("git log failed: %s", err)

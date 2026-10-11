@@ -46,6 +46,9 @@ M._branch_mode    = false -- file panel shows the branch's changes; no commit pa
 
 local watcher, watch_timer, refresh_timer
 local get_diff_tab -- defined with the panels, used by the mouse handling
+-- Panel refreshes in flight, and the scope of a coalesced refresh waiting for
+-- them. refresh_epoch drops callbacks from before the interface was closed.
+local refreshing, queued_scope, refresh_epoch = 0, nil, 0
 local mouse_ns = vim.api.nvim_create_namespace("diff_nvim_mouse")
 local aug = vim.api.nvim_create_augroup("DiffNvimSidebar", { clear = true })
 
@@ -436,7 +439,7 @@ local function start_watcher()
     timer:start(WATCH_DEBOUNCE_MS, 0, vim.schedule_wrap(function()
       if not M.is_open() then return end
       log.debug("git state changed (%s); refreshing", fname)
-      M.refresh()
+      M.refresh({ coalesce = true })
       vim.api.nvim_exec_autocmds("User", { pattern = "DiffNvimGitChanged", modeline = false })
     end))
   end)
@@ -451,11 +454,12 @@ end
 
 --- Coalesce refresh requests (FocusGained, :wa writing many buffers, …) into
 --- a single re-fetch.
-function M.request_refresh()
+--- @param scope string|nil  see M.refresh
+function M.request_refresh(scope)
   if not refresh_timer then refresh_timer = uv.new_timer() end
   refresh_timer:stop()
   refresh_timer:start(REFRESH_DEBOUNCE_MS, 0, vim.schedule_wrap(function()
-    if M.is_open() then M.refresh() end
+    if M.is_open() then M.refresh({ scope = scope, coalesce = true }) end
   end))
 end
 
@@ -651,6 +655,7 @@ end
 function M.close()
   restore_global_maps()
   vim.on_key(nil, mouse_ns)
+  refresh_epoch, refreshing, queued_scope = refresh_epoch + 1, 0, nil
   M._preview_branch = nil
   M._branch_mode = false
   pcall(function() require("diff.branch_picker").close() end)
@@ -816,18 +821,54 @@ local function render_mode_bar()
   })
 end
 
+--- The checked-out branch, read from the work tree's HEAD file (no git
+--- process); nil when HEAD is detached.
+local function read_head_name()
+  local f = M._git_dir and io.open(M._git_dir .. "/HEAD", "r")
+  if not f then return nil end
+  local line = f:read("*l") or ""
+  f:close()
+  return line:match("^ref: refs/heads/(.+)$") or line:match("^ref: (.+)$")
+end
+
 --- Re-fetch git data for the visible panels.
-function M.refresh()
+--- @param opts table|nil
+---   scope:    "all" (default) or "worktree": only what a working-tree edit
+---             can change (the file status; nothing in branch or preview mode)
+---   coalesce: when a refresh is in flight, run once more after it rather
+---             than now. For background triggers: a burst of .git changes
+---             (a rebase) must not pile up git processes, or keep superseding
+---             itself so the panels never update. User actions refresh at once.
+function M.refresh(opts)
+  opts = opts or {}
   if not M.is_open() or M._sidebar_hidden or not M._repo_root then return end
-  render_mode_bar()
-  local root = M._repo_root
-  git.get_head_name(root, function(name)
-    if root ~= M._repo_root then return end
-    M._head_name = name
+  local scope = opts.scope or "all"
+  if opts.coalesce and refreshing > 0 then
+    queued_scope = (queued_scope == "all" or scope == "all") and "all" or "worktree"
+    return
+  end
+  if scope == "worktree" and (M._branch_mode or M._preview_branch) then return end
+
+  local epoch = refresh_epoch
+  local function done()
+    if epoch ~= refresh_epoch then return end
+    refreshing = refreshing - 1
+    if refreshing == 0 and queued_scope then
+      local q = queued_scope
+      queued_scope = nil
+      M.refresh({ scope = q })
+    end
+  end
+  if scope == "all" then
+    M._head_name = read_head_name()
     render_mode_bar()
-  end)
-  file_panel.refresh(M._preview_branch, M._branch_mode)
-  if not M._branch_mode then commit_panel.refresh(M._preview_branch) end
+  end
+  refreshing = refreshing + 1
+  file_panel.refresh(M._preview_branch, M._branch_mode, done)
+  if scope == "all" and not M._branch_mode then
+    refreshing = refreshing + 1
+    commit_panel.refresh(M._preview_branch, done)
+  end
 end
 
 --- Switch the file panel between the working-tree status and everything the
@@ -962,7 +1003,8 @@ function M.setup_auto_refresh()
   vim.api.nvim_create_autocmd({ "FocusGained", "BufWritePost" }, {
     group = aug,
     callback = function()
-      if M.is_open() then M.request_refresh() end
+      -- With the watcher running, .git changes are already covered.
+      if M.is_open() then M.request_refresh(watcher and "worktree" or "all") end
     end,
   })
 end
