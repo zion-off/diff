@@ -21,6 +21,12 @@ local M = {}
 -- by position, which is exactly right for the common equal-length rewrite.
 M.LINEMATCH_MAX = 80
 
+-- Total linematch work allowed per diff, in old×new lines summed over the
+-- regions it runs on (a 20×20 region costs 400). Past it the remaining
+-- regions are paired by position: a diff with hundreds of rewritten regions
+-- should open promptly rather than pair every one of them perfectly.
+M.LINEMATCH_BUDGET = 40000
+
 -- Separators hiding fewer rows than this are not worth collapsing; showing
 -- the line costs the same space as the "N hidden lines" marker.
 local MIN_COLLAPSE = 2
@@ -30,17 +36,51 @@ local function join(lines)
   return table.concat(lines, "\n") .. "\n"
 end
 
+local function join_range(lines, first, count)
+  local slice = {}
+  for i = 1, count do slice[i] = lines[first + i - 1] end
+  return join(slice)
+end
+
+--- Run linematch on each changed region by itself. Asking vim.diff for
+--- linematch on the whole file costs time per region proportional to the file
+--- size (1.3 s for 5000 one-line edits in 20k lines); on the region's own
+--- lines it costs only the region. A one-line-for-one-line region needs no
+--- pairing.
+local function linematch_regions(raw, a, b)
+  local out, budget = {}, M.LINEMATCH_BUDGET
+  for _, h in ipairs(raw) do
+    local oc, nc = h[2], h[4]
+    local work = oc * nc
+    if work > 1 and work <= budget then
+      budget = budget - work
+      local sub = vim.diff(join_range(a, h[1], oc), join_range(b, h[3], nc), {
+        result_type = "indices",
+        algorithm   = "histogram",
+        linematch   = M.LINEMATCH_MAX,
+      }) or {}
+      -- Back to file line numbers (an empty side still names the line before
+      -- its gap, possibly the line before the region).
+      for _, s in ipairs(sub) do
+        table.insert(out, { s[1] + h[1] - 1, s[2], s[3] + h[3] - 1, s[4] })
+      end
+    else
+      table.insert(out, h)
+    end
+  end
+  return out
+end
+
 --- @param old {lines: string[], eol: boolean}
 --- @param new {lines: string[], eol: boolean}
 --- @return table model
 function M.compute(old, new)
   local a, b = old.lines, new.lines
-  local raw = vim.diff(join(a), join(b), {
+  local raw = linematch_regions(vim.diff(join(a), join(b), {
     result_type      = "indices",
     algorithm        = "histogram",
-    linematch        = M.LINEMATCH_MAX,
     indent_heuristic = true,
-  }) or {}
+  }) or {}, a, b)
 
   local rows, blocks = {}, {}
   local added, removed = 0, 0
