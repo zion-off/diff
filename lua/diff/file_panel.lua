@@ -24,6 +24,8 @@ local function fresh_state()
     status  = nil,  -- { staged = file[], unstaged = file[] } from the last refresh
     preview = nil,  -- branch name while previewing
     branch_mode = false,
+    cursors = {},   -- mode -> cursor identity when the mode was left
+    restore = nil,  -- cursor identity to restore on the next render with data
     branch  = nil,  -- { base, head, files|nil, error|nil } changes since the merge base with the base branch
     base    = nil,  -- { ref, name } of the base branch; false = none found, nil = not looked up
     collapsed = { staged = false, unstaged = false, branch = false },
@@ -181,6 +183,8 @@ local function build(width)
     elseif S.base == false then
       note("No base branch (origin/HEAD, main or")
       note("master); set base_branch in setup().")
+    else
+      note("Loading branch changes…")
     end
     return lines, hl, map
   end
@@ -260,7 +264,12 @@ end
 --- Draw the cached status into the panel at the window's current width.
 function M.render()
   if not valid() then return end
-  local prev = cursor_identity()
+  -- After a mode switch, the cursor goes back to where it was in that mode,
+  -- once the mode's data is there to find it in.
+  local prev = S.restore or cursor_identity()
+  if S.restore and (S.branch_mode and S.branch or not S.branch_mode and (S.status or S.preview)) then
+    S.restore = nil
+  end
   S.width = vim.api.nvim_win_get_width(S.win)
   local lines, hl, map = build(S.width)
   S.line_map = map
@@ -309,7 +318,7 @@ local function to_source(file, section)
   if section == "branch" then
     return {
       kind = "range", path = file.path, old_path = file.old_path, status = file.status,
-      old_blob = file.old_blob, new_blob = file.new_blob, base = S.branch.base,
+      old_blob = file.old_blob, new_blob = file.new_blob, base = S.branch.base, head = S.branch.head,
     }
   end
   return {
@@ -491,6 +500,21 @@ local function fetch_branch(head, cb)
   end)
 end
 
+--- Keep an open branch-changes diff on the branch's latest version of its
+--- file, or close it when the file is no longer changed on the branch.
+local function follow_open_diff()
+  local dv = require("diff.diff_view")
+  local src = dv._state().source
+  if not (src and src.kind == "range" and S.branch and S.branch.files and src.head == S.branch.head) then return end
+  for _, f in ipairs(S.branch.files) do
+    if f.path == src.path then
+      if f.old_blob ~= src.old_blob or f.new_blob ~= src.new_blob then dv.retarget(to_source(f, "branch")) end
+      return
+    end
+  end
+  dv.close()
+end
+
 --- Fetch what the current mode shows and re-render: status and diffstat (in
 --- parallel), or in branch mode the branch's changes.
 --- @param preview     string|nil  Branch being previewed; no working-tree status
@@ -509,15 +533,25 @@ function M.refresh(preview, branch_mode, on_done)
   S.gen = S.gen + 1
   local gen = S.gen
   local head = preview or "HEAD"
+  branch_mode = branch_mode or false
+  if branch_mode ~= S.branch_mode then
+    -- Remember the cursor in the mode being left; return to it next time.
+    if valid() then S.cursors[S.branch_mode] = cursor_identity() end
+    S.restore = S.cursors[branch_mode] or { row = 1 }
+  end
+  local mode_changed = branch_mode ~= S.branch_mode or preview ~= S.preview
   -- Another branch's changes must not linger while this one's load.
   if S.branch and S.branch.head ~= head then S.branch = nil end
-  S.preview, S.branch_mode = preview, branch_mode or false
-  if S.branch_mode then
-    M.render()
+  S.preview, S.branch_mode = preview, branch_mode
+
+  if branch_mode then
+    -- At once: the cached list, or a loading note while there is none.
+    if mode_changed or not S.branch then M.render() end
     fetch_branch(head, function(branch)
       if gen == S.gen and branch ~= S.branch then
         S.branch = branch
         M.render()
+        follow_open_diff()
       end
       finish()
     end)
@@ -529,6 +563,8 @@ function M.refresh(preview, branch_mode, on_done)
     finish()
     return
   end
+  -- At once: the last status, rather than the other mode's rows.
+  if mode_changed then M.render() end
 
   local elapsed = require("diff.log").timer()
   local status, stats

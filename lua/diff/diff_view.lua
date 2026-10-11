@@ -1046,6 +1046,21 @@ function M.expand(what)
   render(anchor, offset)
 end
 
+--- Show `source` in place of the current source of the same file (a newer
+--- version of it), keeping the cursor and expanded ranges where possible.
+function M.retarget(source)
+  local cur = S.source
+  if not cur then return end
+  local function single(src) return src.status == "added" or src.status == "deleted" end
+  -- A change of pane layout or a binary file needs a fresh open.
+  if cur.binary or single(cur) ~= single(source) or cur.status ~= source.status and single(source) then
+    return M.open(S.root, source, S.navigator)
+  end
+  S.source = source
+  render_header()
+  M.refresh_content()
+end
+
 --- The mouse pointer is over row `line` of window `win` (nil: elsewhere).
 function M.hover(win, line)
   line = side_of_win(win) and line or nil

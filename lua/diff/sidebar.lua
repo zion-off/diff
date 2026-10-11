@@ -537,6 +537,17 @@ local function create_commit_panel()
   vim.api.nvim_win_set_buf(M._commit_win, M._commit_buf)
   set_panel_win_opts(M._commit_win)
   commit_panel.setup(M._commit_buf, M._commit_win, M._repo_root)
+  -- The split the user left, else the default one.
+  if M._commit_height then
+    pcall(vim.api.nvim_win_set_height, M._commit_win, M._commit_height)
+  else
+    layout_two_panels()
+  end
+end
+
+--- Remember the commit panel's height, to restore when it comes back.
+local function save_commit_height()
+  if is_valid_win(M._commit_win) then M._commit_height = vim.api.nvim_win_get_height(M._commit_win) end
 end
 
 --- Create the mode bar window above the file panel, at a fixed height.
@@ -679,7 +690,7 @@ function M.close()
   end
 
   clear_panel_state()
-  M._main_win, M._saved_layout, M._panel_sizes = nil, nil, nil
+  M._main_win, M._saved_layout, M._panel_sizes, M._commit_height = nil, nil, nil, nil
   M._sidebar_hidden = false
   if M._saved_mouse ~= nil then
     vim.o.mouse = M._saved_mouse
@@ -715,12 +726,9 @@ function M.toggle_sidebar_panel()
 
   if not M._sidebar_hidden then
     if is_valid_win(M._file_win) then
-      M._panel_sizes = {
-        width       = vim.api.nvim_win_get_width(M._file_win),
-        -- In branch mode the file panel is the whole sidebar: no split to keep.
-        file_height = not M._branch_mode and vim.api.nvim_win_get_height(M._file_win) or nil,
-      }
+      M._panel_sizes = { width = vim.api.nvim_win_get_width(M._file_win) }
     end
+    save_commit_height()
     clear_hover()
     for _, win in ipairs({ M._bar_win, M._file_win, M._commit_win }) do
       if is_valid_win(win) then pcall(vim.api.nvim_win_close, win, true) end
@@ -744,13 +752,6 @@ function M.toggle_sidebar_panel()
   if not target then return end
 
   create_panels(target, (M._panel_sizes and M._panel_sizes.width) or cfg.sidebar_width or 40)
-  if M._branch_mode then
-    -- The file panel is the whole sidebar.
-  elseif M._panel_sizes and M._panel_sizes.file_height then
-    pcall(vim.api.nvim_win_set_height, M._file_win, M._panel_sizes.file_height)
-  else
-    layout_two_panels()
-  end
   M._sidebar_hidden = false
   M.refresh()
   if is_valid_win(caller_win) then pcall(vim.api.nvim_set_current_win, caller_win) end
@@ -884,11 +885,11 @@ function M.toggle_branch_mode()
     local caller_win = vim.api.nvim_get_current_win()
     if M._branch_mode then
       commit_panel.close_tooltip()
+      save_commit_height()
       if is_valid_win(M._commit_win) then pcall(vim.api.nvim_win_close, M._commit_win, true) end
       M._commit_win, M._commit_buf = nil, nil
     else
       create_commit_panel()
-      layout_two_panels()
     end
     if not is_valid_win(caller_win) then caller_win = M._file_win end
     pcall(vim.api.nvim_set_current_win, caller_win)

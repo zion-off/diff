@@ -509,17 +509,34 @@ return {
     H.git(repo, "checkout", "-q", base)
   end },
 
-  { "branch mode reuses the branch diff until its commits move", function()
+  { "branch mode: the diff is cached, follows commits, and the split and cursor survive", function()
     local base = vim.trim(H.git(repo, "rev-parse", "--abbrev-ref", "HEAD"))
     H.git(repo, "checkout", "-q", "topic")
+    vim.api.nvim_win_set_height(sidebar._commit_win, 7)
+    vim.api.nvim_set_current_win(sidebar._file_win)
+    H.wait(function() return pcall(panel_row, "a%.lua") end, "status listed")
+    vim.api.nvim_win_set_cursor(sidebar._file_win, { panel_row("a%.lua"), 0 })
+
     sidebar.toggle_branch_mode()
     H.wait(function() return pcall(panel_row, "topic%.lua") end, "branch changes")
     vim.wait(300) -- the switch's own refresh
     -- Nothing moved: one rev-parse, no diff.
     local calls = H.count_git(function() sidebar.refresh() end, 150)
     H.eq(calls, { "rev-parse HEAD refs/heads/" .. base }, vim.inspect(calls))
+
+    -- A commit to the open file: the open diff follows the branch tip.
+    open_file("topic%.lua", "topic.lua")
+    H.write(repo, "topic.lua", "return 'topic v2'\n")
+    H.git(repo, "commit", "-qm", "topic v2", "--", "topic.lua")
+    H.wait(function()
+      return vim.deep_equal(vim.api.nvim_buf_get_lines(S().bufs.new, 0, -1, false), { "return 'topic v2'" })
+    end, "range diff followed the commit")
+    H.eq(S().source.kind, "range")
+
     sidebar.toggle_branch_mode()
     H.wait(function() return pcall(panel_row, "Staged") end, "changes again")
+    H.eq(vim.api.nvim_win_get_height(sidebar._commit_win), 7, "commit panel height")
+    H.eq(vim.api.nvim_win_get_cursor(sidebar._file_win)[1], panel_row("a%.lua"), "cursor back on a.lua")
     H.git(repo, "checkout", "-q", base)
   end },
 
