@@ -441,20 +441,30 @@ return {
     vim.wait(50)
     H.eq(edge(), sidebar_edge)
 
-    -- The boundary between the panels is only that, with a global status line
-    -- too (where it is a separator line, like the vertical edge).
-    for _, ls in ipairs({ 2, 3 }) do
-      vim.o.laststatus = ls
-      vim.cmd("redraw")
-      fh = vim.api.nvim_win_get_height(fw)
-      point({ winid = cw, winrow = 1 }) -- off the edges first
-      H.wait(function() return edge() == nil end, "edge cleared")
-      point({ winid = fw, winrow = fh + 1 })
-      local boundary = { row = fpos[1] + fh, col = fpos[2], width = width, height = 1, mouse = false }
-      H.wait(function() return vim.deep_equal(edge(), boundary) end,
-        "panel boundary (laststatus=" .. ls .. "): " .. vim.inspect(edge()))
-    end
+    -- The boundary between the panels is only that. With a status line per
+    -- window it is that status line, tinted in place.
+    local own = vim.wo[fw].winhighlight
+    point({ winid = fw, winrow = fh + 1 })
+    H.wait(function() return vim.wo[fw].winhighlight:match("StatusLineNC:DiffNvimEdgeHoverStatus") end,
+      "status line tinted")
+    H.eq(edge(), nil, "the vertical edge should not stay highlighted")
+    point({ winid = cw, winrow = 1 }) -- off the edges
+    H.wait(function() return vim.wo[fw].winhighlight == own end, "status line restored")
+
+    -- With a global status line it is a separator line, painted like the
+    -- vertical edge, and the junction where the two meet keeps its glyph.
+    vim.o.laststatus = 3
+    vim.cmd("redraw")
+    fh = vim.api.nvim_win_get_height(fw)
+    point({ winid = fw, winrow = fh + 1 })
+    local boundary = { row = fpos[1] + fh, col = fpos[2], width = width, height = 1, mouse = false }
+    H.wait(function() return vim.deep_equal(edge(), boundary) end, "panel boundary: " .. vim.inspect(edge()))
+    point({ winid = fw, wincol = width + 1 })
+    H.wait(function() return edge() and edge().width == 1 end, "vertical edge")
+    local glyphs = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(sidebar._edge_float()), 0, -1, false)
+    H.eq(glyphs[fpos[1] + fh - bpos[1] + 1], "┤", vim.inspect(glyphs))
     vim.o.laststatus = 2
+    vim.cmd("redraw")
 
     -- The bottom status line resizes the command line: not a pane edge.
     point({ winid = cw, winrow = vim.api.nvim_win_get_height(cw) + 1 })
