@@ -242,7 +242,7 @@ local function apply_hover()
   for _, l in ipairs(rows or {}) do
     -- Above the cursor and active-file highlights, so the hover always shows.
     pcall(vim.api.nvim_buf_set_extmark, S.buf, NS_HOVER, l - 1, 0, {
-      line_hl_group = "DiffNvimHover", priority = 300,
+      line_hl_group = "DiffNvimHover", priority = 5000,
     })
   end
 end

@@ -1061,6 +1061,15 @@ function M.retarget(source)
   M.refresh_content()
 end
 
+--- Split the width of the two panes evenly again (the sidebar coming back
+--- takes all its width from the pane beside it).
+function M.balance_panes()
+  local old, new = S.panes.old, S.panes.new
+  if not (valid_win(old) and valid_win(new)) then return end
+  local total = vim.api.nvim_win_get_width(old) + vim.api.nvim_win_get_width(new)
+  pcall(vim.api.nvim_win_set_width, old, math.floor(total / 2))
+end
+
 --- The mouse pointer is over row `line` of window `win` (nil: elsewhere).
 function M.hover(win, line)
   line = side_of_win(win) and line or nil

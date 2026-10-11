@@ -164,17 +164,11 @@ local function build(width)
     end
   end
 
-  if S.preview then
-    push(util.trunc("Preview: " .. S.preview, math.max(8, width)), { type = "preview_header", key = "preview" })
-    table.insert(hl, { #lines - 1, "DiffNvimSectionHeader", 0, -1 })
-    if not S.branch_mode then return lines, hl, map end
-    push("", { type = "blank" })
+  local function note(text)
+    push(util.trunc("  " .. text, math.max(8, width)), { type = "blank" })
+    table.insert(hl, { #lines - 1, "Comment", 0, -1 })
   end
   if S.branch_mode then
-    local function note(text)
-      push(util.trunc("  " .. text, math.max(8, width)), { type = "blank" })
-      table.insert(hl, { #lines - 1, "Comment", 0, -1 })
-    end
     if S.branch and S.branch.files then
       render_section("branch", "Branch Changes vs " .. S.branch.base)
     elseif S.branch then
@@ -186,6 +180,12 @@ local function build(width)
     else
       note("Loading branch changes…")
     end
+    return lines, hl, map
+  end
+  -- The mode bar names the previewed branch; its working tree is not here.
+  if S.preview then
+    note("Working-tree changes are shown for")
+    note("your own branch; see Branch changes.")
     return lines, hl, map
   end
   render_section("staged", "Staged Changes")
@@ -257,7 +257,7 @@ local function apply_hover()
   if not (meta and CLICKABLE[meta.type]) then return end
   -- Above the cursor line and active-file highlights, so the hover always shows.
   pcall(vim.api.nvim_buf_set_extmark, S.buf, NS_HOVER, S.hover - 1, 0, {
-    line_hl_group = "DiffNvimHover", priority = 300,
+    line_hl_group = "DiffNvimHover", priority = 5000,
   })
 end
 

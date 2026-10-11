@@ -813,6 +813,7 @@ function M.toggle_sidebar_panel()
     vim.notify("diff.nvim: not enough room for the sidebar", vim.log.levels.WARN)
     return
   end
+  require("diff.diff_view").balance_panes()
   M._sidebar_hidden = false
   M.refresh()
   if is_valid_win(caller_win) then pcall(vim.api.nvim_set_current_win, caller_win) end
