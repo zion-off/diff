@@ -456,16 +456,26 @@ function M.forget_base()
 end
 
 --- Fetch what `head` changed since its merge base with the base branch.
---- The base is looked up once per entry into branch mode.
---- @param cb fun(branch: {base: string, head: string, files: table[]|nil, error: string|nil}|nil)
----   nil when there is no base branch.
+--- The base is looked up once per entry into branch mode. The diff is only
+--- recomputed when `head` or the base point at new commits: saves and index
+--- writes cannot change it, and on a large branch it is the slow part.
+--- @param cb fun(branch: {key, base: string, head: string, files: table[]|nil, error: string|nil}|nil)
+---   nil when there is no base branch; S.branch itself when nothing moved.
 local function fetch_branch(head, cb)
   local root = S.root
   local function with_base(base)
     if not base then cb(nil) return end
-    git.get_branch_changes(root, base.ref, head, function(files, err)
-      if err then log.debug("branch changes for %s: %s", head, err) end
-      cb({ base = base.name, head = head, files = files, error = err })
+    git.rev_parse(root, { head, base.ref }, function(shas)
+      local key = shas and table.concat(shas, " ")
+      local cached = S.branch
+      if key and cached and cached.key == key and cached.base == base.name and cached.head == head then
+        return cb(cached)
+      end
+      local from, to = shas and shas[2] or base.ref, shas and shas[1] or head
+      git.get_branch_changes(root, from, to, function(files, err)
+        if err then log.debug("branch changes for %s: %s", head, err) end
+        cb({ key = key, base = base.name, head = head, files = files, error = err })
+      end)
     end)
   end
   if S.base ~= nil then return with_base(S.base or nil) end
@@ -505,7 +515,7 @@ function M.refresh(preview, branch_mode, on_done)
   if S.branch_mode then
     M.render()
     fetch_branch(head, function(branch)
-      if gen == S.gen then
+      if gen == S.gen and branch ~= S.branch then
         S.branch = branch
         M.render()
       end

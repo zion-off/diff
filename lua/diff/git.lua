@@ -156,6 +156,14 @@ function M.list_branches(root, callback)
   )
 end
 
+--- Resolve refs to commit hashes, in order.
+--- @param callback fun(shas: string[]|nil)  nil when any ref does not resolve
+function M.rev_parse(root, refs, callback)
+  M.run(vim.list_extend({ "rev-parse" }, refs), root, function(lines, _, code)
+    callback(code == 0 and #lines == #refs and lines or nil)
+  end)
+end
+
 -- ---------------------------------------------------------------------------
 -- Status
 -- ---------------------------------------------------------------------------

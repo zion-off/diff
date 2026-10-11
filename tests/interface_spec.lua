@@ -509,6 +509,20 @@ return {
     H.git(repo, "checkout", "-q", base)
   end },
 
+  { "branch mode reuses the branch diff until its commits move", function()
+    local base = vim.trim(H.git(repo, "rev-parse", "--abbrev-ref", "HEAD"))
+    H.git(repo, "checkout", "-q", "topic")
+    sidebar.toggle_branch_mode()
+    H.wait(function() return pcall(panel_row, "topic%.lua") end, "branch changes")
+    vim.wait(300) -- the switch's own refresh
+    -- Nothing moved: one rev-parse, no diff.
+    local calls = H.count_git(function() sidebar.refresh() end, 150)
+    H.eq(calls, { "rev-parse HEAD refs/heads/" .. base }, vim.inspect(calls))
+    sidebar.toggle_branch_mode()
+    H.wait(function() return pcall(panel_row, "Staged") end, "changes again")
+    H.git(repo, "checkout", "-q", base)
+  end },
+
   { "a burst of background refreshes runs one at a time", function()
     vim.wait(300)
     local calls = H.count_git(function()
