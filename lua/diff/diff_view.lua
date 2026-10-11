@@ -449,18 +449,27 @@ end
 --- exactly `target` screen lines. Measuring rather than computing the length
 --- keeps 'linebreak', 'breakindent' and 'showbreak' exact; the largest pad
 --- that still fits is used so the band fills the row's last screen line.
-local function pad_to_height(side, r, row, target, width)
+--- @param pads table  cache: "side:line:width:target" -> padding found before
+local function pad_to_height(side, r, row, target, width, pads)
   local win, buf = S.panes[side], S.bufs[side]
   local line = row[side] and S.model[side].lines[row[side]] or ""
   -- Fillers draw their pattern; text rows rely on the row's line background.
   local char, hl = " ", nil
   if not row[side] then char, hl = "░", "DiffNvimFillerChar" end
   local id
-  local function height_with(n)
+  local function place(n)
     id = vim.api.nvim_buf_set_extmark(buf, NS_WRAP, r, #line, {
       id = id, virt_text = { { string.rep(char, n), hl } }, virt_text_pos = "inline",
     })
+  end
+  local function height_with(n)
+    place(n)
     return vim.api.nvim_win_text_height(win, { start_row = r, end_row = r }).all
+  end
+  local key = side .. ":" .. (row[side] or "-") .. ":" .. width .. ":" .. target
+  if pads[key] then
+    place(pads[key])
+    return
   end
   -- A screen line holds at most `width` cells, so `hi` always overflows.
   local lo, hi = 0, width * (target + 1)
@@ -468,7 +477,8 @@ local function pad_to_height(side, r, row, target, width)
     local mid = math.floor((lo + hi) / 2)
     if height_with(mid) <= target then lo = mid else hi = mid end
   end
-  height_with(lo)
+  place(lo)
+  pads[key] = lo
 end
 
 --- Keep wrapped split panes row-aligned. The scroll sync pairs buffer lines,
@@ -500,7 +510,12 @@ local function align_wrapped()
     return
   end
 
+  -- Measurements depend only on a line's text and the text width, so they
+  -- are kept with the model: expanding context, or returning to a width
+  -- seen before, measures only rows not measured yet.
   local m, padded = S.model, 0
+  m._wrap = m._wrap or { heights = {}, pads = {} }
+  local heights, pads = m._wrap.heights, m._wrap.pads
   for i, item in ipairs(S.layout.items) do
     local row = row_of_item(item)
     if row then
@@ -512,18 +527,24 @@ local function align_wrapped()
         if #line <= text_width[side] and not line:find("\t", 1, true) then
           height[side] = 1
         else
-          height[side] = vim.api.nvim_win_text_height(wins[side], { start_row = i - 1, end_row = i - 1 }).all
+          local key = side .. ":" .. row[side] .. ":" .. text_width[side]
+          height[side] = heights[key]
+          if not height[side] then
+            height[side] = vim.api.nvim_win_text_height(wins[side], { start_row = i - 1, end_row = i - 1 }).all
+            heights[key] = height[side]
+          end
         end
       end
       if height.old ~= height.new then
         local short = height.old < height.new and "old" or "new"
-        pad_to_height(short, i - 1, row, math.max(height.old, height.new), text_width[short])
+        pad_to_height(short, i - 1, row, math.max(height.old, height.new), text_width[short], pads)
         padded = padded + 1
       end
     end
   end
+  S.align_ms = elapsed()
   log.debug("wrap alignment %s: %d rows padded at widths %d/%d in %.1f ms",
-    S.source.path, padded, text_width.old, text_width.new, elapsed())
+    S.source.path, padded, text_width.old, text_width.new, S.align_ms)
 end
 
 --- Bind each visible pane to its syntax source.
@@ -1301,6 +1322,12 @@ vim.api.nvim_create_autocmd("WinScrolled", { group = aug, callback = function() 
 
 -- Wrapping depends on the pane width, so a width change re-aligns the rows.
 -- Height-only resizes (a split elsewhere in the tab) leave wrapping as it was.
+-- Alignment slower than this is debounced while a resize is in progress
+-- (dragging a separator resizes once per step); faster is done at once.
+local ALIGN_DEBOUNCE_OVER_MS = 16
+local ALIGN_DEBOUNCE_MS = 60
+local align_timer
+
 vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
   group = aug,
   callback = function()
@@ -1309,7 +1336,15 @@ vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
       local win = S.panes[side]
       if valid_win(win) and vim.api.nvim_win_get_width(win) ~= width then
         log.debug("%s pane width %d -> %d; re-aligning wrapped rows", side, width, vim.api.nvim_win_get_width(win))
-        align_wrapped()
+        if (S.align_ms or 0) <= ALIGN_DEBOUNCE_OVER_MS then
+          align_wrapped()
+          return
+        end
+        align_timer = align_timer or vim.uv.new_timer()
+        align_timer:stop()
+        align_timer:start(ALIGN_DEBOUNCE_MS, 0, vim.schedule_wrap(function()
+          if S.layout then align_wrapped() end
+        end))
         return
       end
     end
