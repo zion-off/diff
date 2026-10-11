@@ -18,6 +18,7 @@ local DARK = {
   separator_fg    = "#606070",
   hover_bg        = "#232a3d",
   edge_hover      = "#5f87d7",
+  tab_active_bg   = "#2e3650",
   gutter_added    = "#3a8c3a",
   gutter_removed  = "#8c3a3a",
   gutter_changed  = "#8c7a3a",
@@ -38,6 +39,7 @@ local LIGHT = {
   separator_fg    = "#909099",
   hover_bg        = "#e3eaf7",
   edge_hover      = "#3a6fc4",
+  tab_active_bg   = "#d5deef",
   gutter_added    = "#2a7a2a",
   gutter_removed  = "#9a2a2a",
   gutter_changed  = "#8a6a1a",
@@ -133,6 +135,12 @@ local function build_defaults()
     -- status line when each window has its own
     DiffNvimEdgeHover       = { fg = p.edge_hover, bold = true },
     DiffNvimEdgeHoverStatus = { bg = p.edge_hover },
+    -- Mode bar above the sidebar
+    DiffNvimModeBranch      = { link = "Title" },
+    DiffNvimModeTag         = { link = "Comment" },
+    DiffNvimModeClose       = { link = "WarningMsg" },
+    DiffNvimModeTab         = { link = "Comment" },
+    DiffNvimModeTabActive   = { bg = p.tab_active_bg, bold = true },
 
     -- Winbar for diff panes
     DiffNvimWinbar          = { bold = true, link = "StatusLine" },

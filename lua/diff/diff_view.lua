@@ -247,7 +247,7 @@ local function host_window()
     local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))
     local w = vim.api.nvim_win_get_width(win)
     if win ~= S.header_win and not name:match("^diff://file") and not name:match("^diff://commit")
-      and (not best_w or w > best_w) then
+      and not name:match("^diff://mode%-bar") and (not best_w or w > best_w) then
       best, best_w = win, w
     end
   end

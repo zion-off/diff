@@ -10,6 +10,7 @@ A NeoVim plugin that replicates the Git source-control UX of VSCode's SCM sideba
 |---|---|
 | **File Status Panel** | Staged & unstaged changes with collapsible sections, status badges, right-aligned |
 | **Commit Graph Panel** | Recent commit history with `HEAD`, branch, remote, and tag ref badges |
+| **Mode bar** | A strip above the sidebar shows the branch you're looking at and the file panel's mode; click to switch either |
 | **Branch changes** | Press `<leader>gB` to see everything the branch changed since it left `main`, like a pull request's "Files changed" tab |
 | **Branch preview** | Browse another branch's commits without checking it out — pick from a floating list with `<leader>gb` |
 | **Split Diff View** | Side-by-side old/new diff computed in-process with Neovim's built-in xdiff — no `git diff` subprocess |
@@ -238,6 +239,22 @@ Hunk staging uses zero-context patches. A change directly next to a final line w
 
 ---
 
+## Mode Bar
+
+A two-row strip at the top of the sidebar keeps the interface's modes in view:
+
+```
+ ⎇ feature/x                          ▾
+  Changes    Branch changes
+```
+
+- The first row is the branch the panels show. Click it (or press `<CR>` on it)
+  to open the branch picker, the same as `<leader>gb`. While another branch is
+  previewed, or another worktree shown, it is tagged `(preview)` /
+  `(worktree)` and a `✕` takes you back to your own branch.
+- The second row switches the file panel between your working-tree changes and
+  the branch's changes, the same as `<leader>gB`.
+
 ## Branch Changes
 
 Press `<leader>gB` to switch the file panel into **branch mode**: instead of
@@ -356,6 +373,11 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimHeader` | Filename bar above the diff |
 | `DiffNvimSeparator` | Collapsed-context marker |
 | `DiffNvimSeparatorHover` | Collapsed-context marker under the mouse pointer |
+| `DiffNvimModeBranch` | Branch name in the mode bar |
+| `DiffNvimModeTag` | `(preview)` / `(worktree)` tag and `▾` in the mode bar |
+| `DiffNvimModeClose` | `✕` that returns to your branch |
+| `DiffNvimModeTab` | Inactive mode in the mode bar |
+| `DiffNvimModeTabActive` | Active mode in the mode bar |
 
 ---
 

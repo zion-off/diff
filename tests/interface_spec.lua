@@ -124,7 +124,7 @@ return {
     open_file("new%.lua", "new.lua")
     H.eq(pane("old"), nil)
     H.eq(pane("new"), host)
-    H.eq(#vim.api.nvim_tabpage_list_wins(0), 4, "sidebar×2 + header + one pane")
+    H.eq(#vim.api.nvim_tabpage_list_wins(0), 5, "sidebar×3 + header + one pane")
     open_file("a%.lua", "src/a.lua")
     H.ok(pane("old"), "split restored")
     H.eq(pane("new"), host)
@@ -422,9 +422,11 @@ return {
     local fh, ch = vim.api.nvim_win_get_height(fw), vim.api.nvim_win_get_height(cw)
     local width = vim.api.nvim_win_get_width(fw)
 
-    -- The sidebar's edge runs down beside both panels, whichever is hovered.
-    local sidebar_edge = { row = fpos[1], col = fpos[2] + width, width = 1,
-      height = cpos[1] + ch - fpos[1], mouse = false }
+    -- The sidebar's edge runs down beside the mode bar and both panels,
+    -- whichever is hovered.
+    local bpos = vim.api.nvim_win_get_position(sidebar._bar_win)
+    local sidebar_edge = { row = bpos[1], col = fpos[2] + width, width = 1,
+      height = cpos[1] + ch - bpos[1], mouse = false }
     point({ winid = fw, wincol = width + 1 })
     H.wait(function() return vim.deep_equal(edge(), sidebar_edge) end, "sidebar edge: " .. vim.inspect(edge()))
     point({ winid = cw, wincol = width + 1, winrow = 3 })
@@ -487,6 +489,55 @@ return {
       return vim.api.nvim_buf_get_lines(sidebar._commit_buf, 0, 1, false)[1]:match("topic work")
     end, "commit panel filled")
     H.git(repo, "checkout", "-q", base)
+  end },
+
+  { "the mode bar shows the branch, switches modes and leaves a preview", function()
+    local base = vim.trim(H.git(repo, "rev-parse", "--abbrev-ref", "HEAD"))
+    local mb = require("diff.mode_bar")
+    local function bar() return vim.api.nvim_buf_get_lines(sidebar._bar_buf, 0, -1, false) end
+    local function col_of(row, text)
+      local l = bar()[row]
+      return vim.fn.strdisplaywidth(l:sub(1, l:find(text, 1, true) - 1)) + 1
+    end
+    H.wait(function() return bar()[1]:match("⎇ " .. vim.pesc(base)) end, "branch name: " .. vim.inspect(bar()))
+    H.eq(vim.api.nvim_win_get_height(sidebar._bar_win), mb.HEIGHT)
+
+    -- Items are tinted under the pointer, like rows.
+    local real_getmousepos = vim.fn.getmousepos
+    vim.fn.getmousepos = function()
+      return { winid = sidebar._bar_win, line = 2, winrow = 2, wincol = col_of(2, "Branch changes"),
+        screenrow = vim.fn.screenpos(sidebar._bar_win, 2, 1).row }
+    end
+    press("<MouseMove>")
+    local ns = vim.api.nvim_get_namespaces()["diff_nvim_mode_bar_hover"]
+    H.wait(function() return #vim.api.nvim_buf_get_extmarks(sidebar._bar_buf, ns, 0, -1, {}) == 1 end, "item tinted")
+    vim.fn.getmousepos = real_getmousepos
+
+    H.ok(mb.click(2, col_of(2, "Branch changes")))
+    H.wait(function() return pcall(panel_row, "Branch Changes vs") end, "branch mode")
+    H.eq(mb.click(2, col_of(2, "Branch changes")), false, "the active mode is not a button")
+    H.ok(mb.click(2, col_of(2, "Changes")))
+    H.wait(function() return pcall(panel_row, "Staged") end, "changes mode")
+    H.eq(sidebar._branch_mode, false)
+
+    sidebar.set_preview_branch("topic")
+    H.wait(function() return bar()[1]:match("⎇ topic %(preview%)") and bar()[1]:match("✕") end,
+      "preview shown: " .. vim.inspect(bar()))
+    H.ok(mb.click(1, col_of(1, "✕")))
+    H.wait(function() return sidebar._preview_branch == nil and bar()[1]:match(vim.pesc(base)) end, "home again")
+    H.ok(not bar()[1]:match("✕"))
+
+    -- The branch opens the picker.
+    H.ok(mb.click(1, 3))
+    H.wait(function()
+      for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+        if vim.api.nvim_win_get_config(w).relative ~= "" then
+          local text = table.concat(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(w), 0, -1, false), "\n")
+          if text:match("topic") then return true end
+        end
+      end
+    end, "branch picker")
+    require("diff.branch_picker").close()
   end },
 
   { "closing tears everything down and restores user mappings", function()

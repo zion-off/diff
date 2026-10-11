@@ -1,5 +1,6 @@
 --- diff.nvim — interface layout: a dedicated tab with the sidebar panels
---- (file status on top, commits below) and a main area for the diff view.
+--- (the mode bar, file status below it, commits at the bottom) and a main
+--- area for the diff view.
 --- In branch mode the file panel lists the branch's changes and takes the
 --- whole sidebar; the commit panel is closed.
 ---
@@ -7,6 +8,7 @@
 --- refresh scheduling, mouse activation and the interface-scoped keymaps.
 local M = {}
 
+local mode_bar     = require("diff.mode_bar")
 local file_panel   = require("diff.file_panel")
 local commit_panel = require("diff.commit_panel")
 local config       = require("diff.config")
@@ -22,6 +24,9 @@ local WATCH_DEBOUNCE_MS   = 100
 -- State
 -- ---------------------------------------------------------------------------
 
+M._bar_win        = nil
+M._bar_buf        = nil
+M._head_name      = nil   -- checked-out branch of _repo_root (nil: detached)
 M._file_win       = nil
 M._commit_win     = nil
 M._file_buf       = nil
@@ -138,8 +143,10 @@ local function edge_under_mouse(mp)
   if mp.line ~= 0 or not is_valid_win(win) or vim.api.nvim_win_get_tabpage(win) ~= get_diff_tab() then
     return nil
   end
-  -- The rule under the diff header is not meant to be moved.
+  -- The rule under the diff header and the bottom of the mode bar are not
+  -- meant to be moved.
   if win == require("diff.diff_view")._state().header_win then return nil end
+  if win == M._bar_win and mp.wincol ~= vim.api.nvim_win_get_width(win) + 1 then return nil end
   if mp.wincol == vim.api.nvim_win_get_width(win) + 1 then return win, "vsep" end
   if mp.winrow == vim.api.nvim_win_get_height(win) + 1 then
     -- The bottom status line resizes the command line, not a window.
@@ -249,8 +256,11 @@ local function on_mouse_move()
     local mp = vim.fn.getmousepos()
     highlight_edge(edge_under_mouse(mp))
     local line = line_under_mouse(mp)
-    if mp.winid == hover_win and line == hover_line then return end
-    hover_win, hover_line = mp.winid, line
+    -- The bar's items share rows, so there the column matters too.
+    local key = line and mp.winid == M._bar_win and line .. ":" .. mp.wincol or line
+    if mp.winid == hover_win and key == hover_line then return end
+    hover_win, hover_line = mp.winid, key
+    mode_bar.hover(mp.winid == M._bar_win and line or nil, mp.wincol)
     file_panel.hover(mp.winid == M._file_win and line or nil)
     commit_panel.hover(mp.winid == M._commit_win and line or nil)
     require("diff.diff_view").hover(mp.winid, line)
@@ -271,6 +281,13 @@ local function on_mouse_key(key)
   vim.schedule(function()
     if dragged then return end
     local mp = vim.fn.getmousepos()
+    if mp.winid == M._bar_win then
+      local line = line_under_mouse(mp)
+      -- Focus goes back to the file panel; an item may then open the picker.
+      if line and is_valid_win(M._file_win) then vim.api.nvim_set_current_win(M._file_win) end
+      if line then mode_bar.click(line, mp.wincol) end
+      return
+    end
     local target
     if mp.winid == M._commit_win then
       target = commit_panel
@@ -360,11 +377,12 @@ end
 
 local function clear_panel_state()
   M._file_win, M._commit_win, M._file_buf, M._commit_buf = nil, nil, nil, nil
+  M._bar_win, M._bar_buf = nil, nil
 end
 
 --- Return the tabpage of the interface, if it is open.
 function get_diff_tab()
-  for _, win in ipairs({ M._file_win or false, M._commit_win or false, M._main_win or false }) do
+  for _, win in ipairs({ M._file_win or false, M._commit_win or false, M._bar_win or false, M._main_win or false }) do
     if win and is_valid_win(win) then return vim.api.nvim_win_get_tabpage(win) end
   end
   return nil
@@ -429,8 +447,22 @@ local function create_commit_panel()
   commit_panel.setup(M._commit_buf, M._commit_win, M._repo_root)
 end
 
---- Create the panel windows by splitting off `anchor`: the file panel, and
---- below it the commit panel unless in branch mode.
+--- Create the mode bar window above the file panel, at a fixed height.
+local function create_mode_bar()
+  vim.api.nvim_set_current_win(M._file_win)
+  vim.cmd("leftabove " .. mode_bar.HEIGHT .. " split")
+  M._bar_win = vim.api.nvim_get_current_win()
+  M._bar_buf = make_panel_buf("diff://mode-bar")
+  vim.api.nvim_win_set_buf(M._bar_win, M._bar_buf)
+  set_panel_win_opts(M._bar_win)
+  for k, v in pairs({ winfixheight = true, cursorline = false }) do
+    pcall(vim.api.nvim_set_option_value, k, v, { win = M._bar_win })
+  end
+  mode_bar.setup(M._bar_buf, M._bar_win)
+end
+
+--- Create the panel windows by splitting off `anchor`: the mode bar, the file
+--- panel, and below it the commit panel unless in branch mode.
 local function create_panels(anchor, width)
   local position = config.get().sidebar_position == "right" and "botright" or "topleft"
   vim.api.nvim_set_current_win(anchor)
@@ -440,6 +472,7 @@ local function create_panels(anchor, width)
   vim.api.nvim_win_set_buf(M._file_win, M._file_buf)
   set_panel_win_opts(M._file_win)
   file_panel.setup(M._file_buf, M._file_win, M._repo_root)
+  create_mode_bar()
   if not M._branch_mode then create_commit_panel() end
 end
 
@@ -595,7 +628,7 @@ function M.toggle_sidebar_panel()
         file_height = not M._branch_mode and vim.api.nvim_win_get_height(M._file_win) or nil,
       }
     end
-    for _, win in ipairs({ M._file_win, M._commit_win }) do
+    for _, win in ipairs({ M._bar_win, M._file_win, M._commit_win }) do
       if is_valid_win(win) then pcall(vim.api.nvim_win_close, win, true) end
     end
     clear_panel_state()
@@ -665,9 +698,45 @@ end
 -- Refresh
 -- ---------------------------------------------------------------------------
 
+local function away_from_home()
+  return M._home ~= nil and M._repo_root ~= M._home.root
+end
+
+--- Back to the branch checked out where the interface was opened.
+local function go_home()
+  if away_from_home() then
+    M.set_preview_branch(nil, M._home.root)
+  else
+    M.set_preview_branch(nil)
+  end
+end
+
+local function render_mode_bar()
+  mode_bar.render({
+    branch = M._preview_branch or M._head_name or "detached HEAD",
+    preview = M._preview_branch ~= nil,
+    worktree = away_from_home(),
+    away = M._preview_branch ~= nil or away_from_home(),
+    branch_mode = M._branch_mode,
+    actions = {
+      pick_branch  = function() M.pick_preview_branch() end,
+      go_home      = go_home,
+      show_changes = function() if M._branch_mode then M.toggle_branch_mode() end end,
+      show_branch  = function() if not M._branch_mode then M.toggle_branch_mode() end end,
+    },
+  })
+end
+
 --- Re-fetch git data for the visible panels.
 function M.refresh()
   if not M.is_open() or M._sidebar_hidden or not M._repo_root then return end
+  render_mode_bar()
+  local root = M._repo_root
+  git.get_head_name(root, function(name)
+    if root ~= M._repo_root then return end
+    M._head_name = name
+    render_mode_bar()
+  end)
   file_panel.refresh(M._preview_branch, M._branch_mode)
   if not M._branch_mode then commit_panel.refresh(M._preview_branch) end
 end
@@ -768,9 +837,10 @@ function M.setup_auto_refresh()
       local resized = vim.v.event and vim.v.event.windows or {}
       local affects_panels = #resized == 0
       for _, w in ipairs(resized) do
-        if w == M._file_win or w == M._commit_win then affects_panels = true end
+        if w == M._file_win or w == M._commit_win or w == M._bar_win then affects_panels = true end
       end
       if affects_panels then
+        mode_bar.on_resize()
         file_panel.on_resize()
         commit_panel.on_resize()
       end
