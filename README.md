@@ -88,8 +88,13 @@ require("diff").setup({
 
   -- Mouse interactivity in the sidebar (default: true). Clicking a file opens
   -- its diff; clicking a commit expands/collapses it; clicking a section header
-  -- toggles it. Only enables Neovim's 'mouse' option while the interface is
-  -- open (if not already enabled) and restores it on close.
+  -- toggles it. Hovering tints whatever a click would act on (rows, "hidden
+  -- lines" separators) and highlights the window edge you can drag to resize
+  -- (edges need Neovim 0.11+).
+  -- Only enables Neovim's 'mouse' and 'mousemoveevent' options while the
+  -- interface is open and restores them on close. With 'mousemoveevent' on,
+  -- moving the mouse in the middle of a key sequence (after <leader>, say)
+  -- cancels it.
   mouse = true,
 
   -- Lines of context around each change (nil shows whole files).
@@ -168,7 +173,7 @@ require("diff").setup({
 | `u` | Unstage file |
 | `z` | Toggle directory / section collapse |
 
-The file shown in the diff view is marked with `▎` in the panel.
+The file shown in the diff view is highlighted in the panel.
 
 ### Commit Graph Panel
 
@@ -345,9 +350,12 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimNoteHeader` | `## Note` heading in notes panel |
 | `DiffNvimNoteText` | Note body text |
 | `DiffNvimActiveFile` | Panel row of the file shown in the diff view |
-| `DiffNvimActiveSign` | `▎` marker on that row |
+| `DiffNvimHover` | Clickable row under the mouse pointer |
+| `DiffNvimEdgeHover` | Draggable window separator under the mouse pointer |
+| `DiffNvimEdgeHoverStatus` | Status line between panels under the mouse pointer (when it is the draggable edge) |
 | `DiffNvimHeader` | Filename bar above the diff |
 | `DiffNvimSeparator` | Collapsed-context marker |
+| `DiffNvimSeparatorHover` | Collapsed-context marker under the mouse pointer |
 
 ---
 

@@ -34,11 +34,13 @@ M._home           = nil   -- {root, git_dir} the interface was opened in; _repo_
 M._saved_layout   = nil   -- tab + window to return to on close
 M._sidebar_hidden = false
 M._saved_mouse    = nil   -- previous global 'mouse' value (restored on close)
+M._saved_mousemove = nil  -- previous 'mousemoveevent' value (restored on close)
 M._panel_sizes    = nil   -- {width, file_height} kept across a hide/show toggle
 M._preview_branch = nil   -- when set, panels source data from this branch
 M._branch_mode    = false -- file panel shows the branch's changes; no commit panel
 
 local watcher, watch_timer, refresh_timer
+local get_diff_tab -- defined with the panels, used by the mouse handling
 local mouse_ns = vim.api.nvim_create_namespace("diff_nvim_mouse")
 local aug = vim.api.nvim_create_augroup("DiffNvimSidebar", { clear = true })
 
@@ -106,13 +108,160 @@ end
 -- processed the click.
 local LEFT_MOUSE = normalize_lhs("<LeftMouse>")
 local LEFT_DRAG  = normalize_lhs("<LeftDrag>")
+local MOUSE_MOVE = normalize_lhs("<MouseMove>")
 
 -- Set once the pointer moves with the button held. The click is read after
 -- the fact, so by then a drag (resizing the panels, say) may have carried the
 -- pointer onto a row; that row was never clicked.
 local dragged = false
 
+--- The buffer line under the pointer, or nil. getmousepos() reports the last
+--- line for the empty rows below it, which nothing should react to.
+local function line_under_mouse(mp)
+  if mp.line < 1 or not is_valid_win(mp.winid) then return nil end
+  local last = vim.api.nvim_buf_line_count(vim.api.nvim_win_get_buf(mp.winid))
+  if mp.line == last then
+    local pos = vim.fn.screenpos(mp.winid, last, 1)
+    if pos.row > 0 and mp.screenrow > pos.row then return nil end
+  end
+  return mp.line
+end
+
+-- Row the pointer was last seen over, so a move within a row does nothing.
+local hover_win, hover_line
+
+--- The draggable window edge under the pointer: the window it belongs to and
+--- "vsep" (its right-hand separator) or "status" (its status line), or nil.
+--- The pointer is then just outside the window, one past its width or height.
+local function edge_under_mouse(mp)
+  local win = mp.winid
+  if mp.line ~= 0 or not is_valid_win(win) or vim.api.nvim_win_get_tabpage(win) ~= get_diff_tab() then
+    return nil
+  end
+  -- The rule under the diff header is not meant to be moved.
+  if win == require("diff.diff_view")._state().header_win then return nil end
+  if mp.wincol == vim.api.nvim_win_get_width(win) + 1 then return win, "vsep" end
+  if mp.winrow == vim.api.nvim_win_get_height(win) + 1 then
+    -- The bottom status line resizes the command line, not a window.
+    local bottom = vim.api.nvim_win_get_position(win)[1] + vim.api.nvim_win_get_height(win) + 1
+    if bottom >= vim.o.lines - vim.o.cmdheight then return nil end
+    return win, "status"
+  end
+  return nil
+end
+
+-- Floats that let the mouse through (needed to paint over an edge without
+-- blocking the drag) arrived in Neovim 0.11.
+local CAN_PAINT_EDGES = vim.fn.has("nvim-0.11") == 1
+
+-- The highlighted edge: { win, kind, float }.
+local edge
+
+--- Screen area (0-based editor cells) of `win`'s edge. A vertical edge is
+--- shared by every window stacked against the same separator column (the
+--- file and commit panels), which all resize together when it is dragged.
+local function edge_area(win, kind)
+  local function box(w)
+    local pos = vim.api.nvim_win_get_position(w)
+    return { win = w, row = pos[1], col = pos[2],
+      height = vim.api.nvim_win_get_height(w), width = vim.api.nvim_win_get_width(w) }
+  end
+  local b = box(win)
+  if kind == "status" then return { row = b.row + b.height, col = b.col, height = 1, width = b.width } end
+
+  local x = b.col + b.width
+  local column = {}
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(vim.api.nvim_win_get_tabpage(win))) do
+    if vim.api.nvim_win_get_config(w).relative == "" then
+      local bw = box(w)
+      if bw.col + bw.width == x then table.insert(column, bw) end
+    end
+  end
+  table.sort(column, function(a, c) return a.row < c.row end)
+  local first, last
+  for i, bw in ipairs(column) do
+    if bw.win == win then first, last = i, i end
+  end
+  -- Windows touch when one starts on the row after the other's bottom edge.
+  while first > 1 and column[first - 1].row + column[first - 1].height + 1 == column[first].row do
+    first = first - 1
+  end
+  while last < #column and column[last].row + column[last].height + 1 == column[last + 1].row do
+    last = last + 1
+  end
+  local top, bottom = column[first], column[last]
+  return { row = top.row, col = x, height = bottom.row + bottom.height - top.row, width = 1 }
+end
+
+local function clear_edge()
+  if edge and is_valid_win(edge.float) then pcall(vim.api.nvim_win_close, edge.float, true) end
+  edge = nil
+end
+
+--- Highlight `win`'s edge (nil: none) by covering it with a float that shows
+--- the same characters in the hover colour and lets the mouse through.
+local function highlight_edge(win, kind)
+  if not CAN_PAINT_EDGES then return end
+  if edge and win == edge.win and kind == edge.kind then return end
+  clear_edge()
+  if not win then return end
+  -- Redraw so the characters copied from the screen are current: the old
+  -- float is gone and the windows may just have been resized.
+  vim.cmd("redraw")
+  local area = edge_area(win, kind)
+  local lines = {}
+  for r = 1, area.height do
+    local cells = {}
+    for c = 1, area.width do
+      local ch = vim.fn.screenstring(area.row + r, area.col + c)
+      cells[c] = ch ~= "" and ch or " "
+    end
+    lines[r] = table.concat(cells)
+  end
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = "wipe"
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  local ok, float = pcall(vim.api.nvim_open_win, buf, false, {
+    relative = "editor", row = area.row, col = area.col, width = area.width, height = area.height,
+    focusable = false, mouse = false, style = "minimal", zindex = 1, noautocmd = true,
+  })
+  if not ok then
+    log.debug("cannot highlight edge: %s", tostring(float))
+    return
+  end
+  -- A status line (one per window) is tinted; a separator line is recoloured.
+  local hl = (kind == "status" and vim.o.laststatus ~= 3) and "DiffNvimEdgeHoverStatus" or "DiffNvimEdgeHover"
+  vim.wo[float].winhighlight = "Normal:" .. hl .. ",NormalFloat:" .. hl
+  edge = { win = win, kind = kind, float = float }
+end
+
+--- Re-place the edge highlight after a resize (it follows a drag).
+local function refresh_edge()
+  if not edge then return end
+  local win, kind = edge.win, edge.kind
+  clear_edge()
+  if is_valid_win(win) then highlight_edge(win, kind) end
+end
+
+local function on_mouse_move()
+  vim.schedule(function()
+    if not M.is_open() then return end
+    local mp = vim.fn.getmousepos()
+    highlight_edge(edge_under_mouse(mp))
+    local line = line_under_mouse(mp)
+    if mp.winid == hover_win and line == hover_line then return end
+    hover_win, hover_line = mp.winid, line
+    file_panel.hover(mp.winid == M._file_win and line or nil)
+    commit_panel.hover(mp.winid == M._commit_win and line or nil)
+    require("diff.diff_view").hover(mp.winid, line)
+  end)
+end
+
 local function on_mouse_key(key)
+  if key == MOUSE_MOVE then
+    on_mouse_move()
+    return
+  end
   if key == LEFT_DRAG then
     dragged = true
     return
@@ -214,7 +363,7 @@ local function clear_panel_state()
 end
 
 --- Return the tabpage of the interface, if it is open.
-local function get_diff_tab()
+function get_diff_tab()
   for _, win in ipairs({ M._file_win or false, M._commit_win or false, M._main_win or false }) do
     if win and is_valid_win(win) then return vim.api.nvim_win_get_tabpage(win) end
   end
@@ -340,6 +489,9 @@ function M.open(info)
       M._saved_mouse = cur
       vim.o.mouse = "a"
     end
+    -- Deliver pointer moves (for hover) while the interface is open.
+    M._saved_mousemove = vim.o.mousemoveevent
+    vim.o.mousemoveevent = true
     vim.on_key(on_mouse_key, mouse_ns)
   end
 
@@ -407,6 +559,12 @@ function M.close()
     vim.o.mouse = M._saved_mouse
     M._saved_mouse = nil
   end
+  if M._saved_mousemove ~= nil then
+    vim.o.mousemoveevent = M._saved_mousemove
+    M._saved_mousemove = nil
+  end
+  hover_win, hover_line = nil, nil
+  clear_edge()
   log.info("closed interface")
 end
 
@@ -416,6 +574,11 @@ function M.toggle(info)
   else
     M.open(info)
   end
+end
+
+--- The float highlighting a hovered edge (tests).
+function M._edge_float()
+  return edge and edge.float
 end
 
 --- Hide or show the sidebar panels without closing the diff view.
@@ -611,6 +774,7 @@ function M.setup_auto_refresh()
         file_panel.on_resize()
         commit_panel.on_resize()
       end
+      refresh_edge()
     end,
   })
 

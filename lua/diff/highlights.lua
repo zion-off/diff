@@ -16,6 +16,8 @@ local DARK = {
   filler_fg       = "#3a3a4a",
   separator_bg    = "#1a1a2a",
   separator_fg    = "#606070",
+  hover_bg        = "#232a3d",
+  edge_hover      = "#5f87d7",
   gutter_added    = "#3a8c3a",
   gutter_removed  = "#8c3a3a",
   gutter_changed  = "#8c7a3a",
@@ -34,6 +36,8 @@ local LIGHT = {
   filler_fg       = "#c0c0cc",
   separator_bg    = "#e8e8f0",
   separator_fg    = "#909099",
+  hover_bg        = "#e3eaf7",
+  edge_hover      = "#3a6fc4",
   gutter_added    = "#2a7a2a",
   gutter_removed  = "#9a2a2a",
   gutter_changed  = "#8a6a1a",
@@ -114,13 +118,21 @@ local function build_defaults()
     DiffNvimSeparator       = { fg = p.separator_fg, bg = p.separator_bg, italic = true },
     -- Enclosing-declaration heading shown next to a collapsed separator
     DiffNvimSeparatorDecl   = { fg = p.separator_fg, bg = p.separator_bg, italic = true, bold = true },
+    -- A separator under the mouse pointer (click to expand)
+    DiffNvimSeparatorHover     = { fg = p.separator_fg, bg = p.hover_bg, italic = true },
+    DiffNvimSeparatorDeclHover = { fg = p.separator_fg, bg = p.hover_bg, italic = true, bold = true },
 
     -- Commit file entries
     DiffNvimCommitFileEntry = { link = "Normal" },
 
     -- The file currently shown in the diff view, marked in either panel
     DiffNvimActiveFile      = { link = "Visual" },
-    DiffNvimActiveSign      = { fg = p.ref_head, bold = true },
+    -- A clickable row under the mouse pointer
+    DiffNvimHover           = { bg = p.hover_bg },
+    -- A draggable window edge under the mouse pointer: a separator, or a
+    -- status line when each window has its own
+    DiffNvimEdgeHover       = { fg = p.edge_hover, bold = true },
+    DiffNvimEdgeHoverStatus = { bg = p.edge_hover },
 
     -- Winbar for diff panes
     DiffNvimWinbar          = { bold = true, link = "StatusLine" },

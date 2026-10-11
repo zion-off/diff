@@ -13,6 +13,10 @@ local log    = require("diff.log").scope("file_panel")
 
 local NS        = vim.api.nvim_create_namespace("diff_nvim_file_panel")
 local NS_ACTIVE = vim.api.nvim_create_namespace("diff_nvim_file_panel_active")
+local NS_HOVER  = vim.api.nvim_create_namespace("diff_nvim_file_panel_hover")
+
+-- Rows a click acts on (and so get the hover tint).
+local CLICKABLE = { header = true, dir_node = true, file = true }
 
 local function fresh_state()
   return {
@@ -26,6 +30,7 @@ local function fresh_state()
     collapsed_dirs = {}, -- "<section>:<dir path>" -> true
     line_map = {},       -- lnr -> { type, key, section, file?, dir_key? }
     active = nil,        -- key of the file shown in the diff view
+    hover = nil,         -- row under the mouse pointer
     gen = 0,
     width = nil,    -- width of the last render
   }
@@ -234,11 +239,22 @@ local function apply_active()
     if meta.key == S.active then
       vim.api.nvim_buf_set_extmark(S.buf, NS_ACTIVE, lnr - 1, 0, {
         line_hl_group = "DiffNvimActiveFile",
-        virt_text = { { "▎", "DiffNvimActiveSign" } }, virt_text_pos = "overlay",
       })
       return
     end
   end
+end
+
+--- Tint the clickable row under the mouse pointer.
+local function apply_hover()
+  if not (S.buf and vim.api.nvim_buf_is_valid(S.buf)) then return end
+  vim.api.nvim_buf_clear_namespace(S.buf, NS_HOVER, 0, -1)
+  local meta = S.hover and S.line_map[S.hover]
+  if not (meta and CLICKABLE[meta.type]) then return end
+  -- Above the cursor line and active-file highlights, so the hover always shows.
+  pcall(vim.api.nvim_buf_set_extmark, S.buf, NS_HOVER, S.hover - 1, 0, {
+    line_hl_group = "DiffNvimHover", priority = 300,
+  })
 end
 
 --- Draw the cached status into the panel at the window's current width.
@@ -258,6 +274,14 @@ function M.render()
   end
   restore_cursor(prev)
   apply_active()
+  apply_hover()
+end
+
+--- The mouse pointer is over row `lnr` (nil: not over this panel).
+function M.hover(lnr)
+  if lnr == S.hover then return end
+  S.hover = lnr
+  apply_hover()
 end
 
 --- Re-render after a resize, but only when the width changed: a height-only

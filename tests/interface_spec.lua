@@ -367,6 +367,91 @@ return {
     H.git(repo, "worktree", "remove", "--force", wt)
   end },
 
+  { "hovering tints the clickable row and highlights draggable edges", function()
+    open_file("a%.lua", "src/a.lua")
+    local function marks(buf, ns)
+      return vim.api.nvim_buf_get_extmarks(buf, vim.api.nvim_get_namespaces()[ns], 0, -1, { details = true })
+    end
+    -- Headless Neovim cannot place a synthetic pointer over a window, so the
+    -- position is stubbed and a real <MouseMove> key is fed through.
+    local real_getmousepos = vim.fn.getmousepos
+    local function point(mp)
+      vim.fn.getmousepos = function() return vim.tbl_extend("keep", mp, { line = 0, winrow = 1, wincol = 1 }) end
+      press("<MouseMove>")
+    end
+    local function over_row(win, lnr, below)
+      local row = vim.fn.screenpos(win, lnr, 1).row
+      point({ winid = win, line = lnr, winrow = lnr, screenrow = row + (below and 1 or 0) })
+    end
+    local fp_ns, cp_ns = "diff_nvim_file_panel_hover", "diff_nvim_commit_hover"
+
+    local row_a = panel_row("a%.lua")
+    over_row(sidebar._file_win, row_a)
+    H.wait(function() return #marks(sidebar._file_buf, fp_ns) == 1 end, "file row tinted")
+    local mark = marks(sidebar._file_buf, fp_ns)[1]
+    H.eq({ mark[2], mark[4].line_hl_group }, { row_a - 1, "DiffNvimHover" })
+
+    -- The empty rows below the last line are not the last line.
+    over_row(sidebar._file_win, vim.api.nvim_buf_line_count(sidebar._file_buf), true)
+    H.wait(function() return #marks(sidebar._file_buf, fp_ns) == 0 end, "no tint below the rows")
+
+    -- A commit tints both its header lines.
+    over_row(sidebar._commit_win, 2)
+    H.wait(function() return #marks(sidebar._commit_buf, cp_ns) == 2 end, "commit header tinted")
+
+    -- A separator is tinted in both panes, with a hint; leaving the panel clears it.
+    local sep = find_item(function(it) return it.sep end)
+    over_row(pane("new"), sep)
+    H.wait(function() return #marks(S().bufs.old, "diff_nvim_hover") == 1 end, "separator tinted")
+    H.eq(#marks(sidebar._commit_buf, cp_ns), 0)
+    local virt = marks(S().bufs.new, "diff_nvim_hover")[1][4].virt_text
+    H.ok(virt[#virt][1]:match("click to expand"), vim.inspect(virt))
+    over_row(pane("new"), find_item(function(it) return not it.sep end))
+    H.wait(function() return #marks(S().bufs.new, "diff_nvim_hover") == 0 end, "separator untinted")
+
+    -- Edges are painted by a float over exactly their cells.
+    local function edge()
+      local f = sidebar._edge_float()
+      if not (f and vim.api.nvim_win_is_valid(f)) then return nil end
+      local c = vim.api.nvim_win_get_config(f)
+      local pos = vim.api.nvim_win_get_position(f)
+      return { row = pos[1], col = pos[2], width = c.width, height = c.height, mouse = c.mouse }
+    end
+    local fw, cw = sidebar._file_win, sidebar._commit_win
+    local fpos, cpos = vim.api.nvim_win_get_position(fw), vim.api.nvim_win_get_position(cw)
+    local fh, ch = vim.api.nvim_win_get_height(fw), vim.api.nvim_win_get_height(cw)
+    local width = vim.api.nvim_win_get_width(fw)
+
+    -- The sidebar's edge runs down beside both panels, whichever is hovered.
+    local sidebar_edge = { row = fpos[1], col = fpos[2] + width, width = 1,
+      height = cpos[1] + ch - fpos[1], mouse = false }
+    point({ winid = fw, wincol = width + 1 })
+    H.wait(function() return vim.deep_equal(edge(), sidebar_edge) end, "sidebar edge: " .. vim.inspect(edge()))
+    point({ winid = cw, wincol = width + 1, winrow = 3 })
+    vim.wait(50)
+    H.eq(edge(), sidebar_edge)
+
+    -- The boundary between the panels is only that, with a global status line
+    -- too (where it is a separator line, like the vertical edge).
+    for _, ls in ipairs({ 2, 3 }) do
+      vim.o.laststatus = ls
+      vim.cmd("redraw")
+      fh = vim.api.nvim_win_get_height(fw)
+      point({ winid = cw, winrow = 1 }) -- off the edges first
+      H.wait(function() return edge() == nil end, "edge cleared")
+      point({ winid = fw, winrow = fh + 1 })
+      local boundary = { row = fpos[1] + fh, col = fpos[2], width = width, height = 1, mouse = false }
+      H.wait(function() return vim.deep_equal(edge(), boundary) end,
+        "panel boundary (laststatus=" .. ls .. "): " .. vim.inspect(edge()))
+    end
+    vim.o.laststatus = 2
+
+    -- The bottom status line resizes the command line: not a pane edge.
+    point({ winid = cw, winrow = vim.api.nvim_win_get_height(cw) + 1 })
+    H.wait(function() return edge() == nil end, "no edge at the bottom")
+    vim.fn.getmousepos = real_getmousepos
+  end },
+
   { "branch mode lists the branch's changes in a full-height panel, without the commit panel", function()
     local base = vim.trim(H.git(repo, "rev-parse", "--abbrev-ref", "HEAD"))
     H.git(repo, "checkout", "-q", "-b", "topic")
@@ -410,6 +495,7 @@ return {
     H.eq(#vim.api.nvim_list_tabpages(), tabs - 1)
     H.eq(S().source, nil)
     H.eq(S().watcher, nil)
+    H.eq(vim.o.mousemoveevent, false, "'mousemoveevent' should be restored")
     local m = vim.fn.maparg("<leader>gb", "n", false, true)
     H.eq(m.desc, "user mapping")
     for _, b in ipairs(vim.api.nvim_list_bufs()) do

@@ -24,11 +24,13 @@ local NS_WORDS = vim.api.nvim_create_namespace("diff_nvim_words")
 local NS_NOTES = vim.api.nvim_create_namespace("diff_nvim_notes_markers")
 local NS_HEAD  = vim.api.nvim_create_namespace("diff_nvim_header")
 local NS_WRAP  = vim.api.nvim_create_namespace("diff_nvim_wrap")
+local NS_HOVER = vim.api.nvim_create_namespace("diff_nvim_hover")
 
 -- Highlight priorities relative to tree-sitter's 100.
 local PRIORITY_LINE_BG   = 50   -- below syntax so colours show through
 local PRIORITY_NOTE_SIGN = 70
 local PRIORITY_WORD_HL   = 150  -- above syntax so changed tokens stand out
+local PRIORITY_HOVER     = 200  -- drawn over the separator it highlights
 
 local EXPAND_STEP = 10
 local WATCH_DEBOUNCE_MS = 150
@@ -56,6 +58,7 @@ local function fresh_state()
     sources = {},               -- side -> syntax Source
     words = {},                 -- model row -> word ranges (lazy)
     lnum_width = 1,
+    hover = nil,                -- layout row under the mouse pointer
     wrap_widths = {},           -- side -> pane width the wrap padding was computed for
     synced_view = nil,          -- view both split panes were last left showing
     watcher = nil, watch_timer = nil,
@@ -312,13 +315,31 @@ end
 -- Rendering
 -- ---------------------------------------------------------------------------
 
-local function separator_virt(side, sep)
+--- @param hovered boolean|nil  under the mouse pointer: tinted, with a hint
+local function separator_virt(side, sep, hovered)
+  local hl, decl_hl = "DiffNvimSeparator", "DiffNvimSeparatorDecl"
+  if hovered then hl, decl_hl = "DiffNvimSeparatorHover", "DiffNvimSeparatorDeclHover" end
   local span = engine.separator_span(S.model, sep)
-  local virt = { { string.format("··· %d hidden lines ···", span.count), "DiffNvimSeparator" } }
+  local virt = { { string.format("··· %d hidden lines ···", span.count), hl } }
   local src = S.sources[side]
   local heading = src and span[side][2] and src:enclosing_decl(span[side][2])
-  if heading then table.insert(virt, { "  " .. heading, "DiffNvimSeparatorDecl" }) end
+  if heading then table.insert(virt, { "  " .. heading, decl_hl }) end
+  if hovered then table.insert(virt, { "  click to expand", hl }) end
   return virt
+end
+
+--- Tint the separator under the mouse pointer, in every pane.
+local function apply_hover(side)
+  local buf = S.bufs[side]
+  if not valid_buf(buf) then return end
+  vim.api.nvim_buf_clear_namespace(buf, NS_HOVER, 0, -1)
+  local item = S.hover and S.layout and S.layout.items[S.hover]
+  if not (item and item.sep) then return end
+  vim.api.nvim_buf_set_extmark(buf, NS_HOVER, S.hover - 1, 0, {
+    line_hl_group = "DiffNvimHover",
+    virt_text = separator_virt(side, item.sep, true), virt_text_pos = "overlay",
+    priority = PRIORITY_HOVER,
+  })
 end
 
 local FILLER = string.rep("░", 400)
@@ -693,6 +714,7 @@ local function render(anchor, offset)
       set_lines(S.bufs[side], text[side])
       decorate(side)
       decorate_notes(side)
+      apply_hover(side)
     end
   end
   bind_syntax()
@@ -971,6 +993,16 @@ function M.expand(what)
     end
   end
   render(anchor, offset)
+end
+
+--- The mouse pointer is over row `line` of window `win` (nil: elsewhere).
+function M.hover(win, line)
+  line = side_of_win(win) and line or nil
+  if line == S.hover then return end
+  S.hover = line
+  for _, side in ipairs(SIDES) do
+    if S.panes[side] then apply_hover(side) end
+  end
 end
 
 --- A mouse click on row `line` of pane `win`: a "hidden lines" separator

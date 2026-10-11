@@ -14,6 +14,7 @@ local NS        = vim.api.nvim_create_namespace("diff_nvim_commit_panel")
 -- Separate namespace for the two-line cursor highlight, redrawn on every move.
 local CURSOR_NS = vim.api.nvim_create_namespace("diff_nvim_commit_cursor")
 local NS_ACTIVE = vim.api.nvim_create_namespace("diff_nvim_commit_active")
+local NS_HOVER  = vim.api.nvim_create_namespace("diff_nvim_commit_hover")
 
 local COMMIT_LIMIT = 50
 local META_INDENT  = "  "
@@ -28,6 +29,7 @@ local function fresh_state()
     line_map = {},  -- lnr -> { type, key?, commit, file? }
     header_pair = {}, -- lnr -> { l1, l2 } header lines of the commit owning lnr
     active = nil,
+    hover = nil,    -- row under the mouse pointer
     gen = 0,
     width = nil,    -- width of the last render
   }
@@ -108,14 +110,13 @@ local function build(width)
 
   for _, commit in ipairs(S.commits or {}) do
     local is_expanded = S.expanded[commit.hash] and S.details[commit.hash]
-    local arrow = is_expanded and "▾ " or "▸ "
     local hash_str = commit.short_hash or commit.hash:sub(1, 7)
 
-    -- Line 1: arrow + hash + subject
-    local seg = arrow .. hash_str .. "  "
+    -- Line 1: hash + subject
+    local seg = hash_str .. "  "
     local line1 = seg .. util.trunc(commit.subject or "", math.max(8, width - #seg))
     local r1 = push(line1, { type = "commit", key = "commit:" .. commit.hash, commit = commit })
-    table.insert(hl, { r1, "DiffNvimCommitHash", #arrow, #arrow + #hash_str })
+    table.insert(hl, { r1, "DiffNvimCommitHash", 0, #hash_str })
     table.insert(hl, { r1, "DiffNvimCommitSubject", #seg, #line1 })
 
     -- Line 2: dim "author · time" + ref pills that fit
@@ -219,10 +220,30 @@ local function apply_active()
     if meta.key == S.active then
       vim.api.nvim_buf_set_extmark(S.buf, NS_ACTIVE, lnr - 1, 0, {
         line_hl_group = "DiffNvimActiveFile",
-        virt_text = { { "▎", "DiffNvimActiveSign" } }, virt_text_pos = "overlay",
       })
       return
     end
+  end
+end
+
+--- Tint the clickable entry under the mouse pointer: both header lines of a
+--- commit, or a file row.
+local function apply_hover()
+  if not (S.buf and vim.api.nvim_buf_is_valid(S.buf)) then return end
+  vim.api.nvim_buf_clear_namespace(S.buf, NS_HOVER, 0, -1)
+  local meta = S.hover and S.line_map[S.hover]
+  if not meta then return end
+  local rows
+  if meta.type == "commit" then
+    rows = S.header_pair[S.hover]
+  elseif meta.type == "commit_file" then
+    rows = { S.hover }
+  end
+  for _, l in ipairs(rows or {}) do
+    -- Above the cursor and active-file highlights, so the hover always shows.
+    pcall(vim.api.nvim_buf_set_extmark, S.buf, NS_HOVER, l - 1, 0, {
+      line_hl_group = "DiffNvimHover", priority = 300,
+    })
   end
 end
 
@@ -258,6 +279,14 @@ function M.render()
   restore_cursor(prev)
   highlight_cursor_commit()
   apply_active()
+  apply_hover()
+end
+
+--- The mouse pointer is over row `lnr` (nil: not over this panel).
+function M.hover(lnr)
+  if lnr == S.hover then return end
+  S.hover = lnr
+  apply_hover()
 end
 
 --- Re-render after a resize, but only when the width changed: a height-only
