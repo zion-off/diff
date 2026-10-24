@@ -106,6 +106,19 @@ end
 local function build(width)
   local lines, hl, map = {}, {}, {}
 
+  -- The status badge reads as a column only if it is in one: every row ends
+  -- with it, and the diff stat is right-aligned in a column of its own, wide
+  -- enough for the widest stat on show. Sizing the stat column per row is
+  -- what makes the badges zig-zag.
+  local stat_w = 0
+  for _, section in ipairs({ "staged", "unstaged", "branch" }) do
+    for _, f in ipairs(section_files(section)) do
+      stat_w = math.max(stat_w, #(diffstat_segment(f)))
+    end
+  end
+  -- Never let the columns crowd out the file name on a narrow panel.
+  stat_w = math.min(stat_w, math.max(0, width - 14))
+
   local function push(line, meta)
     table.insert(lines, line)
     map[#lines] = meta
@@ -138,17 +151,25 @@ local function build(width)
     end
     local f = node.file
     local indent = string.rep("  ", depth + 1)
-    local stat_text, add_range, del_range = diffstat_segment(f)
-    local right_w = 3 + #stat_text -- "[X]" + stats
+    local stat, add_range, del_range = diffstat_segment(f)
+    -- Right-align the stat inside its own fixed column, so the badge after
+    -- it always lands in the same place. A stat too wide for the column is
+    -- dropped rather than cut: half a number is worse than none.
+    if #stat > stat_w then stat, add_range, del_range = "", nil, nil end
+    local stat_text = string.rep(" ", stat_w - #stat) .. stat
+    local right_w = stat_w + 4 -- stat column, a gap, then "[X]"
     local name = util.trunc_middle(node.name, math.max(1, width - #indent - right_w - 1))
     local pad = math.max(1, width - #indent - vim.fn.strdisplaywidth(name) - right_w)
-    local line = indent .. name .. string.rep(" ", pad) .. "[" .. (STATUS_BADGE[f.status] or "·") .. "]" .. stat_text
+    local line = indent .. name .. string.rep(" ", pad) .. stat_text
+      .. " [" .. (STATUS_BADGE[f.status] or "·") .. "]"
     local r = push(line, { type = "file", key = file_key(section, f.path), section = section, file = f })
 
     table.insert(hl, { r, file_hl(f, section), #indent, #indent + #name })
-    local badge_col = #line - #stat_text - 3
+    local badge_col = #line - 3
     table.insert(hl, { r, STATUS_HL[f.status] or "DiffNvimStatusUntracked", badge_col, badge_col + 3 })
-    local base = #line - #stat_text
+    -- The ranges are offsets into the unpadded stat, so measure from where
+    -- that text actually starts, not from the left edge of its column.
+    local base = badge_col - 1 - #stat
     if add_range then table.insert(hl, { r, "DiffNvimStatAdded", base + add_range[1], base + add_range[2] }) end
     if del_range then table.insert(hl, { r, "DiffNvimStatRemoved", base + del_range[1], base + del_range[2] }) end
   end
@@ -191,6 +212,10 @@ local function build(width)
   render_section("staged", "Staged Changes")
   push("", { type = "blank" })
   render_section("unstaged", "Changes")
+  if S.status and #section_files("staged") == 0 and #section_files("unstaged") == 0 then
+    push("", { type = "blank" })
+    note("The working tree is clean.")
+  end
   return lines, hl, map
 end
 
