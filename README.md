@@ -371,6 +371,10 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimEdgeHover` | Draggable window separator under the mouse pointer |
 | `DiffNvimEdgeHoverStatus` | Status line between panels under the mouse pointer (when it is the draggable edge) |
 | `DiffNvimHeader` | Filename bar above the diff |
+| `DiffNvimHeaderLabel` | "Before" / "After" over each pane of a split diff |
+| `DiffNvimPanelTitle` | Panel heading ("COMMITS", "NOTES") |
+| `DiffNvimPanelTitleDim` | Secondary text at the end of a panel heading |
+| `DiffNvimRule` | Divider drawn as the status line of the plugin's windows |
 | `DiffNvimSeparator` | Collapsed-context marker |
 | `DiffNvimSeparatorHover` | Collapsed-context marker under the mouse pointer |
 | `DiffNvimModeBranch` | Branch name in the mode bar |

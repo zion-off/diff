@@ -23,6 +23,7 @@ local DARK = {
   gutter_removed  = "#8c3a3a",
   gutter_changed  = "#8c7a3a",
   ref_head        = "#f0d080",
+  title_fg        = "#b0b0c0",
   note_marker     = "#d0a040",
   note_virt       = "#808080",
 }
@@ -44,6 +45,7 @@ local LIGHT = {
   gutter_removed  = "#9a2a2a",
   gutter_changed  = "#8a6a1a",
   ref_head        = "#8a6600",
+  title_fg        = "#505060",
   note_marker     = "#9a6200",
   note_virt       = "#606060",
 }
@@ -87,7 +89,7 @@ local function surfaces(p)
       header_bg = p.filler_bg, filler_bg = p.filler_bg,
       separator_bg = p.separator_bg, hover_bg = p.hover_bg,
       active_bg = p.hover_bg, tab_active_bg = p.tab_active_bg,
-      accent = p.ref_head,
+      accent = p.ref_head, title_fg = p.title_fg, dim_fg = p.separator_fg,
     }
   end
   -- An accent to tint hover and the active file towards, so they read as
@@ -101,6 +103,9 @@ local function surfaces(p)
     active_bg    = blend(bg, accent, 0.20),
     tab_active_bg = blend(bg, accent, 0.22),
     accent       = string.format("#%06x", accent),
+    -- Text tiers: secondary chrome text, and dim text that recedes further.
+    title_fg     = blend(fg, bg, 0.25),
+    dim_fg       = blend(fg, bg, 0.55),
   }
 end
 
@@ -114,11 +119,6 @@ local function build_defaults()
   -- a block of background (linking to Error drags one in, and a deleted file
   -- then reads as an alert rather than an entry).
   local error_fg = hl_attr("DiagnosticError", "fg") or hl_attr("ErrorMsg", "fg") or p.gutter_removed
-  -- Secondary text on the status line, faded towards its own background so it
-  -- recedes on any theme rather than guessing a grey.
-  local sl_fg, sl_bg = hl_attr("StatusLine", "fg"), hl_attr("StatusLine", "bg")
-  local sl_dim = (sl_fg and sl_bg) and { fg = blend(sl_fg, sl_bg, 0.40), bg = sl_bg }
-    or { link = "StatusLine" }
   return {
     -- Diff line backgrounds (PRIORITY_LINE_BG=50: below tree-sitter ~100)
     -- Explicit bg; fg=NONE so tree-sitter foreground colours show through.
@@ -215,13 +215,13 @@ local function build_defaults()
     -- Mode bar item under the cursor, while the bar has keyboard focus
     DiffNvimModeCursor      = { link = "CursorLine" },
 
-    -- Status line of the plugin's own windows: the surrounding bar, dimmed
-    -- for secondary text. An unlabelled window's status line is a divider
-    -- rather than a heading, so it recedes to the separator colour instead of
-    -- carrying the status line's weight.
-    DiffNvimStatusLine      = { link = "StatusLine" },
-    DiffNvimStatusLineDim   = sl_dim,
+    -- The status line of the plugin's own windows is a divider, not a
+    -- heading, so it recedes to the separator colour.
     DiffNvimRule            = { fg = p.separator_fg, bg = s.header_bg },
+    -- Panel headings ('winbar'): the same raised surface as the diff header,
+    -- the title a step quieter than text so it organises without competing.
+    DiffNvimPanelTitle      = { fg = s.title_fg, bg = s.header_bg, bold = true },
+    DiffNvimPanelTitleDim   = { fg = s.dim_fg, bg = s.header_bg },
 
     -- Branch picker. The prompt row is the only place typing goes, so it is
     -- lit as an input: glyph in the accent colour, a block caret, a dimmed
@@ -238,14 +238,12 @@ local function build_defaults()
     DiffNvimPickerSelected    = { bg = s.active_bg },
     DiffNvimPickerMatch       = { fg = s.accent, bold = true },
 
-    -- Winbar for diff panes
-    DiffNvimWinbar          = { bold = true, link = "StatusLine" },
     -- Full-width filename header bar spanning both diff panes. A raised
     -- surface a step above Normal — linking it to StatusLine made it the
     -- brightest, heaviest band on screen while naming the least urgent thing.
     DiffNvimHeader          = { bold = true, bg = s.header_bg },
-    -- Rule drawn under the header (the header window's own status line)
-    DiffNvimHeaderRule      = { fg = p.separator_fg, bg = s.header_bg },
+    -- "Before" / "After" over each pane of a split, on the header's surface
+    DiffNvimHeaderLabel     = { fg = s.dim_fg, bg = s.header_bg },
   }
 end
 

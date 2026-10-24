@@ -567,6 +567,47 @@ return {
     open_file("a%.lua", "src/a.lua")
   end },
 
+  { "headings sit above what they name, with any 'laststatus'", function()
+    open_file("a%.lua", "src/a.lua")
+    local function header() return vim.api.nvim_buf_get_lines(S().header_buf, 0, 1, false)[1] end
+    for _, ls in ipairs({ 2, 3 }) do
+      vim.o.laststatus = ls
+      vim.api.nvim_exec_autocmds("OptionSet", { pattern = "laststatus" })
+      H.ok(vim.wo[sidebar._commit_win].winbar:match("COMMITS"), vim.wo[sidebar._commit_win].winbar)
+      H.eq(vim.wo[sidebar._file_win].winbar, "", "the mode bar already names the file panel")
+      for _, win in ipairs({ sidebar._file_win, sidebar._commit_win, pane("old"), pane("new") }) do
+        H.eq(vim.wo[win].statusline, ls == 3 and "" or "%#DiffNvimRule#", "status line of " .. win)
+      end
+    end
+    vim.o.laststatus = 2
+    vim.api.nvim_exec_autocmds("OptionSet", { pattern = "laststatus" })
+
+    -- Each label ends one column short of the right edge of its pane.
+    local columns = vim.o.columns
+    vim.o.columns = 160
+    dv.balance_panes()
+    vim.cmd("doautocmd WinResized")
+    local text = header()
+    local old_w = vim.api.nvim_win_get_width(pane("old"))
+    local before = text:find("Before", 1, true)
+    H.ok(before, text)
+    H.eq(vim.api.nvim_strwidth(text:sub(1, before - 1)) + #"Before", old_w - 1)
+    H.eq(vim.api.nvim_strwidth(text), vim.api.nvim_win_get_width(S().header_win) - 1)
+    H.ok(text:match("After$"), text)
+    -- The labels follow the panes when they are resized.
+    vim.api.nvim_win_set_width(pane("old"), old_w - 6)
+    vim.cmd("doautocmd WinResized")
+    before = header():find("Before", 1, true)
+    H.eq(vim.api.nvim_strwidth(header():sub(1, before - 1)) + #"Before", old_w - 7)
+    dv.balance_panes()
+    vim.cmd("doautocmd WinResized")
+
+    open_file("new%.lua", "new.lua")
+    H.ok(not header():match("Before") and not header():match("After"), "a lone pane is not labelled: " .. header())
+    vim.o.columns = columns
+    open_file("a%.lua", "src/a.lua")
+  end },
+
   { "the notes panel leaves the two panes equally wide, open and closed", function()
     open_file("a%.lua", "src/a.lua")
     local notes = require("diff.annotations")

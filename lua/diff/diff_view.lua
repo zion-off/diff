@@ -61,6 +61,7 @@ local function fresh_state()
     lnum_width = 1,
     sep_marks = {},             -- side -> { [row] = extmark id } of separators
     hover = nil,                -- layout row under the mouse pointer
+    header_widths = nil,        -- window widths the header was laid out for
     wrap_widths = {},           -- side -> pane width the wrap padding was computed for
     synced_view = nil,          -- view both split panes were last left showing
     watcher = nil, watch_timer = nil,
@@ -205,13 +206,10 @@ local function header_opts(win)
   set_opts(win, {
     number = false, relativenumber = false, statuscolumn = "", wrap = false,
     foldcolumn = "0", signcolumn = "no", cursorline = false, list = false,
-    winfixheight = true, winbar = "",
+    winfixheight = true,
     winhighlight = "Normal:DiffNvimHeader,NormalNC:DiffNvimHeader,EndOfLine:DiffNvimHeader",
-    -- With 'laststatus' 1/2 the header gets its own status line; draw it as a
-    -- thin rule under the filename instead of a "[Scratch]" bar.
-    statusline = "%#DiffNvimHeaderRule#%=",
-    fillchars = chrome.fillchars(win, { stl = "─", stlnc = "─", eob = " " }),
   })
+  chrome.dress(win, {})
 end
 
 local function scratch_buf(bufhidden, kind)
@@ -432,18 +430,41 @@ local function decorate_notes(side)
   end
 end
 
---- Name each pane's status line. Side by side, the only thing distinguishing
---- the two panes is colour; saying which is which costs a line that is
---- otherwise blank. A lone pane needs no label — the header names the file.
-local function dress_panes()
-  local split = S.panes.old and S.panes.new
-  for _, side in ipairs(SIDES) do
-    local win = S.panes[side]
-    if valid_win(win) then
-      local label = split and (side == "old" and "Before" or "After") or ""
-      chrome.dress(win, { label = label, fillchars = { eob = " " } })
+--- In a split the header spans both panes, and colour is all that tells
+--- them apart, so each pane is named at the far end of its part of the
+--- header. A label that would run into the file name is left out.
+local function label_panes(text, spans)
+  if not (valid_win(S.panes.old) and valid_win(S.panes.new) and valid_win(S.header_win)) then
+    return text
+  end
+  -- nvim_strwidth, not strdisplaywidth: the latter measures as if the text
+  -- sat in the current window, 'linebreak' included, and overstates any
+  -- line wider than that window — which a pane-wide header is.
+  local width = vim.api.nvim_strwidth(text)
+  local edges = {
+    { "Before", vim.api.nvim_win_get_width(S.panes.old) - 1 },
+    { "After",  vim.api.nvim_win_get_width(S.header_win) - 1 },
+  }
+  for _, edge in ipairs(edges) do
+    local label, start = edge[1], edge[2] - #edge[1]
+    if start >= width + 2 then
+      text = text .. string.rep(" ", start - width)
+      table.insert(spans, { #text, #text + #label, "DiffNvimHeaderLabel" })
+      text = text .. label
+      width = start + #label
     end
   end
+  return text
+end
+
+--- Widths the header was last laid out for, so a resize relays it only when
+--- the panes under it changed.
+local function header_key()
+  local parts = {}
+  for _, win in ipairs({ S.header_win, S.panes.old, S.panes.new }) do
+    table.insert(parts, valid_win(win) and vim.api.nvim_win_get_width(win) or 0)
+  end
+  return table.concat(parts, ":")
 end
 
 local function render_header()
@@ -465,18 +486,21 @@ local function render_header()
     table.insert(spans, { #text + 3 + #add, #text + 3 + #add + #del, "DiffNvimStatRemoved" })
     text = text .. "  " .. add .. " " .. del
   end
+  text = label_panes(text, spans)
+  S.header_widths = header_key()
   set_lines(S.header_buf, { text })
   vim.api.nvim_buf_clear_namespace(S.header_buf, NS_HEAD, 0, -1)
   for _, s in ipairs(spans) do
     pcall(vim.api.nvim_buf_set_extmark, S.header_buf, NS_HEAD, 0, s[1], { end_col = s[2], hl_group = s[3] })
   end
-  dress_panes()
 end
 
 --- Re-apply the window chrome of the view (after 'laststatus' changes).
 function M.redress()
   if valid_win(S.header_win) then header_opts(S.header_win) end
-  dress_panes()
+  for _, win in pairs(S.panes) do
+    if valid_win(win) then chrome.dress(win, { fillchars = { eob = " " } }) end
+  end
 end
 
 --- The windows currently showing diff panes, for callers that treat the two
@@ -1412,6 +1436,10 @@ local align_timer
 vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
   group = aug,
   callback = function()
+    if S.source and valid_win(S.header_win) and header_key() ~= S.header_widths then
+      log.trace("pane widths %s; relaying the header", header_key())
+      render_header()
+    end
     if not (S.layout and next(S.wrap_widths)) then return end
     for side, width in pairs(S.wrap_widths) do
       local win = S.panes[side]

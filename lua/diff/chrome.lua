@@ -31,70 +31,59 @@ function M.fillchars(win, extra)
   return table.concat(out, ",")
 end
 
---- A status line for a plugin window: a single dimmed label, no file name,
---- no ruler. `right` is an optional second segment pushed to the far end.
---- Percent signs in the caller's text are escaped so a branch or path
---- containing one cannot be read as a status-line item.
---- With no label the line carries no text, only its highlight, so 'fillchars'
---- draws it as a rule — a divider between two stacked panels rather than a
---- heading. It cannot be the empty string: a window-local 'statusline' of ""
---- means "fall back to the global one", which is the default ruler.
-function M.statusline(label, right)
-  local function esc(s) return (tostring(s or ""):gsub("%%", "%%%%")) end
-  if (label == nil or label == "") and (right == nil or right == "") then
-    return "%#DiffNvimRule#"
-  end
-  local line = "%#DiffNvimStatusLine# " .. esc(label)
+local function esc(s) return (tostring(s or ""):gsub("%%", "%%%%")) end
+
+--- The status line of a plugin window: no text, only its highlight, so
+--- 'fillchars' draws it as a rule — a divider under the window rather than
+--- a second heading. It cannot be the empty string: a window-local
+--- 'statusline' of "" means "fall back to the global one", which is the
+--- default ruler.
+M.RULE = "%#DiffNvimRule#"
+
+--- A panel heading for 'winbar': the title in capitals on a raised band,
+--- with an optional dimmer segment pushed to the far end. Percent signs in
+--- the caller's text are escaped so a branch or path containing one cannot
+--- be read as a status-line item. Empty when there is nothing to say.
+function M.winbar(label, right)
+  if (label == nil or label == "") and (right == nil or right == "") then return "" end
+  local line = "%#DiffNvimPanelTitle# " .. esc((label or ""):upper()) .. "%="
   if right and right ~= "" then
-    line = line .. "%=%#DiffNvimStatusLineDim#" .. esc(right) .. " "
+    line = line .. "%#DiffNvimPanelTitleDim#" .. esc(right) .. " "
   end
   return line
 end
 
---- Dress a plugin window: hide the end-of-buffer tildes and give it a quiet
---- status line. `opts.label` / `opts.right` build that line; `opts.fillchars`
---- adds further entries (the diff header's rule, say).
---- A window with no label gets its status line filled with a rule, so the gap
---- between two stacked panels reads as a divider rather than a blank band.
+--- Dress a plugin window: hide the end-of-buffer tildes, head it with
+--- `opts.label` / `opts.right` when given, and draw its status line as a
+--- rule. `opts.fillchars` adds further entries.
 ---
---- Under 'laststatus' 3 there are no per-window status lines — there is one
---- global bar, and a window-local 'statusline' only decides what that single
---- bar says while the window has focus. Writing a panel label there would
---- replace the reader's own status line with the word "Changes" every time
---- they stepped into the sidebar. So in that mode the label is left unset and
---- their bar keeps saying what they configured it to say; the panels are
---- already separated by the window dividers that mode draws.
+--- Headings go in 'winbar', never the status line. A status line is a
+--- footer: a title there sits under the window it names, directly above the
+--- next one, and reads as that one's heading. And under 'laststatus' 3
+--- there are no per-window status lines at all — one global bar, which is
+--- the reader's own — so a title there is never seen.
+---
+--- Under the global bar the window's status line is left unset and the
+--- global fill characters are kept: that bar is filled with the focused
+--- window's fill characters, and a rule set here would draw dashes through
+--- the gaps of the reader's status line.
 --- @param win integer
 --- @param opts table|nil { label?, right?, fillchars? }
 function M.dress(win, opts)
   opts = opts or {}
   local global_bar = vim.o.laststatus == 3
-  local unlabelled = (opts.label == nil or opts.label == "")
-    and (opts.right == nil or opts.right == "")
   local fc = { eob = " " }
   if global_bar then
-    -- The one bar is the reader's, and it is filled with the fill characters
-    -- of whichever window has focus: a rule set here would draw dashes
-    -- through the gaps of their status line.
     local global = vim.go.fillchars
     fc.stl = global:match("stl:([^,]+)") or " "
     fc.stlnc = global:match("stlnc:([^,]+)") or " "
   else
-    -- Authoritative, not merged: these windows are reused across states, so
-    -- a rule left behind by an unlabelled state would otherwise bleed through
-    -- a labelled one and pad its heading out with dashes.
-    fc.stl, fc.stlnc = unlabelled and "─" or " ", unlabelled and "─" or " "
+    fc.stl, fc.stlnc = "─", "─"
   end
   fc = vim.tbl_extend("force", fc, opts.fillchars or {})
   pcall(vim.api.nvim_set_option_value, "fillchars", M.fillchars(win, fc), { win = win })
-  if global_bar then
-    -- Clear any label left from a session that began under a per-window bar,
-    -- so switching 'laststatus' at runtime cannot strand one in the global one.
-    pcall(vim.api.nvim_set_option_value, "statusline", "", { win = win })
-    return
-  end
-  pcall(vim.api.nvim_set_option_value, "statusline",
-    M.statusline(opts.label, opts.right), { win = win })
+  pcall(vim.api.nvim_set_option_value, "winbar", M.winbar(opts.label, opts.right), { win = win })
+  pcall(vim.api.nvim_set_option_value, "statusline", global_bar and "" or M.RULE, { win = win })
 end
 
 --- Tag `buf` as the plugin's own, so windows can be recognised without

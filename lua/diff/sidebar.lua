@@ -292,7 +292,8 @@ local function highlight_edge(win, kind)
     local saved = vim.wo[win].winhighlight
     tinted_status = { win = win, saved = saved }
     vim.wo[win].winhighlight = (saved ~= "" and saved .. "," or "")
-      .. "StatusLine:DiffNvimEdgeHoverStatus,StatusLineNC:DiffNvimEdgeHoverStatus"
+      .. "StatusLine:DiffNvimEdgeHoverStatus,StatusLineNC:DiffNvimEdgeHoverStatus,"
+      .. "DiffNvimRule:DiffNvimEdgeHoverStatus"
     edge = { win = win, kind = kind }
     return
   end
@@ -544,23 +545,24 @@ local function make_panel_buf(kind, name)
   return buf
 end
 
+--- The branch belongs in exactly one place, the mode bar, so the commit
+--- panel's heading names one only while a branch other than HEAD is being
+--- previewed: then the heading is answering "whose commits are these?".
+local function preview_label()
+  local preview = M._preview_branch
+  if preview and preview ~= M._head_name then return preview end
+  return nil
+end
+
 --- Panel lines are rendered to the window's exact width, so 'wrap' never
 --- actually wraps — but it does make horizontal scrolling impossible, which
 --- is what keeps the panels pinned without intercepting any keys.
 --- 'cursorline' is left to sync_cursorline(): only the focused panel marks a
 --- row, so there is one answer to what <CR> will act on.
---- The branch belongs in exactly one place. It is already the first thing in
---- the mode bar, so repeating it on each stacked panel's status line is three
---- more copies of what the reader has just read. The only time a panel names
---- a branch is when it is showing one that is *not* HEAD — a branch preview —
---- because then the heading is answering "which branch is this?".
-local function panel_right(label)
-  local preview = M._preview_branch
-  if preview and preview ~= M._head_name and label ~= "diff.nvim" then return preview end
-  return nil
-end
-
-local function set_panel_win_opts(win, label)
+--- Only the commit panel carries a heading. The mode bar heads the sidebar
+--- and already names the file panel's mode right above it; the file panel's
+--- own sections are titled inside it.
+local function set_panel_win_opts(win, heading)
   for k, v in pairs({
     number = false, relativenumber = false, wrap = true, linebreak = false,
     signcolumn = "no", foldcolumn = "0", statuscolumn = "", cursorline = false,
@@ -568,10 +570,7 @@ local function set_panel_win_opts(win, label)
   }) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
-  -- The mode bar's status line is the rule under it, not a heading: it sits
-  -- directly above the file tree, which has a heading of its own.
-  if label == "diff.nvim" then label = nil end
-  chrome.dress(win, { label = label, right = panel_right(label) })
+  chrome.dress(win, { label = heading, right = heading and preview_label() or nil })
 end
 
 --- Only the window with focus marks a row. Two panels both drawing a cursor
@@ -606,15 +605,10 @@ end
 
 M.sync_cursorline = sync_cursorline
 
---- Re-apply the panel status lines, so a branch preview is named — and stops
+--- Re-apply the panel chrome, so a branch preview is named — and stops
 --- being named when it ends — without rebuilding the panels.
 function M.redress_panels()
-  local panels = {
-    { M._file_win,   M._branch_mode and "Branch changes" or "Changes" },
-    { M._commit_win, "Commits" },
-    { M._bar_win,    "diff.nvim" },
-  }
-  for _, panel in ipairs(panels) do
+  for _, panel in ipairs({ { M._file_win }, { M._commit_win, "Commits" }, { M._bar_win } }) do
     if is_valid_win(panel[1]) then set_panel_win_opts(panel[1], panel[2]) end
   end
 end
@@ -666,7 +660,7 @@ local function create_mode_bar()
   M._bar_win = vim.api.nvim_get_current_win()
   M._bar_buf = make_panel_buf("mode-bar", "diff.nvim")
   vim.api.nvim_win_set_buf(M._bar_win, M._bar_buf)
-  set_panel_win_opts(M._bar_win, "diff.nvim")
+  set_panel_win_opts(M._bar_win)
   -- Unwrapped, so a narrow sidebar clips its rows instead of wrapping them
   -- out of its two-row window.
   for k, v in pairs({ winfixheight = true, cursorline = false, wrap = false }) do
@@ -701,7 +695,7 @@ local function create_panels(anchor, width)
   M._file_win = vim.api.nvim_get_current_win()
   M._file_buf = make_panel_buf("file-panel", "diff.nvim Changes")
   vim.api.nvim_win_set_buf(M._file_win, M._file_buf)
-  set_panel_win_opts(M._file_win, M._branch_mode and "Branch changes" or "Changes")
+  set_panel_win_opts(M._file_win)
   file_panel.setup(M._file_buf, M._file_win, M._repo_root)
   create_mode_bar()
   if not M._branch_mode then return create_commit_panel() end

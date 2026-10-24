@@ -394,7 +394,6 @@ local function open_tooltip(commit, body)
   M._tooltip_win, M._tooltip_buf = win, buf
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
-  pcall(vim.api.nvim_set_option_value, "statusline", chrome.statusline("Commit"), { win = win })
   pcall(vim.api.nvim_set_option_value, "winhighlight",
     "NormalFloat:DiffNvimPickerNormal,FloatBorder:DiffNvimPickerBorder,FloatTitle:DiffNvimPickerTitle",
     { win = win })

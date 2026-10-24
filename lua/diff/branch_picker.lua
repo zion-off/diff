@@ -319,9 +319,6 @@ function M.open(repo_root, on_select)
 
     pcall(vim.api.nvim_set_option_value, "cursorline", true,  { win = win })
     pcall(vim.api.nvim_set_option_value, "wrap",       false, { win = win })
-    -- With 'laststatus' 3 the one status line follows the focused window, so
-    -- the float needs its own or the screen's bottom bar reads "[Scratch]".
-    pcall(vim.api.nvim_set_option_value, "statusline", chrome.statusline("Preview branch"), { win = win })
     pcall(vim.api.nvim_set_option_value, "winhighlight",
       "Normal:DiffNvimPickerNormal,FloatBorder:DiffNvimPickerBorder,"
       .. "FloatTitle:DiffNvimPickerTitle,FloatFooter:DiffNvimPickerFooter,"
