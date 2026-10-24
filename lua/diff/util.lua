@@ -127,6 +127,73 @@ function M.wrap(s, width)
 end
 
 -- ---------------------------------------------------------------------------
+-- File rows (shared by the file and commit panels, so their columns match)
+-- ---------------------------------------------------------------------------
+
+--- The badge letter and its highlight for each file status.
+M.STATUS_BADGE = {
+  modified = "M", added = "A", deleted = "D", renamed = "R",
+  copied = "C", unmerged = "U", untracked = "?", unknown = "·",
+}
+
+M.STATUS_HL = {
+  modified  = "DiffNvimStatusModified",
+  added     = "DiffNvimStatusAdded",
+  deleted   = "DiffNvimStatusDeleted",
+  renamed   = "DiffNvimStatusRenamed",
+  copied    = "DiffNvimStatusRenamed",
+  unmerged  = "DiffNvimStatusModified",
+  untracked = "DiffNvimStatusUntracked",
+  unknown   = "DiffNvimStatusUntracked",
+}
+
+--- "+12 -3" for a file's diffstat, with the byte ranges of the two counts
+--- (nil when that count is zero); "bin" for a binary file, "" for none.
+--- @param st table|nil  { added, deleted, binary }
+--- @return string text, integer[]|nil add_range, integer[]|nil del_range
+function M.diffstat(st)
+  if not st then return "", nil, nil end
+  if st.binary then return "bin", nil, nil end
+  local added, deleted = st.added or 0, st.deleted or 0
+  local text, add_range, del_range = "", nil, nil
+  if added > 0 then
+    text = "+" .. added
+    add_range = { 0, #text }
+  end
+  if deleted > 0 then
+    if text ~= "" then text = text .. " " end
+    local s = #text
+    text = text .. "-" .. deleted
+    del_range = { s, #text }
+  end
+  return text, add_range, del_range
+end
+
+--- Lay out a file row `width` columns wide: `indent`, the name (cut in the
+--- middle to fit), then at the right the diffstat right-aligned in a column
+--- `stat_w` wide and the status badge. Rows sharing a `stat_w` line their
+--- stats and badges up in columns. A stat wider than its column is left out
+--- rather than cut: half a number is worse than none.
+--- @return string line, table cols  byte ranges { name = {s, e}, stat = {s, e}|nil, badge = {s, e} }
+function M.file_row(width, indent, name, stat, stat_w, badge)
+  if #stat > stat_w then stat = "" end
+  local badge_text = "[" .. badge .. "]"
+  local stat_col = stat_w > 0 and ("  " .. string.rep(" ", stat_w - #stat) .. stat) or ""
+  local right = stat_col .. " " .. badge_text
+  local right_w = vim.api.nvim_strwidth(right)
+  local shown = M.trunc_middle(name, math.max(1, width - #indent - right_w - 1))
+  local pad = math.max(1, width - #indent - vim.api.nvim_strwidth(shown) - right_w)
+  local line = indent .. shown .. string.rep(" ", pad) .. right
+  local badge_s = #line - #badge_text
+  local stat_e = badge_s - 1
+  return line, {
+    name = { #indent, #indent + #shown },
+    stat = stat ~= "" and { stat_e - #stat, stat_e } or nil,
+    badge = { badge_s, #line },
+  }
+end
+
+-- ---------------------------------------------------------------------------
 -- File-path tree construction & traversal (shared by file/commit panels)
 -- ---------------------------------------------------------------------------
 

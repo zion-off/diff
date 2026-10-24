@@ -180,7 +180,7 @@ The file shown in the diff view is highlighted in the panel.
 
 | Key | Action |
 |---|---|
-| `<CR>` / click | Expand/collapse commit / open commit file diff |
+| `<CR>` / click | Expand/collapse a commit to list its changed files / open a file's diff |
 | `K` | Show full commit message tooltip |
 
 ### Branch Picker

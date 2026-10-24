@@ -28,7 +28,7 @@ local function fresh_state()
     details  = {},  -- hash -> { body, files, added, deleted }
     loading  = {},  -- hash -> true while details are being fetched
     line_map = {},  -- lnr -> { type, key?, commit, file? }
-    header_pair = {}, -- lnr -> { l1, l2 } header lines of the commit owning lnr
+    header_pair = {}, -- lnr -> { l1, l2 }: both header rows, for either of them
     active = nil,
     hover = nil,    -- row under the mouse pointer
     gen = 0,
@@ -41,22 +41,6 @@ local S = fresh_state()
 M._tooltip_win    = nil
 M._tooltip_buf    = nil
 M._tooltip_req_id = 0
-
-local STATUS_BADGE = {
-  modified = "M", added = "A", deleted = "D", renamed = "R",
-  copied = "C", unmerged = "U", untracked = "?", unknown = "·",
-}
-
-local STATUS_HL = {
-  modified  = "DiffNvimStatusModified",
-  added     = "DiffNvimStatusAdded",
-  deleted   = "DiffNvimStatusDeleted",
-  renamed   = "DiffNvimStatusRenamed",
-  copied    = "DiffNvimStatusRenamed",
-  unmerged  = "DiffNvimStatusModified",
-  untracked = "DiffNvimStatusUntracked",
-  unknown   = "DiffNvimStatusUntracked",
-}
 
 local function ref_hl(ref)
   if ref == "HEAD" or ref:match("^HEAD %->") then
@@ -77,29 +61,19 @@ local function valid()
   return S.buf and vim.api.nvim_buf_is_valid(S.buf) and S.win and vim.api.nvim_win_is_valid(S.win)
 end
 
---- "+12 -3" with byte ranges relative to the returned text.
-local function stat_text(added, deleted, lead)
-  added, deleted = added or 0, deleted or 0
-  if added == 0 and deleted == 0 then return "", nil, nil end
-  local text, add_range, del_range = lead or "", nil, nil
-  if added > 0 then
-    local s = #text
-    text = text .. "+" .. added
-    add_range = { s, #text }
-  end
-  if deleted > 0 then
-    if added > 0 then text = text .. " " end
-    local s = #text
-    text = text .. "-" .. deleted
-    del_range = { s, #text }
-  end
-  return text, add_range, del_range
-end
-
 -- ---------------------------------------------------------------------------
 -- Render
 -- ---------------------------------------------------------------------------
 
+-- The disclosure marker leading each commit, as the file panel's sections.
+local CHEVRON = { open = "▾ ", closed = "▸ " }
+
+--- A commit is two rows: the subject, which is what the reader scans for,
+--- given all the width the marker leaves; and under it, dimmed, the hash,
+--- author and age, then whichever refs fit. Expanded, its changed files
+--- follow as a tree with the file panel's columns, closed by a blank row.
+--- The message stays in the tooltip (K): inline it pushed the files a
+--- screen away and repeated the subject.
 local function build(width)
   local lines, hl, map, pairs_ = {}, {}, {}, {}
 
@@ -110,18 +84,19 @@ local function build(width)
   end
 
   for _, commit in ipairs(S.commits or {}) do
-    local is_expanded = S.expanded[commit.hash] and S.details[commit.hash]
+    local d = S.expanded[commit.hash] and S.details[commit.hash]
     local hash_str = commit.short_hash or commit.hash:sub(1, 7)
 
-    -- Line 1: hash + subject
-    local seg = hash_str .. "  "
-    local line1 = seg .. util.trunc(commit.subject or "", math.max(8, width - #seg))
+    local chevron = d and CHEVRON.open or CHEVRON.closed
+    local line1 = chevron .. util.trunc(commit.subject or "", math.max(8, width - vim.api.nvim_strwidth(chevron)))
     local r1 = push(line1, { type = "commit", key = "commit:" .. commit.hash, commit = commit })
-    table.insert(hl, { r1, "DiffNvimCommitHash", 0, #hash_str })
-    table.insert(hl, { r1, "DiffNvimCommitSubject", #seg, #line1 })
+    table.insert(hl, { r1, "DiffNvimCommitMeta", 0, #chevron })
+    table.insert(hl, { r1, "DiffNvimCommitSubject", #chevron, #line1 })
 
-    -- Line 2: dim "author · time" + ref pills that fit
-    local meta = META_INDENT .. util.trunc(commit.author or "", math.max(8, math.floor(width / 2)))
+    local meta = META_INDENT .. hash_str
+    local hash_end = #meta
+    local author = util.trunc(commit.author or "", math.max(8, math.floor(width / 3)))
+    if author ~= "" then meta = meta .. " · " .. author end
     if (commit.time or "") ~= "" then meta = meta .. " · " .. commit.time end
     local meta_end = #meta
     local pills = {}
@@ -133,33 +108,16 @@ local function build(width)
       end
     end
     local r2 = push(meta, { type = "commit", meta_line = true, commit = commit })
-    table.insert(hl, { r2, "DiffNvimCommitMeta", 0, meta_end })
+    table.insert(hl, { r2, "DiffNvimCommitHash", #META_INDENT, hash_end })
+    table.insert(hl, { r2, "DiffNvimCommitMeta", hash_end, meta_end })
     for _, p in ipairs(pills) do table.insert(hl, { r2, p[3], p[1], p[2] }) end
+    local pair = { r1 + 1, r2 + 1 }
+    pairs_[r1 + 1], pairs_[r2 + 1] = pair, pair
 
-    local first = r1 + 1
-    if is_expanded then
-      local d = S.details[commit.hash]
-      local avail = math.max(8, width - #META_INDENT)
-
-      for i, raw in ipairs(d.body) do
-        if raw == "" then
-          push("", { type = "commit_body", blank = true, commit = commit })
-        else
-          for _, chunk in ipairs(util.wrap(raw, avail)) do
-            local line = META_INDENT .. chunk
-            local r = push(line, { type = "commit_body", commit = commit })
-            table.insert(hl, { r, i == 1 and "DiffNvimCommitSubject" or "DiffNvimCommitBody", #META_INDENT, #line })
-          end
-        end
-      end
-      if #d.body > 0 then push("", { type = "commit_body", blank = true, commit = commit }) end
-
-      local stat, add_range, del_range = stat_text(d.added, d.deleted, META_INDENT)
-      if stat ~= "" then
-        local r = push(stat, { type = "commit_body", commit = commit })
-        if add_range then table.insert(hl, { r, "DiffNvimStatAdded", add_range[1], add_range[2] }) end
-        if del_range then table.insert(hl, { r, "DiffNvimStatRemoved", del_range[1], del_range[2] }) end
-      end
+    if d then
+      local stat_w = 0
+      for _, f in ipairs(d.files) do stat_w = math.max(stat_w, #(util.diffstat(f.stat))) end
+      stat_w = math.min(stat_w, math.max(0, width - 16))
 
       local render_node
       local function render_dir(node, depth)
@@ -173,37 +131,40 @@ local function build(width)
       render_node = function(node, depth)
         if not node.file then return render_dir(node, depth) end
         local f = node.file
-        local pad = META_INDENT .. string.rep("  ", depth)
-        local st, a_r, d_r = stat_text(f.stat and f.stat.added, f.stat and f.stat.deleted, "  ")
-        if f.stat and f.stat.binary then st, a_r, d_r = "  bin", nil, nil end
-        local right_w = 3 + #st
-        local name = util.trunc_middle(node.name, math.max(1, width - #pad - right_w - 1))
-        local gap = math.max(1, width - #pad - vim.api.nvim_strwidth(name) - right_w)
-        local line = pad .. name .. string.rep(" ", gap) .. "[" .. (STATUS_BADGE[f.status] or "·") .. "]" .. st
+        local stat, add_range, del_range = util.diffstat(f.stat)
+        local line, cols = util.file_row(width, META_INDENT .. string.rep("  ", depth), node.name, stat, stat_w,
+          util.STATUS_BADGE[f.status] or "·")
         local r = push(line, { type = "commit_file", key = file_key(commit.hash, f.path), commit = commit, file = f })
-        table.insert(hl, { r, "DiffNvimCommitFileEntry", #pad, #pad + #name })
-        local badge_col = #line - #st - 3
-        table.insert(hl, { r, STATUS_HL[f.status] or "DiffNvimStatusUntracked", badge_col, badge_col + 3 })
-        local base = #line - #st
-        if a_r then table.insert(hl, { r, "DiffNvimStatAdded", base + a_r[1], base + a_r[2] }) end
-        if d_r then table.insert(hl, { r, "DiffNvimStatRemoved", base + d_r[1], base + d_r[2] }) end
+        table.insert(hl, { r, "DiffNvimCommitFileEntry", cols.name[1], cols.name[2] })
+        table.insert(hl, { r, util.STATUS_HL[f.status] or "DiffNvimStatusUntracked", cols.badge[1], cols.badge[2] })
+        if cols.stat then
+          local base = cols.stat[1]
+          if add_range then table.insert(hl, { r, "DiffNvimStatAdded", base + add_range[1], base + add_range[2] }) end
+          if del_range then table.insert(hl, { r, "DiffNvimStatRemoved", base + del_range[1], base + del_range[2] }) end
+        end
       end
       for _, child in ipairs(util.sort_tree_children(util.build_file_tree(d.files).children)) do
         render_node(child, 0)
       end
+      if #d.files == 0 then
+        local r = push(META_INDENT .. "No files changed", { type = "commit_dir", commit = commit })
+        table.insert(hl, { r, "DiffNvimCommitMeta", 0, -1 })
+      end
+      push("", { type = "blank", blank = true, commit = commit })
     end
-
-    local pair = { first, first + 1 }
-    for ln = first, #lines do pairs_[ln] = pair end
   end
 
   if #lines == 0 then push("  (no commits)", { type = "empty" }) end
   return lines, hl, map, pairs_
 end
 
+--- Mark both rows of the commit under the cursor, as one item — but only
+--- while the panel has focus: like the cursor line it extends, it answers
+--- "what does <CR> act on here", which an unfocused panel is not asked.
 local function highlight_cursor_commit()
   if not valid() then return end
   vim.api.nvim_buf_clear_namespace(S.buf, CURSOR_NS, 0, -1)
+  if vim.api.nvim_get_current_win() ~= S.win then return end
   local pair = S.header_pair[vim.api.nvim_win_get_cursor(S.win)[1]]
   if not pair then return end
   for _, l in ipairs(pair) do
@@ -491,7 +452,7 @@ end
 function M.activate_line(lnr)
   local meta = S.line_map[lnr]
   if not meta then return end
-  if meta.type == "commit" or meta.type == "commit_body" then
+  if meta.type == "commit" then
     toggle_commit(meta.commit)
   elseif meta.type == "commit_file" then
     require("diff.diff_view").open(S.root, to_source(meta.commit.hash, meta.file), M.navigator)
@@ -505,7 +466,8 @@ function M.mark_active(data)
 end
 
 --- Rows that carry no information of their own: the metadata line (it
---- highlights together with the subject above) and blank spacers.
+--- highlights together with the subject above) and the blank row closing an
+--- expanded commit.
 local function skippable(lnr)
   local meta = S.line_map[lnr]
   return meta and (meta.meta_line or meta.blank) or false
@@ -531,8 +493,14 @@ function M.setup(buf, win, repo_root)
   -- The two-line commit highlight replaces 'cursorline'.
   pcall(vim.api.nvim_set_option_value, "cursorline", false, { win = win })
   local aug = vim.api.nvim_create_augroup("DiffNvimCommitCursor", { clear = true })
-  vim.api.nvim_create_autocmd({ "CursorMoved", "BufEnter" }, {
+  vim.api.nvim_create_autocmd({ "CursorMoved", "BufEnter", "WinEnter" }, {
     group = aug, buffer = buf, callback = highlight_cursor_commit,
+  })
+  vim.api.nvim_create_autocmd("WinLeave", {
+    group = aug, buffer = buf,
+    callback = function()
+      if S.buf and vim.api.nvim_buf_is_valid(S.buf) then vim.api.nvim_buf_clear_namespace(S.buf, CURSOR_NS, 0, -1) end
+    end,
   })
 
   local km = require("diff.config").get().keymaps or {}

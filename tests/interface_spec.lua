@@ -364,6 +364,19 @@ return {
       H.wait(function() return pcall(panel_row, "b%.lua", sidebar._commit_buf) end, "commit expanded")
     end, 50)
     H.eq(#calls, 2, vim.inspect(calls))
+    -- Subject first, the hash with the metadata under it, then straight to
+    -- the files: the message is the tooltip's, not repeated inline.
+    local rows = vim.api.nvim_buf_get_lines(sidebar._commit_buf, 0, -1, false)
+    H.ok(rows[1]:match("^▾ watched commit"), rows[1])
+    H.ok(rows[2]:match("^  %x+ · test · "), rows[2])
+    H.eq(rows[3], "  docs/", vim.inspect(rows))
+    H.eq(panel_row("b%.lua", sidebar._commit_buf), 6, vim.inspect(rows))
+    H.eq(rows[7], "", "a blank row closes the expanded commit")
+    H.ok(rows[8]:match("^▸ initial"), rows[8])
+    -- Stats right-aligned in one column, badges in the last, as in the file panel.
+    local width = vim.api.nvim_win_get_width(sidebar._commit_win)
+    for _, i in ipairs({ 4, 6 }) do H.eq(vim.api.nvim_strwidth(rows[i]), width, rows[i]) end
+    H.ok(rows[4]:match("  %+1 %[M%]$") and rows[6]:match("%+1 %-1 %[M%]$"), rows[4] .. "\n" .. rows[6])
     cp.activate_line(panel_row("b%.lua", sidebar._commit_buf))
     H.wait(function() return S().source and S().source.kind == "commit" and S().layout end, "commit diff")
     H.eq(vim.api.nvim_buf_get_lines(S().bufs.new, 0, -1, false), { "return 13" })

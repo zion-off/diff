@@ -40,22 +40,6 @@ end
 
 local S = fresh_state()
 
-local STATUS_BADGE = {
-  modified = "M", added = "A", deleted = "D", renamed = "R",
-  copied = "C", unmerged = "U", untracked = "?", unknown = "·",
-}
-
-local STATUS_HL = {
-  modified  = "DiffNvimStatusModified",
-  added     = "DiffNvimStatusAdded",
-  deleted   = "DiffNvimStatusDeleted",
-  renamed   = "DiffNvimStatusRenamed",
-  copied    = "DiffNvimStatusRenamed",
-  unmerged  = "DiffNvimStatusModified",
-  untracked = "DiffNvimStatusUntracked",
-  unknown   = "DiffNvimStatusUntracked",
-}
-
 local function file_hl(file, section)
   if file.status == "deleted" then return "DiffNvimDeletedFile" end
   if section == "staged" then return "DiffNvimStagedFile" end
@@ -77,28 +61,6 @@ local function valid()
   return S.buf and vim.api.nvim_buf_is_valid(S.buf) and S.win and vim.api.nvim_win_is_valid(S.win)
 end
 
---- " +12 -3" diffstat segment with byte ranges for highlighting.
-local function diffstat_segment(f)
-  local st = f.stat
-  if not st then return "", nil, nil end
-  if st.binary then return "  bin", nil, nil end
-  local added, deleted = st.added or 0, st.deleted or 0
-  if added == 0 and deleted == 0 then return "", nil, nil end
-  local text, add_range, del_range = "  ", nil, nil
-  if added > 0 then
-    local s = #text
-    text = text .. "+" .. added
-    add_range = { s, #text }
-  end
-  if deleted > 0 then
-    if added > 0 then text = text .. " " end
-    local s = #text
-    text = text .. "-" .. deleted
-    del_range = { s, #text }
-  end
-  return text, add_range, del_range
-end
-
 -- ---------------------------------------------------------------------------
 -- Render
 -- ---------------------------------------------------------------------------
@@ -113,11 +75,11 @@ local function build(width)
   local stat_w = 0
   for _, section in ipairs({ "staged", "unstaged", "branch" }) do
     for _, f in ipairs(section_files(section)) do
-      stat_w = math.max(stat_w, #(diffstat_segment(f)))
+      stat_w = math.max(stat_w, #(util.diffstat(f.stat)))
     end
   end
   -- Never let the columns crowd out the file name on a narrow panel.
-  stat_w = math.min(stat_w, math.max(0, width - 14))
+  stat_w = math.min(stat_w, math.max(0, width - 16))
 
   local function push(line, meta)
     table.insert(lines, line)
@@ -150,28 +112,17 @@ local function build(width)
       return
     end
     local f = node.file
-    local indent = string.rep("  ", depth + 1)
-    local stat, add_range, del_range = diffstat_segment(f)
-    -- Right-align the stat inside its own fixed column, so the badge after
-    -- it always lands in the same place. A stat too wide for the column is
-    -- dropped rather than cut: half a number is worse than none.
-    if #stat > stat_w then stat, add_range, del_range = "", nil, nil end
-    local stat_text = string.rep(" ", stat_w - #stat) .. stat
-    local right_w = stat_w + 4 -- stat column, a gap, then "[X]"
-    local name = util.trunc_middle(node.name, math.max(1, width - #indent - right_w - 1))
-    local pad = math.max(1, width - #indent - vim.api.nvim_strwidth(name) - right_w)
-    local line = indent .. name .. string.rep(" ", pad) .. stat_text
-      .. " [" .. (STATUS_BADGE[f.status] or "·") .. "]"
+    local stat, add_range, del_range = util.diffstat(f.stat)
+    local line, cols = util.file_row(width, string.rep("  ", depth + 1), node.name, stat, stat_w,
+      util.STATUS_BADGE[f.status] or "·")
     local r = push(line, { type = "file", key = file_key(section, f.path), section = section, file = f })
-
-    table.insert(hl, { r, file_hl(f, section), #indent, #indent + #name })
-    local badge_col = #line - 3
-    table.insert(hl, { r, STATUS_HL[f.status] or "DiffNvimStatusUntracked", badge_col, badge_col + 3 })
-    -- The ranges are offsets into the unpadded stat, so measure from where
-    -- that text actually starts, not from the left edge of its column.
-    local base = badge_col - 1 - #stat
-    if add_range then table.insert(hl, { r, "DiffNvimStatAdded", base + add_range[1], base + add_range[2] }) end
-    if del_range then table.insert(hl, { r, "DiffNvimStatRemoved", base + del_range[1], base + del_range[2] }) end
+    table.insert(hl, { r, file_hl(f, section), cols.name[1], cols.name[2] })
+    table.insert(hl, { r, util.STATUS_HL[f.status] or "DiffNvimStatusUntracked", cols.badge[1], cols.badge[2] })
+    if cols.stat then
+      local base = cols.stat[1]
+      if add_range then table.insert(hl, { r, "DiffNvimStatAdded", base + add_range[1], base + add_range[2] }) end
+      if del_range then table.insert(hl, { r, "DiffNvimStatRemoved", base + del_range[1], base + del_range[2] }) end
+    end
   end
 
   local function render_section(section, label)
