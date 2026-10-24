@@ -133,19 +133,25 @@ local function build(width)
     end
   end
 
+  -- Wrapped rather than cut: a hint missing its end says nothing.
   local function note(text)
-    push(util.trunc("  " .. text, math.max(8, width)), { type = "blank" })
-    table.insert(hl, { #lines - 1, "DiffNvimHint", 0, -1 })
+    for _, chunk in ipairs(util.wrap(text, math.max(8, width - 3))) do
+      push("  " .. chunk, { type = "blank" })
+      table.insert(hl, { #lines - 1, "DiffNvimHint", 0, -1 })
+    end
   end
   if S.branch_mode then
     if S.branch and S.branch.files then
       render_section("branch", "Branch Changes vs " .. S.branch.base)
+      if #S.branch.files == 0 then
+        push("", { type = "blank" })
+        note("No changes since the branch left " .. S.branch.base .. ".")
+      end
     elseif S.branch then
       note("Cannot compare with " .. S.branch.base .. ":")
       note(S.branch.error or "?")
     elseif S.base == false then
-      note("No base branch (origin/HEAD, main or")
-      note("master); set base_branch in setup().")
+      note("No base branch (origin/HEAD, main or master); set base_branch in setup().")
     else
       note("Loading branch changes…")
     end
@@ -153,8 +159,7 @@ local function build(width)
   end
   -- The mode bar names the previewed branch; its working tree is not here.
   if S.preview then
-    note("Working-tree changes are shown for")
-    note("your own branch; see Branch changes.")
+    note("Working-tree changes are shown for your own branch; see Branch changes.")
     return lines, hl, map
   end
   render_section("staged", "Staged Changes")

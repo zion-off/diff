@@ -528,6 +528,7 @@ return {
     -- Previewing a branch shows that branch's changes: none, for the base itself.
     sidebar.set_preview_branch(base)
     H.wait(function() return pcall(panel_row, "Branch Changes vs .*%(0%)") end, "preview's branch changes")
+    H.ok(panel_row("No changes since the branch left"), "an empty branch says so")
     sidebar.set_preview_branch(nil)
     H.wait(function() return pcall(panel_row, "topic%.lua") end, "HEAD's branch changes again")
 
