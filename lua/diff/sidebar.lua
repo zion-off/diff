@@ -11,6 +11,7 @@ local M = {}
 local mode_bar     = require("diff.mode_bar")
 local file_panel   = require("diff.file_panel")
 local commit_panel = require("diff.commit_panel")
+local chrome       = require("diff.chrome")
 local config       = require("diff.config")
 local git          = require("diff.git")
 local log          = require("diff.log").scope("sidebar")
@@ -510,11 +511,12 @@ function M.is_open()
   return is_valid_win(M._file_win) and (M._branch_mode or is_valid_win(M._commit_win))
 end
 
---- A scratch buffer for a sidebar panel, reusing one of the same name (it
---- is emptied rather than deleted: deleting a displayed buffer closes its window).
-local function make_panel_buf(name)
+--- A scratch buffer for a sidebar panel, reusing the one already tagged for
+--- that surface (it is emptied rather than deleted: deleting a displayed
+--- buffer closes its window).
+local function make_panel_buf(kind, name)
   for _, b in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_valid(b) and vim.api.nvim_buf_get_name(b) == name then
+    if vim.api.nvim_buf_is_valid(b) and chrome.kind(b) == kind then
       vim.bo[b].modifiable = true
       pcall(vim.api.nvim_buf_set_lines, b, 0, -1, false, {})
       vim.bo[b].modifiable = false
@@ -522,7 +524,8 @@ local function make_panel_buf(name)
     end
   end
   local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(buf, name)
+  chrome.tag(buf, kind)
+  chrome.name(buf, name)
   vim.bo[buf].buftype    = "nofile"
   vim.bo[buf].bufhidden  = "wipe"
   vim.bo[buf].swapfile   = false
@@ -534,13 +537,75 @@ end
 --- Panel lines are rendered to the window's exact width, so 'wrap' never
 --- actually wraps — but it does make horizontal scrolling impossible, which
 --- is what keeps the panels pinned without intercepting any keys.
-local function set_panel_win_opts(win)
+--- 'cursorline' is left to sync_cursorline(): only the focused panel marks a
+--- row, so there is one answer to what <CR> will act on.
+--- The branch belongs in exactly one place. It is already the first thing in
+--- the mode bar, so repeating it on each stacked panel's status line is three
+--- more copies of what the reader has just read. The only time a panel names
+--- a branch is when it is showing one that is *not* HEAD — a branch preview —
+--- because then the heading is answering "which branch is this?".
+local function panel_right(label)
+  local preview = M._preview_branch
+  if preview and preview ~= M._head_name and label ~= "diff.nvim" then return preview end
+  return nil
+end
+
+local function set_panel_win_opts(win, label)
   for k, v in pairs({
     number = false, relativenumber = false, wrap = true, linebreak = false,
-    signcolumn = "no", foldcolumn = "0", statuscolumn = "", cursorline = true,
+    signcolumn = "no", foldcolumn = "0", statuscolumn = "", cursorline = false,
     winfixwidth = true, spell = false, list = false,
   }) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
+  end
+  -- The mode bar's status line is the rule under it, not a heading: it sits
+  -- directly above the file tree, which has a heading of its own.
+  if label == "diff.nvim" then label = nil end
+  chrome.dress(win, { label = label, right = panel_right(label) })
+end
+
+--- Only the window with focus marks a row. Two panels both drawing a cursor
+--- line is two answers to "what does <CR> act on"; the open file is marked
+--- separately, and stays marked, by DiffNvimActiveFile.
+--- The diff panes are one surface — their cursors are bound to each other —
+--- so they light together whichever of them has focus.
+local function sync_cursorline()
+  if not M.is_open() then return end
+  local cur = vim.api.nvim_get_current_win()
+  local panes = require("diff.diff_view").pane_wins()
+  local in_panes = false
+  for _, w in ipairs(panes) do
+    if w == cur then in_panes = true end
+  end
+  local marked = {}
+  for _, w in ipairs({ M._file_win or false, M._commit_win or false,
+                       require("diff.annotations").panel_win() or false }) do
+    if w then table.insert(marked, w) end
+  end
+  for _, w in ipairs(marked) do
+    if is_valid_win(w) then
+      pcall(vim.api.nvim_set_option_value, "cursorline", w == cur, { win = w })
+    end
+  end
+  for _, w in ipairs(panes) do
+    if is_valid_win(w) then
+      pcall(vim.api.nvim_set_option_value, "cursorline", in_panes, { win = w })
+    end
+  end
+end
+
+M.sync_cursorline = sync_cursorline
+
+--- Re-apply the panel status lines, so a branch preview is named — and stops
+--- being named when it ends — without rebuilding the panels.
+function M.redress_panels()
+  local panels = {
+    { M._file_win,   M._branch_mode and "Branch changes" or "Changes" },
+    { M._commit_win, "Commits" },
+    { M._bar_win,    "diff.nvim" },
+  }
+  for _, panel in ipairs(panels) do
+    if is_valid_win(panel[1]) then set_panel_win_opts(panel[1], panel[2]) end
   end
 end
 
@@ -561,9 +626,9 @@ local function create_commit_panel()
     return false
   end
   M._commit_win = vim.api.nvim_get_current_win()
-  M._commit_buf = make_panel_buf("diff://commit-panel")
+  M._commit_buf = make_panel_buf("commit-panel", "diff.nvim Commits")
   vim.api.nvim_win_set_buf(M._commit_win, M._commit_buf)
-  set_panel_win_opts(M._commit_win)
+  set_panel_win_opts(M._commit_win, "Commits")
   commit_panel.setup(M._commit_buf, M._commit_win, M._repo_root)
   -- The split the user left, else the default one.
   if M._commit_height then
@@ -589,9 +654,9 @@ local function create_mode_bar()
     return
   end
   M._bar_win = vim.api.nvim_get_current_win()
-  M._bar_buf = make_panel_buf("diff://mode-bar")
+  M._bar_buf = make_panel_buf("mode-bar", "diff.nvim")
   vim.api.nvim_win_set_buf(M._bar_win, M._bar_buf)
-  set_panel_win_opts(M._bar_win)
+  set_panel_win_opts(M._bar_win, "diff.nvim")
   -- Unwrapped, so a narrow sidebar clips its rows instead of wrapping them
   -- out of its two-row window.
   for k, v in pairs({ winfixheight = true, cursorline = false, wrap = false }) do
@@ -600,45 +665,115 @@ local function create_mode_bar()
   mode_bar.setup(M._bar_buf, M._bar_win)
 end
 
+--- The sidebar width to actually use. The diff is what the reader came for,
+--- so the sidebar never takes half the screen and never squeezes the diff
+--- below a width two panes can be read in. On a terminal wide enough for the
+--- configured width, this changes nothing.
+local MIN_DIFF_WIDTH = 40
+
+local function clamp_width(width)
+  local want = math.max(20, math.floor(width or 40))
+  local room = math.max(20, vim.o.columns - MIN_DIFF_WIDTH)
+  return math.max(20, math.min(want, room, math.floor(vim.o.columns / 2)))  -- TESTPROBE
+end
+
 --- Create the panel windows by splitting off `anchor`: the mode bar, the file
 --- panel, and below it the commit panel unless in branch mode.
 --- Returns false when there is no room; the caller rolls back.
 local function create_panels(anchor, width)
   local position = config.get().sidebar_position == "right" and "botright" or "topleft"
   vim.api.nvim_set_current_win(anchor)
-  local ok, err = pcall(vim.cmd, position .. " " .. width .. " vsplit")
+  local ok, err = pcall(vim.cmd, position .. " " .. clamp_width(width) .. " vsplit")
   if not ok then
     log.warn("no room for the sidebar: %s", tostring(err))
     return false
   end
   M._file_win = vim.api.nvim_get_current_win()
-  M._file_buf = make_panel_buf("diff://file-panel")
+  M._file_buf = make_panel_buf("file-panel", "diff.nvim Changes")
   vim.api.nvim_win_set_buf(M._file_win, M._file_buf)
-  set_panel_win_opts(M._file_win)
+  set_panel_win_opts(M._file_win, M._branch_mode and "Branch changes" or "Changes")
   file_panel.setup(M._file_buf, M._file_win, M._repo_root)
   create_mode_bar()
   if not M._branch_mode then return create_commit_panel() end
   return true
 end
 
---- Fill `win` with the "select a file" placeholder.
+--- Fill `win` with the "select a file" placeholder: a quiet, centred hint
+--- rather than a block of text pinned to the top-left corner.
 function M.show_placeholder(win)
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[buf].buftype   = "nofile"
-  vim.bo[buf].bufhidden = "wipe"
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
-    "",
-    "  diff.nvim",
-    "",
-    "  Select a file from the sidebar to view its diff.",
-    "  Press 'q' in the sidebar to close.",
-    "",
-  })
-  vim.bo[buf].modifiable = false
+  local buf = M._placeholder_buf
+  if not (buf and vim.api.nvim_buf_is_valid(buf)) then
+    buf = vim.api.nvim_create_buf(false, true)
+    chrome.tag(buf, "placeholder")
+    chrome.name(buf, "diff.nvim Diff")
+    vim.bo[buf].buftype   = "nofile"
+    vim.bo[buf].bufhidden = "hide"
+    vim.bo[buf].swapfile  = false
+    M._placeholder_buf = buf
+  end
   pcall(vim.api.nvim_win_set_buf, win, buf)
   for k, v in pairs({ number = false, relativenumber = false, statuscolumn = "", signcolumn = "no",
+                      cursorline = false, wrap = true, linebreak = true,
                       scrollbind = false, cursorbind = false }) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
+  end
+  -- Nothing is open, so there is nothing to label. An empty status line draws
+  -- as a plain rule, which is quieter than naming a pane that holds no file.
+  chrome.dress(win, {})
+  M.render_placeholder(win)
+end
+
+local PLACEHOLDER_NS = vim.api.nvim_create_namespace("diff_nvim_placeholder")
+
+-- Longest first: the widest phrasing that fits the pane is the one shown, so
+-- a narrow pane gets a shorter sentence rather than a centred line that wraps
+-- back to the left margin.
+local PLACEHOLDER_HINTS = {
+  { "Select a file from the sidebar to view its diff.", "Press q in the sidebar to close." },
+  { "Select a file to view its diff.", "Press q to close." },
+  { "Select a file.", "q closes." },
+}
+
+--- Draw the placeholder centred in `win`. Re-run on resize so it stays put.
+function M.render_placeholder(win)
+  local buf = M._placeholder_buf
+  if not (is_valid_win(win) and buf and vim.api.nvim_buf_is_valid(buf)) then return end
+  if vim.api.nvim_win_get_buf(win) ~= buf then return end
+
+  local width  = vim.api.nvim_win_get_width(win)
+  local height = vim.api.nvim_win_get_height(win)
+
+  local body = { { "diff.nvim", "DiffNvimSectionHeader" }, { "", nil } }
+  for i, hints in ipairs(PLACEHOLDER_HINTS) do
+    local longest = 0
+    for _, h in ipairs(hints) do longest = math.max(longest, vim.fn.strdisplaywidth(h)) end
+    if longest <= width or i == #PLACEHOLDER_HINTS then
+      for _, h in ipairs(hints) do table.insert(body, { h, "Comment" }) end
+      break
+    end
+  end
+  local top = math.max(0, math.floor((height - #body) / 2))
+
+  local lines, marks = {}, {}
+  for _ = 1, top do table.insert(lines, "") end
+  for _, item in ipairs(body) do
+    local text = item[1]
+    local pad  = math.max(0, math.floor((width - vim.fn.strdisplaywidth(text)) / 2))
+    local line = string.rep(" ", pad) .. text
+    table.insert(lines, line)
+    if item[2] and text ~= "" then
+      table.insert(marks, { #lines - 1, item[2], #line - #text, #line })
+    end
+  end
+
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  vim.api.nvim_buf_clear_namespace(buf, PLACEHOLDER_NS, 0, -1)
+  for _, m in ipairs(marks) do
+    pcall(vim.api.nvim_buf_set_extmark, buf, PLACEHOLDER_NS, m[1], m[3], {
+      end_col = m[4], hl_group = m[2],
+    })
   end
 end
 
@@ -740,6 +875,10 @@ local function close_interface(opts)
   end
 
   clear_panel_state()
+  if M._placeholder_buf and vim.api.nvim_buf_is_valid(M._placeholder_buf) then
+    pcall(vim.api.nvim_buf_delete, M._placeholder_buf, { force = true })
+  end
+  M._placeholder_buf = nil
   M._main_win, M._saved_layout, M._panel_sizes, M._commit_height = nil, nil, nil, nil
   M._sidebar_hidden = false
   if M._saved_mouse ~= nil then
@@ -925,6 +1064,7 @@ function M.refresh(opts)
   if scope == "all" then
     M._head_name = read_head_name()
     render_mode_bar()
+    M.redress_panels()
   end
   refreshing = refreshing + 1
   file_panel.refresh(M._preview_branch, M._branch_mode, done)
@@ -1046,7 +1186,15 @@ function M.setup_auto_refresh()
         file_panel.on_resize()
         commit_panel.on_resize()
       end
+      if is_valid_win(M._main_win) then M.render_placeholder(M._main_win) end
     end,
+  })
+
+  -- One focused surface marks one row: keep 'cursorline' on the window the
+  -- reader is actually in.
+  vim.api.nvim_create_autocmd({ "WinEnter", "BufWinEnter" }, {
+    group = aug,
+    callback = function() vim.schedule(M.sync_cursorline) end,
   })
 
   -- Hover state belongs to the pointer: drop it when the pointer leaves the
