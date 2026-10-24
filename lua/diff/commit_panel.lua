@@ -9,6 +9,7 @@ local M = {}
 local git    = require("diff.git")
 local util   = require("diff.util")
 local log    = require("diff.log").scope("commit_panel")
+local chrome = require("diff.chrome")
 
 local NS        = vim.api.nvim_create_namespace("diff_nvim_commit_panel")
 -- Separate namespace for the two-line cursor highlight, redrawn on every move.
@@ -308,25 +309,84 @@ local function close_tooltip()
   M._tooltip_buf = nil
 end
 
-local function open_tooltip(lines)
-  if #lines == 0 then lines = { "(empty commit message)" } end
+--- Lay the commit out as a card: who and when at the top, a rule, then the
+--- message. The panel row already shows the subject, so a tooltip that shows
+--- only the subject again tells the reader nothing.
+local function tooltip_lines(commit, body)
+  local lines, hl = {}, {}
+  local hash = commit.short_hash or commit.hash:sub(1, 7)
+  local head = hash
+  if (commit.author or "") ~= "" then head = head .. "  " .. commit.author end
+  if (commit.time or "") ~= "" then head = head .. "  ·  " .. commit.time end
+  table.insert(lines, head)
+  table.insert(hl, { 0, "DiffNvimCommitHash", 0, #hash })
+  table.insert(hl, { 0, "DiffNvimCommitMeta", #hash, -1 })
+
+  local refs = {}
+  for _, ref in ipairs(commit.refs or {}) do table.insert(refs, ref) end
+  if #refs > 0 then
+    local line, spans = "", {}
+    for _, ref in ipairs(refs) do
+      local pill = (line == "" and "" or " ") .. "[" .. ref .. "]"
+      table.insert(spans, { #line + (line == "" and 0 or 1), #line + #pill, ref_hl(ref) })
+      line = line .. pill
+    end
+    table.insert(lines, line)
+    for _, s in ipairs(spans) do table.insert(hl, { #lines - 1, s[3], s[1], s[2] }) end
+  end
+
+  table.insert(lines, "")
+  local first_body = #lines
+  local empty = true
+  for i, raw in ipairs(body or {}) do
+    table.insert(lines, raw)
+    if raw ~= "" then
+      empty = false
+      table.insert(hl, { #lines - 1, i == 1 and "DiffNvimCommitSubject" or "DiffNvimCommitBody", 0, -1 })
+    end
+  end
+  if empty then
+    table.insert(lines, "(empty commit message)")
+    table.insert(hl, { #lines - 1, "DiffNvimCommitMeta", 0, -1 })
+  end
+  -- Trailing blanks from `git show` would show as dead rows inside the border.
+  while #lines > first_body and lines[#lines] == "" do table.remove(lines) end
+  return lines, hl
+end
+
+local TOOLTIP_NS = vim.api.nvim_create_namespace("diff_nvim_commit_tooltip")
+
+local function open_tooltip(commit, body)
+  local lines, hl = tooltip_lines(commit, body)
   local width = 0
   for _, l in ipairs(lines) do width = math.max(width, vim.fn.strdisplaywidth(l)) end
-  width = math.max(1, math.min(width + 2, 80))
+  width = math.max(30, math.min(width + 2, math.min(80, vim.o.columns - 4)))
   local height = math.max(1, math.min(#lines, math.floor(vim.o.lines * 0.6)))
 
   local buf = vim.api.nvim_create_buf(false, true)
+  chrome.tag(buf, "commit-tooltip")
+  chrome.name(buf, "diff.nvim Commit " .. (commit.short_hash or commit.hash:sub(1, 7)))
   vim.bo[buf].buftype   = "nofile"
   vim.bo[buf].bufhidden = "wipe"
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
+  for _, h in ipairs(hl) do
+    pcall(vim.api.nvim_buf_add_highlight, buf, TOOLTIP_NS, h[2], h[1], h[3], h[4])
+  end
 
-  local ok, win = pcall(vim.api.nvim_open_win, buf, true, {
-    relative = "editor", width = width, height = height,
-    row = math.max(0, math.floor((vim.o.lines - height) / 2)),
-    col = math.max(0, math.floor((vim.o.columns - width) / 2)),
+  -- Anchored to the row it describes, like a tooltip, rather than dropped in
+  -- the middle of the screen with no connection to what was asked about.
+  local cfg = {
+    relative = "cursor", width = width, height = height, row = 1, col = 0,
     style = "minimal", border = "rounded", title = " Commit ", title_pos = "center",
-  })
+  }
+  local ok, win = pcall(vim.api.nvim_open_win, buf, true, cfg)
+  if not ok then
+    cfg.relative, cfg.row, cfg.col = "editor",
+      math.max(0, math.floor((vim.o.lines - height) / 2)),
+      math.max(0, math.floor((vim.o.columns - width) / 2))
+    ok, win = pcall(vim.api.nvim_open_win, buf, true, cfg)
+  end
   if not ok then
     pcall(vim.api.nvim_buf_delete, buf, { force = true })
     return
@@ -334,6 +394,10 @@ local function open_tooltip(lines)
   M._tooltip_win, M._tooltip_buf = win, buf
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
+  pcall(vim.api.nvim_set_option_value, "statusline", chrome.statusline("Commit"), { win = win })
+  pcall(vim.api.nvim_set_option_value, "winhighlight",
+    "NormalFloat:DiffNvimPickerNormal,FloatBorder:DiffNvimPickerBorder,FloatTitle:DiffNvimPickerTitle",
+    { win = win })
 
   for _, key in ipairs({ "q", "<Esc>" }) do
     vim.keymap.set("n", key, close_tooltip, { buffer = buf, nowait = true, silent = true, desc = "Close tooltip (diff)" })
@@ -346,23 +410,23 @@ local function open_tooltip(lines)
   })
 end
 
-local function show_commit_tooltip(hash)
+local function show_commit_tooltip(commit)
   close_tooltip()
-  local d = S.details[hash]
+  local d = S.details[commit.hash]
   if d then
-    open_tooltip(vim.deepcopy(d.body))
+    open_tooltip(commit, vim.deepcopy(d.body))
     return
   end
   M._tooltip_req_id = M._tooltip_req_id + 1
   local req = M._tooltip_req_id
-  git.run({ "show", "--no-patch", "--format=%B", hash }, S.root, function(lines, stderr, code)
+  git.run({ "show", "--no-patch", "--format=%B", commit.hash }, S.root, function(lines, stderr, code)
     if req ~= M._tooltip_req_id then return end
     if code ~= 0 then
-      log.warn("cannot read message of %s: %s", hash, stderr)
+      log.warn("cannot read message of %s: %s", commit.hash, stderr)
       vim.notify("diff.nvim: " .. (stderr ~= "" and stderr or "cannot fetch commit message"), vim.log.levels.WARN)
       return
     end
-    open_tooltip(lines)
+    open_tooltip(commit, lines)
   end)
 end
 
@@ -501,7 +565,7 @@ function M.setup(buf, win, repo_root)
 
   map(km.commit_tooltip, function()
     local meta = S.line_map[vim.api.nvim_win_get_cursor(0)[1]]
-    if meta and meta.commit then show_commit_tooltip(meta.commit.hash) end
+    if meta and meta.commit then show_commit_tooltip(meta.commit) end
   end, "Show full commit message")
 
   map("q", function() require("diff.sidebar").close() end, "Close")
