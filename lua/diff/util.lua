@@ -11,10 +11,10 @@ local M = {}
 --- @return string
 function M.trunc(s, max_len)
   if max_len <= 0 then return "" end
-  local display_w = vim.fn.strdisplaywidth(s)
+  local display_w = vim.api.nvim_strwidth(s)
   if display_w <= max_len then return s end
   local result = vim.fn.strcharpart(s, 0, max_len - 1)
-  while vim.fn.strdisplaywidth(result) >= max_len and #result > 0 do
+  while vim.api.nvim_strwidth(result) >= max_len and #result > 0 do
     result = vim.fn.strcharpart(result, 0, vim.fn.strchars(result) - 1)
   end
   return result .. "…"
@@ -29,7 +29,7 @@ end
 --- @return string
 function M.trunc_middle(s, max_len)
   if max_len <= 0 then return "" end
-  local display_w = vim.fn.strdisplaywidth(s)
+  local display_w = vim.api.nvim_strwidth(s)
   if display_w <= max_len then return s end
   -- Reserve one column for the ellipsis.
   local budget = max_len - 1
@@ -41,7 +41,7 @@ function M.trunc_middle(s, max_len)
 
   -- Build the head up to head_budget display columns.
   local head = vim.fn.strcharpart(s, 0, head_budget)
-  while vim.fn.strdisplaywidth(head) > head_budget and #head > 0 do
+  while vim.api.nvim_strwidth(head) > head_budget and #head > 0 do
     head = vim.fn.strcharpart(head, 0, vim.fn.strchars(head) - 1)
   end
 
@@ -51,7 +51,7 @@ function M.trunc_middle(s, max_len)
   local tail        = ""
   while tail_start > 0 do
     local candidate = vim.fn.strcharpart(s, tail_start - 1, total_chars - (tail_start - 1))
-    if vim.fn.strdisplaywidth(candidate) > tail_budget then break end
+    if vim.api.nvim_strwidth(candidate) > tail_budget then break end
     tail = candidate
     tail_start = tail_start - 1
   end
@@ -69,12 +69,12 @@ local function hard_wrap(s, width)
   local out = {}
   local remaining = s
   while remaining ~= "" do
-    if vim.fn.strdisplaywidth(remaining) <= width then
+    if vim.api.nvim_strwidth(remaining) <= width then
       table.insert(out, remaining)
       break
     end
     local chunk = vim.fn.strcharpart(remaining, 0, width)
-    while vim.fn.strdisplaywidth(chunk) > width and #chunk > 0 do
+    while vim.api.nvim_strwidth(chunk) > width and #chunk > 0 do
       chunk = vim.fn.strcharpart(chunk, 0, vim.fn.strchars(chunk) - 1)
     end
     if chunk == "" then break end  -- safety: avoid infinite loop
@@ -94,12 +94,12 @@ end
 function M.wrap(s, width)
   if width <= 0 then return { s } end
   if s == "" then return { "" } end
-  if vim.fn.strdisplaywidth(s) <= width then return { s } end
+  if vim.api.nvim_strwidth(s) <= width then return { s } end
 
   local rows = {}
   local cur  = ""
   for word in s:gmatch("%S+") do
-    if vim.fn.strdisplaywidth(word) > width then
+    if vim.api.nvim_strwidth(word) > width then
       -- Flush the current line, then hard-break the long word.
       if cur ~= "" then
         table.insert(rows, cur)
@@ -112,7 +112,7 @@ function M.wrap(s, width)
       cur = pieces[#pieces] or ""
     elseif cur == "" then
       cur = word
-    elseif vim.fn.strdisplaywidth(cur .. " " .. word) <= width then
+    elseif vim.api.nvim_strwidth(cur .. " " .. word) <= width then
       cur = cur .. " " .. word
     else
       table.insert(rows, cur)

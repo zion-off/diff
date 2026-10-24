@@ -266,6 +266,24 @@ return {
     H.eq(marks[1][2] + 1, panel_row("b%.lua"))
   end },
 
+  { "text measures the same whichever window has focus", function()
+    -- strdisplaywidth() measures as if the text sat in the current window,
+    -- so a narrow pane with 'breakindent' overstated an indented line.
+    local util = require("diff.util")
+    local win = pane("new")
+    vim.api.nvim_set_current_win(win)
+    local width = vim.api.nvim_win_get_width(win)
+    vim.api.nvim_win_set_width(win, 20)
+    vim.wo[win].wrap, vim.wo[win].linebreak, vim.wo[win].breakindent = true, true, true
+    local line = "    " .. ("word "):rep(7)
+    H.eq(util.trunc(line, #line), line)
+    H.eq(util.trunc_middle(line, #line), line)
+    H.eq(util.wrap(line, #line), { line })
+    vim.wo[win].breakindent = false
+    vim.api.nvim_win_set_width(win, width)
+    dv.balance_panes()
+  end },
+
   { "]f and [f walk the files of the section", function()
     vim.api.nvim_set_current_win(pane("new"))
     -- Display order: directories first (deep/…, src/…), then new.lua.

@@ -752,7 +752,7 @@ function M.render_placeholder(win)
   local body = { { "diff.nvim", "DiffNvimSectionHeader" }, { "", nil } }
   for i, hints in ipairs(PLACEHOLDER_HINTS) do
     local longest = 0
-    for _, h in ipairs(hints) do longest = math.max(longest, vim.fn.strdisplaywidth(h)) end
+    for _, h in ipairs(hints) do longest = math.max(longest, vim.api.nvim_strwidth(h)) end
     if longest <= width or i == #PLACEHOLDER_HINTS then
       for _, h in ipairs(hints) do table.insert(body, { h, "Comment" }) end
       break
@@ -764,7 +764,7 @@ function M.render_placeholder(win)
   for _ = 1, top do table.insert(lines, "") end
   for _, item in ipairs(body) do
     local text = item[1]
-    local pad  = math.max(0, math.floor((width - vim.fn.strdisplaywidth(text)) / 2))
+    local pad  = math.max(0, math.floor((width - vim.api.nvim_strwidth(text)) / 2))
     local line = text == "" and "" or string.rep(" ", pad) .. text
     table.insert(lines, line)
     if item[2] and text ~= "" then

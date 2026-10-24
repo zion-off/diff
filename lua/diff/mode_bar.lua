@@ -41,11 +41,11 @@ end
 local function row_from(parts, row)
   local line, hl, segs = "", {}, {}
   for _, p in ipairs(parts) do
-    local s, c1 = #line, vim.fn.strdisplaywidth(line) + 1
+    local s, c1 = #line, vim.api.nvim_strwidth(line) + 1
     line = line .. p[1]
     if p[2] then table.insert(hl, { row, p[2], s, #line }) end
     if p[3] then
-      table.insert(segs, { row = row, s = s, e = #line, c1 = c1, c2 = vim.fn.strdisplaywidth(line),
+      table.insert(segs, { row = row, s = s, e = #line, c1 = c1, c2 = vim.api.nvim_strwidth(line),
         action = p[3], inert = p[4] })
     end
   end
@@ -58,9 +58,9 @@ local function build(width, info)
   local tag = info.preview and " (preview)" or (info.worktree and " (worktree)" or "")
   local tail = info.away and " ✕ " or ""
   -- Leave at least one column of padding before ▾.
-  local name_w = math.max(4, width - 3 - vim.fn.strdisplaywidth(tag) - 3 - vim.fn.strdisplaywidth(tail))
+  local name_w = math.max(4, width - 3 - vim.api.nvim_strwidth(tag) - 3 - vim.api.nvim_strwidth(tail))
   local name = util.trunc(info.branch or "…", name_w)
-  local pad = math.max(1, width - 3 - vim.fn.strdisplaywidth(name .. tag) - 2 - vim.fn.strdisplaywidth(tail))
+  local pad = math.max(1, width - 3 - vim.api.nvim_strwidth(name .. tag) - 2 - vim.api.nvim_strwidth(tail))
   local parts1 = {
     { " ⎇ " .. name, "DiffNvimModeBranch", a.pick_branch },
     { tag, "DiffNvimModeTag", a.pick_branch },
@@ -116,7 +116,7 @@ local function apply_cursor()
   if vim.api.nvim_get_current_win() ~= S.win then return end
   local cur = vim.api.nvim_win_get_cursor(S.win)
   local line = vim.api.nvim_buf_get_lines(S.buf, cur[1] - 1, cur[1], false)[1] or ""
-  local seg = segment_at(cur[1], vim.fn.strdisplaywidth(line:sub(1, cur[2])) + 1)
+  local seg = segment_at(cur[1], vim.api.nvim_strwidth(line:sub(1, cur[2])) + 1)
   if seg then
     pcall(vim.api.nvim_buf_set_extmark, S.buf, NS_CURSOR, seg.row, seg.s, {
       end_col = seg.e, hl_group = "DiffNvimModeCursor", priority = 250,
@@ -169,7 +169,7 @@ end
 local function activate_cursor()
   if not valid() then return end
   local cur = vim.api.nvim_win_get_cursor(S.win)
-  local col = vim.fn.strdisplaywidth(vim.api.nvim_get_current_line():sub(1, cur[2])) + 1
+  local col = vim.api.nvim_strwidth(vim.api.nvim_get_current_line():sub(1, cur[2])) + 1
   local here = segment_at(cur[1], col)
   if here then return here.action() end
   -- Between items: the nearest one on the row.

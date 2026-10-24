@@ -159,7 +159,7 @@ local function build(width)
     local stat_text = string.rep(" ", stat_w - #stat) .. stat
     local right_w = stat_w + 4 -- stat column, a gap, then "[X]"
     local name = util.trunc_middle(node.name, math.max(1, width - #indent - right_w - 1))
-    local pad = math.max(1, width - #indent - vim.fn.strdisplaywidth(name) - right_w)
+    local pad = math.max(1, width - #indent - vim.api.nvim_strwidth(name) - right_w)
     local line = indent .. name .. string.rep(" ", pad) .. stat_text
       .. " [" .. (STATUS_BADGE[f.status] or "·") .. "]"
     local r = push(line, { type = "file", key = file_key(section, f.path), section = section, file = f })

@@ -99,7 +99,7 @@ local function render()
   local body  = head .. " " -- the cell the caret occupies
   local hint  = state.query == "" and ("  " .. PLACEHOLDER) or ""
   local count = ("%d/%d"):format(#state.filtered, #state.branches)
-  local used  = vim.fn.strdisplaywidth(body .. hint) + vim.fn.strdisplaywidth(count) + 1
+  local used  = vim.api.nvim_strwidth(body .. hint) + vim.api.nvim_strwidth(count) + 1
   local gap   = math.max(1, width - used)
   local prompt = body .. hint .. string.rep(" ", gap) .. count .. " "
   table.insert(lines, prompt)

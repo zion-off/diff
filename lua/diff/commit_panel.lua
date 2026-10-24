@@ -127,7 +127,7 @@ local function build(width)
     local pills = {}
     for _, ref in ipairs(commit.refs or {}) do
       local pill = " [" .. ref .. "]"
-      if vim.fn.strdisplaywidth(meta .. pill) <= width then
+      if vim.api.nvim_strwidth(meta .. pill) <= width then
         table.insert(pills, { #meta, #meta + #pill, ref_hl(ref) })
         meta = meta .. pill
       end
@@ -178,7 +178,7 @@ local function build(width)
         if f.stat and f.stat.binary then st, a_r, d_r = "  bin", nil, nil end
         local right_w = 3 + #st
         local name = util.trunc_middle(node.name, math.max(1, width - #pad - right_w - 1))
-        local gap = math.max(1, width - #pad - vim.fn.strdisplaywidth(name) - right_w)
+        local gap = math.max(1, width - #pad - vim.api.nvim_strwidth(name) - right_w)
         local line = pad .. name .. string.rep(" ", gap) .. "[" .. (STATUS_BADGE[f.status] or "·") .. "]" .. st
         local r = push(line, { type = "commit_file", key = file_key(commit.hash, f.path), commit = commit, file = f })
         table.insert(hl, { r, "DiffNvimCommitFileEntry", #pad, #pad + #name })
@@ -359,7 +359,7 @@ local TOOLTIP_NS = vim.api.nvim_create_namespace("diff_nvim_commit_tooltip")
 local function open_tooltip(commit, body)
   local lines, hl = tooltip_lines(commit, body)
   local width = 0
-  for _, l in ipairs(lines) do width = math.max(width, vim.fn.strdisplaywidth(l)) end
+  for _, l in ipairs(lines) do width = math.max(width, vim.api.nvim_strwidth(l)) end
   width = math.max(30, math.min(width + 2, math.min(80, vim.o.columns - 4)))
   local height = math.max(1, math.min(#lines, math.floor(vim.o.lines * 0.6)))
 
