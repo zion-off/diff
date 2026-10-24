@@ -549,6 +549,48 @@ return {
     H.ok(#calls <= 8, #calls .. " git processes: " .. vim.inspect(calls))
   end },
 
+  { "the plugin's windows leave a global status line's fill characters alone", function()
+    -- OptionSet is not fired during startup, which is when the specs run.
+    local function laststatus(n)
+      vim.o.laststatus = n
+      vim.api.nvim_exec_autocmds("OptionSet", { pattern = "laststatus" })
+    end
+    laststatus(3)
+    open_file("new%.lua", "new.lua")
+    local function stl(win) return vim.wo[win].fillchars:match("stl:([^,]+)") or " " end
+    for _, win in ipairs({ pane("new"), sidebar._file_win, sidebar._commit_win, sidebar._bar_win }) do
+      local kind = require("diff.chrome").kind(vim.api.nvim_win_get_buf(win))
+      H.eq(stl(win), " ", tostring(kind) .. " fillchars: " .. vim.wo[win].fillchars)
+    end
+    laststatus(2)
+    H.eq(stl(sidebar._bar_win), "─", "a rule again under per-window status lines")
+    open_file("a%.lua", "src/a.lua")
+  end },
+
+  { "the notes panel leaves the two panes equally wide, open and closed", function()
+    open_file("a%.lua", "src/a.lua")
+    local notes = require("diff.annotations")
+    local function widths()
+      return vim.api.nvim_win_get_width(pane("old")), vim.api.nvim_win_get_width(pane("new"))
+    end
+    notes.toggle_notes(repo)
+    H.ok(notes.panel_win(), "notes panel open")
+    local old, new = widths()
+    H.ok(math.abs(old - new) <= 1, ("panes %d/%d with the notes open"):format(old, new))
+    notes.close_panel()
+    old, new = widths()
+    H.ok(math.abs(old - new) <= 1, ("panes %d/%d after closing the notes"):format(old, new))
+  end },
+
+  { "the empty main area draws no list characters", function()
+    dv.close()
+    local main = sidebar.get_main_win()
+    H.eq(vim.wo[main].list, false)
+    for _, l in ipairs(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(main), 0, -1, false)) do
+      H.ok(l == "" or l:match("%S"), "whitespace-only placeholder line: " .. vim.inspect(l))
+    end
+  end },
+
   { "the mode bar shows the branch, switches modes and leaves a preview", function()
     local base = vim.trim(H.git(repo, "rev-parse", "--abbrev-ref", "HEAD"))
     local mb = require("diff.mode_bar")

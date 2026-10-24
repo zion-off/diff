@@ -249,10 +249,13 @@ end
 
 --- Close the notes panel if it is open.
 function M.close_panel()
-  if M.panel_win() then
+  local was_open = M.panel_win() ~= nil
+  if was_open then
     pcall(vim.api.nvim_win_close, M._panel.win, true)
   end
   M._panel = { win = nil, buf = nil }
+  -- The freed width goes to the pane beside the panel alone.
+  if was_open then require("diff.diff_view").balance_panes() end
 end
 
 --- (Re-)render the notes buffer from the session file.
@@ -333,6 +336,10 @@ function M.toggle_notes(repo_root)
   chrome.dress(win, { label = "Notes", right = "q close · dd delete" })
 
   M._panel = { win = win, buf = buf }
+  -- The split took all its width from the pane beside it; left lopsided,
+  -- the narrow pane wraps every line and the wide one fills with padding to
+  -- stay row-aligned with it.
+  require("diff.diff_view").balance_panes()
 
   -- Render content
   M._render_notes_buf(buf)

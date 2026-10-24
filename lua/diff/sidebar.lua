@@ -684,7 +684,7 @@ local MIN_DIFF_WIDTH = 40
 local function clamp_width(width)
   local want = math.max(20, math.floor(width or 40))
   local room = math.max(20, vim.o.columns - MIN_DIFF_WIDTH)
-  return math.max(20, math.min(want, room, math.floor(vim.o.columns / 2)))  -- TESTPROBE
+  return math.max(20, math.min(want, room, math.floor(vim.o.columns / 2)))
 end
 
 --- Create the panel windows by splitting off `anchor`: the mode bar, the file
@@ -722,8 +722,10 @@ function M.show_placeholder(win)
     M._placeholder_buf = buf
   end
   pcall(vim.api.nvim_win_set_buf, win, buf)
+  -- 'list' off: the centring is done with spaces, which 'listchars' would
+  -- otherwise draw as a row of trail markers across the blank line.
   for k, v in pairs({ number = false, relativenumber = false, statuscolumn = "", signcolumn = "no",
-                      cursorline = false, wrap = true, linebreak = true,
+                      cursorline = false, wrap = true, linebreak = true, list = false,
                       scrollbind = false, cursorbind = false }) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
@@ -769,7 +771,7 @@ function M.render_placeholder(win)
   for _, item in ipairs(body) do
     local text = item[1]
     local pad  = math.max(0, math.floor((width - vim.fn.strdisplaywidth(text)) / 2))
-    local line = string.rep(" ", pad) .. text
+    local line = text == "" and "" or string.rep(" ", pad) .. text
     table.insert(lines, line)
     if item[2] and text ~= "" then
       table.insert(marks, { #lines - 1, item[2], #line - #text, #line })
@@ -1223,6 +1225,22 @@ function M.setup_auto_refresh()
       if M._main_win and not get_diff_tab() then
         log.info("interface tab closed")
         M.close({ tab_gone = true })
+      end
+    end,
+  })
+
+  -- Whether each window has its own status line decides how the plugin's
+  -- windows are dressed, so a change at runtime re-dresses them.
+  vim.api.nvim_create_autocmd("OptionSet", {
+    group = aug,
+    pattern = "laststatus",
+    callback = function()
+      if not M.is_open() then return end
+      log.debug("'laststatus' is now %d; re-dressing windows", vim.o.laststatus)
+      M.redress_panels()
+      require("diff.diff_view").redress()
+      if is_valid_win(M._main_win) and vim.api.nvim_win_get_buf(M._main_win) == M._placeholder_buf then
+        chrome.dress(M._main_win, {})
       end
     end,
   })

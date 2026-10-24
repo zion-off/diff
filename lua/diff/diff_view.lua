@@ -473,6 +473,12 @@ local function render_header()
   dress_panes()
 end
 
+--- Re-apply the window chrome of the view (after 'laststatus' changes).
+function M.redress()
+  if valid_win(S.header_win) then header_opts(S.header_win) end
+  dress_panes()
+end
+
 --- The windows currently showing diff panes, for callers that treat the two
 --- of them as one surface (they share a cursor).
 function M.pane_wins()
@@ -1113,6 +1119,7 @@ function M.balance_panes()
   local old, new = S.panes.old, S.panes.new
   if not (valid_win(old) and valid_win(new)) then return end
   local total = vim.api.nvim_win_get_width(old) + vim.api.nvim_win_get_width(new)
+  log.debug("balancing panes %d/%d", vim.api.nvim_win_get_width(old), vim.api.nvim_win_get_width(new))
   pcall(vim.api.nvim_win_set_width, old, math.floor(total / 2))
 end
 

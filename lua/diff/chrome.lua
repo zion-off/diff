@@ -72,10 +72,19 @@ function M.dress(win, opts)
   local unlabelled = (opts.label == nil or opts.label == "")
     and (opts.right == nil or opts.right == "")
   local fc = { eob = " " }
-  -- Authoritative, not merged: these windows are reused across states, so a
-  -- rule left behind by an unlabelled state would otherwise bleed through a
-  -- labelled one and pad its heading out with dashes.
-  fc.stl, fc.stlnc = unlabelled and "─" or " ", unlabelled and "─" or " "
+  if global_bar then
+    -- The one bar is the reader's, and it is filled with the fill characters
+    -- of whichever window has focus: a rule set here would draw dashes
+    -- through the gaps of their status line.
+    local global = vim.go.fillchars
+    fc.stl = global:match("stl:([^,]+)") or " "
+    fc.stlnc = global:match("stlnc:([^,]+)") or " "
+  else
+    -- Authoritative, not merged: these windows are reused across states, so
+    -- a rule left behind by an unlabelled state would otherwise bleed through
+    -- a labelled one and pad its heading out with dashes.
+    fc.stl, fc.stlnc = unlabelled and "─" or " ", unlabelled and "─" or " "
+  end
   fc = vim.tbl_extend("force", fc, opts.fillchars or {})
   pcall(vim.api.nvim_set_option_value, "fillchars", M.fillchars(win, fc), { win = win })
   if global_bar then
