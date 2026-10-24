@@ -30,6 +30,13 @@ local state = nil
 
 local NS = vim.api.nvim_create_namespace("diff_nvim_branch_picker")
 
+local chrome = require("diff.chrome")
+
+-- Room the float leaves around the list: the prompt row plus its rule.
+local CHROME_ROWS = 2
+local PROMPT = "❯ "
+local PLACEHOLDER = "Type to filter branches"
+
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
@@ -56,6 +63,24 @@ local function apply_filter()
   if state.cursor < 1 then state.cursor = 1 end
 end
 
+--- Height the float wants for the current result set, so a filter that leaves
+--- two branches does not leave twenty rows of empty box below them.
+local function wanted_height()
+  local rows = math.max(#state.filtered, 1) + CHROME_ROWS
+  return math.max(CHROME_ROWS + 1, math.min(rows, math.floor(vim.o.lines * 0.6)))
+end
+
+--- Re-centre the float at the height the list now needs.
+local function resize()
+  if not is_valid(M._win) then return end
+  local height = wanted_height()
+  local cfg = vim.api.nvim_win_get_config(M._win)
+  if cfg.height == height then return end
+  cfg.height = height
+  cfg.row = math.max(0, math.floor((vim.o.lines - height) / 2))
+  pcall(vim.api.nvim_win_set_config, M._win, cfg)
+end
+
 --- Redraw the buffer contents (prompt line + branch rows).
 local function render()
   if not (M._buf and vim.api.nvim_buf_is_valid(M._buf)) then return end
@@ -63,21 +88,40 @@ local function render()
   vim.api.nvim_set_option_value("modifiable", true, { buf = M._buf })
   vim.api.nvim_buf_clear_namespace(M._buf, NS, 0, -1)
 
+  local width    = is_valid(M._win) and vim.api.nvim_win_get_width(M._win) or 50
   local lines    = {}
   local hl_queue = {}
 
-  -- Prompt line.
-  local prompt = "  " .. state.query
+  -- Prompt line: a glyph marking where typing goes, the query, a caret where
+  -- the next character will land, and the match count at the far end. A row
+  -- with nothing on it reads as a window that is not listening.
+  local head  = PROMPT .. state.query
+  local body  = head .. " " -- the cell the caret occupies
+  local hint  = state.query == "" and ("  " .. PLACEHOLDER) or ""
+  local count = ("%d/%d"):format(#state.filtered, #state.branches)
+  local used  = vim.fn.strdisplaywidth(body .. hint) + vim.fn.strdisplaywidth(count) + 1
+  local gap   = math.max(1, width - used)
+  local prompt = body .. hint .. string.rep(" ", gap) .. count .. " "
   table.insert(lines, prompt)
-  table.insert(hl_queue, { 0, "DiffNvimSectionHeader", 0, -1 })
+  table.insert(hl_queue, { 0, "DiffNvimPickerPrompt", 0, #PROMPT })
+  if hint ~= "" then
+    table.insert(hl_queue, { 0, "DiffNvimPickerPlaceholder", #body, #body + #hint })
+  end
+  -- A caret of its own: the real cursor is parked on the selected row.
+  table.insert(hl_queue, { 0, "DiffNvimPickerCaret", #head, #body })
+  table.insert(hl_queue, { 0, "DiffNvimPickerCount", #prompt - #count - 1, -1 })
+  table.insert(hl_queue, { 0, "DiffNvimPickerCount", #prompt - #count - 1, -1 })
+
+  table.insert(lines, string.rep("─", width))
+  table.insert(hl_queue, { 1, "DiffNvimPickerRule", 0, -1 })
 
   if #state.filtered == 0 then
-    table.insert(lines, "  (no matching branches)")
-    table.insert(hl_queue, { 1, "DiffNvimCommitMeta", 0, -1 })
+    table.insert(lines, "  No branch matches “" .. state.query .. "”")
+    table.insert(hl_queue, { 2, "DiffNvimCommitMeta", 0, -1 })
   else
-    for i, b in ipairs(state.filtered) do
-      local marker = (i == state.cursor) and "▶ " or "  "
-      local flag   = b.is_head and " (current)" or (b.worktree and " (worktree)" or "")
+    for _, b in ipairs(state.filtered) do
+      local marker = "  "
+      local flag   = b.is_head and "  (current)" or (b.worktree and "  (worktree)" or "")
       local line   = marker .. b.name .. flag
       table.insert(lines, line)
 
@@ -94,6 +138,13 @@ local function render()
       if flag ~= "" then
         table.insert(hl_queue, { row, "DiffNvimCommitMeta", #marker + #b.name, -1 })
       end
+      -- Show why this row survived the filter.
+      if state.query ~= "" then
+        local s, e = b.name:lower():find(state.query:lower(), 1, true)
+        if s then
+          table.insert(hl_queue, { row, "DiffNvimPickerMatch", #marker + s - 1, #marker + e })
+        end
+      end
     end
   end
 
@@ -103,9 +154,12 @@ local function render()
   end
   vim.api.nvim_set_option_value("modifiable", false, { buf = M._buf })
 
-  -- Keep the cursor visually parked on the selected row (rows start at line 2).
-  if is_valid(M._win) and #state.filtered > 0 then
-    pcall(vim.api.nvim_win_set_cursor, M._win, { state.cursor + 1, 0 })
+  resize()
+
+  -- Keep the cursor visually parked on the selected row.
+  if is_valid(M._win) then
+    local line = #state.filtered > 0 and state.cursor + CHROME_ROWS or CHROME_ROWS + 1
+    pcall(vim.api.nvim_win_set_cursor, M._win, { line, 0 })
   end
 end
 
@@ -225,20 +279,22 @@ function M.open(repo_root, on_select)
     -- Window geometry: centered, sized to content within sane bounds.
     local width  = 50
     for _, b in ipairs(branches) do
-      width = math.max(width, #b.name + 14)
+      width = math.max(width, #b.name + 16)
     end
     width = math.min(width, math.max(30, math.floor(vim.o.columns * 0.6)))
-    local height = math.min(#branches + 1, math.floor(vim.o.lines * 0.6))
-    height = math.max(height, 2)
+    local height = math.min(#branches + CHROME_ROWS, math.floor(vim.o.lines * 0.6))
+    height = math.max(height, CHROME_ROWS + 1)
     local row = math.max(0, math.floor((vim.o.lines - height) / 2))
     local col = math.max(0, math.floor((vim.o.columns - width) / 2))
 
     local buf = vim.api.nvim_create_buf(false, true)
+    chrome.tag(buf, "branch-picker")
+    chrome.name(buf, "diff.nvim Branches")
     vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
     vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
     vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 
-    local ok, win = pcall(vim.api.nvim_open_win, buf, true, {
+    local win_cfg = {
       relative  = "editor",
       width     = width,
       height    = height,
@@ -248,7 +304,14 @@ function M.open(repo_root, on_select)
       border    = "rounded",
       title     = " Preview branch ",
       title_pos = "center",
+    }
+    -- Footers need Neovim 0.10; without one the keys are simply undocumented
+    -- rather than the window failing to open.
+    local with_footer = vim.tbl_extend("force", win_cfg, {
+      footer = " ↑↓ move   ⏎ select   esc cancel ", footer_pos = "center",
     })
+    local ok, win = pcall(vim.api.nvim_open_win, buf, true, with_footer)
+    if not ok then ok, win = pcall(vim.api.nvim_open_win, buf, true, win_cfg) end
     if not ok or not vim.api.nvim_win_is_valid(win) then
       pcall(vim.api.nvim_buf_delete, buf, { force = true })
       return
@@ -256,6 +319,13 @@ function M.open(repo_root, on_select)
 
     pcall(vim.api.nvim_set_option_value, "cursorline", true,  { win = win })
     pcall(vim.api.nvim_set_option_value, "wrap",       false, { win = win })
+    -- With 'laststatus' 3 the one status line follows the focused window, so
+    -- the float needs its own or the screen's bottom bar reads "[Scratch]".
+    pcall(vim.api.nvim_set_option_value, "statusline", chrome.statusline("Preview branch"), { win = win })
+    pcall(vim.api.nvim_set_option_value, "winhighlight",
+      "Normal:DiffNvimPickerNormal,FloatBorder:DiffNvimPickerBorder,"
+      .. "FloatTitle:DiffNvimPickerTitle,FloatFooter:DiffNvimPickerFooter,"
+      .. "CursorLine:DiffNvimPickerSelected", { win = win })
 
     M._win = win
     M._buf = buf
