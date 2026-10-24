@@ -372,9 +372,19 @@ local function decorate(side)
           line_hl_group = "DiffNvimFiller", priority = PRIORITY_LINE_BG,
         })
       elseif row.change then
+        -- A range reaching into the next row with 'hl_eol', not
+        -- 'line_hl_group': a line highlight is painted at a layer the
+        -- word-level marks cannot reach, so it swallows them whatever their
+        -- priority. Ranged, they layer normally — and spanning the line break
+        -- is what carries the tint past the text to the edge of the pane.
         vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
-          line_hl_group = change_hl, sign_text = "▍", sign_hl_group = sign_hl,
+          end_row = r + 1, end_col = 0, hl_group = change_hl, hl_eol = true,
           priority = PRIORITY_LINE_BG,
+        })
+        -- The sign goes on its own single-row mark: carried on the range
+        -- above it would be placed on both of the rows that range spans.
+        vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
+          sign_text = "▍", sign_hl_group = sign_hl, priority = PRIORITY_LINE_BG,
         })
       end
     end
@@ -453,9 +463,15 @@ end
 local function pad_to_height(side, r, row, target, width, pads)
   local win, buf = S.panes[side], S.bufs[side]
   local line = row[side] and S.model[side].lines[row[side]] or ""
-  -- Fillers draw their pattern; text rows rely on the row's line background.
+  -- Inline virtual text carries its own highlight and is not reached by the
+  -- row's range highlight, so the padding has to name the band it continues:
+  -- a filler draws its pattern, a changed row its own tint, context nothing.
   local char, hl = " ", nil
-  if not row[side] then char, hl = "░", "DiffNvimFillerChar" end
+  if not row[side] then
+    char, hl = "░", "DiffNvimFillerChar"
+  elseif row.change then
+    hl = side == "old" and "DiffNvimRemoved" or "DiffNvimAdded"
+  end
   local id
   local function place(n)
     id = vim.api.nvim_buf_set_extmark(buf, NS_WRAP, r, #line, {

@@ -86,7 +86,12 @@ return {
       local row = S().model.rows[S().layout.items[mark[2] + 1].row]
       local chunk = mark[4].virt_text[1]
       H.eq(mark[4].virt_text_pos, "inline")
-      H.eq(chunk[2], (not row.old) and "DiffNvimFillerChar" or nil)
+      -- Inline virtual text is not reached by the row's range highlight, so
+      -- the pad names the band it continues itself.
+      local want = (not row.old) and "DiffNvimFillerChar"
+        or row.change and "DiffNvimRemoved"
+        or nil
+      H.eq(chunk[2], want)
     end
   end },
 
