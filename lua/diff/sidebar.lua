@@ -497,9 +497,19 @@ local function clear_panel_state()
 end
 
 --- Return the tabpage of the interface, if it is open.
+--- Found by listing the tabs' windows rather than asking a window for its tab:
+--- while its tab is being closed (TabClosed), a window can still report
+--- itself valid, and nvim_win_get_tabpage() on it crashes Neovim.
 function get_diff_tab()
+  local ours = {}
   for _, win in ipairs({ M._file_win or false, M._commit_win or false, M._bar_win or false, M._main_win or false }) do
-    if win and is_valid_win(win) then return vim.api.nvim_win_get_tabpage(win) end
+    if win then ours[win] = true end
+  end
+  if next(ours) == nil then return nil end
+  for _, tab in ipairs(vim.api.nvim_list_tabpages()) do
+    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tab)) do
+      if ours[win] then return tab end
+    end
   end
   return nil
 end
