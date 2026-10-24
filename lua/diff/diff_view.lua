@@ -212,6 +212,8 @@ local function pane_opts(win, bound)
     signcolumn     = "yes:1",
     cursorline     = true,
     list           = false,
+    breakindentopt = "", -- the defaults wrap_indent() follows
+    conceallevel   = 0, -- a diff shows every character it compares
     winbar         = "",
     scrollbind     = false, -- the scroll sync below keeps split panes together
     cursorbind     = bound,
@@ -569,10 +571,27 @@ function M.pane_wins()
   return out
 end
 
+-- Text left to 'breakindent' when it would indent further ('breakindentopt' min).
+local BREAKINDENT_MIN = 20
+
+--- Cells that 'breakindent' and 'showbreak' put before each wrapped screen
+--- line of item row `r`.
+local function wrap_indent(win, r, width)
+  local indent = 0
+  if vim.wo[win].breakindent then
+    indent = vim.api.nvim_win_call(win, function() return vim.fn.indent(r + 1) end)
+    indent = math.min(indent, math.max(width - BREAKINDENT_MIN, 0))
+  end
+  local sbr = vim.wo[win].showbreak
+  return indent + (sbr == "NONE" and 0 or vim.fn.strdisplaywidth(sbr))
+end
+
 --- Pad item row `r` of `side` with inline virtual text so it wraps onto
---- exactly `target` screen lines. Measuring rather than computing the length
---- keeps 'linebreak', 'breakindent' and 'showbreak' exact; the largest pad
---- that still fits is used so the band fills the row's last screen line.
+--- exactly `target` screen lines, filling the last one so the band reaches
+--- the edge. Neovim draws every wrapped line of the padding indented but
+--- measures it as if none were, so only the room left on the row's own last
+--- line is measured (keeping 'linebreak' exact); each further line holds the
+--- text width less the indent.
 --- @param pads table  cache: "side:line:width:target" -> padding found before
 local function pad_to_height(side, r, row, target, width, pads)
   local win, buf = S.panes[side], S.bufs[side]
@@ -601,14 +620,20 @@ local function pad_to_height(side, r, row, target, width, pads)
     place(pads[key])
     return
   end
+  local own = height_with(0)
   -- A screen line holds at most `width` cells, so `hi` always overflows.
-  local lo, hi = 0, width * (target + 1)
+  local lo, hi = 0, width + 1
   while hi - lo > 1 do
     local mid = math.floor((lo + hi) / 2)
-    if height_with(mid) <= target then lo = mid else hi = mid end
+    if height_with(mid) <= own then lo = mid else hi = mid end
   end
-  place(lo)
-  pads[key] = lo
+  local n = lo + (target - own) * math.max(width - wrap_indent(win, r, width), 1)
+  local measured = height_with(n)
+  if measured ~= target then
+    -- Drawn right, but Neovim's own scrolling will count this row short.
+    log.debug("%s row %d: a pad drawn on %d lines measures %d", side, r, target, measured)
+  end
+  pads[key] = n
 end
 
 --- Keep wrapped split panes row-aligned. The scroll sync pairs buffer lines,

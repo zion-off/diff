@@ -7,10 +7,17 @@ vim.o.columns, vim.o.lines = 160, 50
 -- old side shows a filler that must grow with it).
 local LONG = "local s = '" .. string.rep("lorem ipsum dolor ", 20) .. "'"
 local base = H.lines(60)
-local repo = H.repo({ ["big.lua"] = H.text(base) })
+-- indent.lua: an indented line grows to wrap onto several screen lines, so
+-- the old side's padding wraps under 'breakindent' too.
+local INDENTED = "    local s = '" .. string.rep("lorem ipsum dolor ", 14) .. "'"
+local repo = H.repo({
+  ["big.lua"] = H.text(base),
+  ["indent.lua"] = H.text(H.lines(9, { [5] = "    local s = 1" })),
+})
 local edited = H.lines(60, { [10] = LONG })
 table.insert(edited, 21, LONG)
 H.write(repo, "big.lua", H.text(edited))
+H.write(repo, "indent.lua", H.text(H.lines(9, { [5] = INDENTED })))
 
 vim.cmd("cd " .. repo)
 require("diff").setup({ log_level = os.getenv("DIFF_LOG") or "warn" })
@@ -66,16 +73,31 @@ local function pads(side)
   return vim.api.nvim_buf_get_extmarks(S().bufs[side], NS_WRAP, 0, -1, { details = true })
 end
 
+local function open_file(name)
+  H.wait(function()
+    for i, l in ipairs(vim.api.nvim_buf_get_lines(sidebar._file_buf, 0, -1, false)) do
+      if l:find(name, 1, true) then fp.activate_line(i) return true end
+    end
+  end, name .. " in panel")
+  H.wait(function() return S().layout and S().source.path == name end, "diff of " .. name)
+end
+
+--- Screen row where `win`'s gutter is drawn showing line number `n`.
+local function drawn_row(win, n)
+  vim.cmd("redraw")
+  local info = vim.fn.getwininfo(win)[1]
+  for row = info.winrow, info.winrow + info.height - 1 do
+    local gutter = ""
+    for col = info.wincol, info.wincol + info.textoff - 1 do gutter = gutter .. vim.fn.screenstring(row, col) end
+    if vim.trim(gutter) == tostring(n) then return row end
+  end
+end
+
 return {
   { "split panes wrap and every row starts on the same screen line", function()
     require("diff").open()
     H.wait(function() return sidebar.is_open() and pcall(vim.api.nvim_buf_get_lines, sidebar._file_buf, 0, -1, false) end)
-    H.wait(function()
-      for i, l in ipairs(vim.api.nvim_buf_get_lines(sidebar._file_buf, 0, -1, false)) do
-        if l:match("big%.lua") then fp.activate_line(i) return true end
-      end
-    end, "big.lua in panel")
-    H.wait(function() return S().layout and S().source.path == "big.lua" end, "diff")
+    open_file("big.lua")
     H.ok(vim.wo[pane("old")].wrap and vim.wo[pane("new")].wrap, "both panes should wrap")
     H.ok(#pads("old") == 2 and #pads("new") == 0, "old side pads both long rows: " .. vim.inspect(pads("old")))
     assert_aligned()
@@ -203,6 +225,19 @@ return {
     dv.balance_panes()
     vim.cmd("doautocmd WinResized")
     scroll("gg")
+  end },
+
+  { "padding that wraps under 'breakindent' is drawn as tall as the row beside it", function()
+    open_file("indent.lua")
+    local old, new = pane("old"), pane("new")
+    H.ok(vim.wo[old].breakindent, "wrapped lines keep their indent")
+    local r = S().layout.index_of[5]
+    H.ok(vim.api.nvim_win_text_height(new, { start_row = r - 1, end_row = r - 1 }).all >= 3,
+      "the old side's pad should wrap onto several indented lines")
+    local row = drawn_row(new, 6)
+    H.ok(row, "line 6 on screen")
+    H.eq(drawn_row(old, 6), row, "line 6 drawn on the same screen row in both panes")
+    H.eq(vim.fn.screenpos(old, r + 1, 1).row, row, "Neovim measures the padded row as tall as it is drawn")
   end },
 
   { "wrap = false leaves lines unwrapped and unpadded", function()
