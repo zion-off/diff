@@ -527,6 +527,14 @@ return {
     press("<leader>gB")
     H.wait(function() return pcall(panel_row, "topic%.lua") end, "branch changes listed")
     H.ok(panel_row("Branch Changes vs " .. base .. " %(1%)"))
+    -- A heading too long for the panel is cut, not wrapped onto a second row.
+    local width = vim.api.nvim_win_get_width(sidebar._file_win)
+    vim.api.nvim_win_set_width(sidebar._file_win, 22)
+    fp.render()
+    local heading = vim.api.nvim_buf_get_lines(sidebar._file_buf, 0, 1, false)[1]
+    H.ok(vim.api.nvim_strwidth(heading) < 22 and heading:match("…%s%(1%)$"), heading)
+    vim.api.nvim_win_set_width(sidebar._file_win, width)
+    fp.render()
     H.ok(not pcall(panel_row, "Staged"), "status sections should be gone")
     H.eq(sidebar._commit_win, nil)
     H.eq(vim.api.nvim_win_get_height(sidebar._file_win), sidebar_h)

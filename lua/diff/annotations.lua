@@ -233,10 +233,11 @@ local function load_notes_lines()
   end
 
   if #lines == 0 then
-    -- The window's status line already says "Notes", so a markdown heading
+    -- The panel's heading already says "Notes", so a markdown heading
     -- repeating it is just syntax on screen. An empty panel says it is empty
-    -- and how to fill it.
-    lines = { "", "  No notes yet.", "", "  Leave one on a diff line and it", "  appears here." }
+    -- and how to fill it, one line per sentence for the window to wrap, so
+    -- each sentence is one hint at any width.
+    lines = { "", "  No notes yet.", "", "  Leave one on a diff line and it appears here." }
   end
   return lines
 end
@@ -325,6 +326,7 @@ function M.toggle_notes(repo_root)
     winfixwidth = true,
     wrap        = true,
     linebreak   = true,
+    breakindent = true,
     number      = false,
     signcolumn  = "no",
     foldcolumn  = "0",

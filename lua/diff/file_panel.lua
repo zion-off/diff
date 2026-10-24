@@ -121,8 +121,11 @@ local function build(width)
   local function render_section(section, label)
     local files = section_files(section)
     local chevron = S.collapsed[section] and "▸ " or "▾ "
-    local title = label .. " "
-    local r = push(chevron .. title .. "(" .. #files .. ")",
+    local count = "(" .. #files .. ")"
+    -- Fitted to the panel: a long base branch name would otherwise wrap the
+    -- heading onto a second row.
+    local title = util.trunc(label, math.max(4, width - vim.api.nvim_strwidth(chevron) - #count - 2)) .. " "
+    local r = push(chevron .. title .. count,
       { type = "header", key = "header:" .. section, section = section })
     table.insert(hl, { r, "DiffNvimChevron", 0, #chevron })
     table.insert(hl, { r, "DiffNvimSectionHeader", #chevron, #chevron + #title })
