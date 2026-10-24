@@ -170,6 +170,19 @@ local STATUSCOL = "%{%v:lua.require'diff.diff_view'.statuscol()%}"
 -- Cells of the sign column ('signcolumn' "yes:1").
 local SIGN_WIDTH = 2
 
+--- Columns the gutter takes: signs, the line number and a space.
+local function gutter_width()
+  return SIGN_WIDTH + S.lnum_width + 1
+end
+
+--- Neovim learns a 'statuscolumn' width only by drawing it, and forgets it
+--- whenever the line count changes, measuring text as if the gutter were
+--- 'numberwidth' wide until the next redraw. Matching 'numberwidth' to the
+--- gutter keeps every measurement right in between.
+local function pin_gutter(win)
+  set_opts(win, { numberwidth = gutter_width() - SIGN_WIDTH })
+end
+
 --- Whether panes soft-wrap. Split panes wrap only when their rows can be
 --- kept aligned; otherwise the scroll sync would drift apart.
 local warned_no_align = false
@@ -612,8 +625,18 @@ local function align_wrapped()
   if not (S.layout and valid_win(wins.old) and valid_win(wins.new) and wraps(true)) then return end
 
   local elapsed = require("diff.log").timer()
-  -- 'statuscolumn' width (and so the text width) is only settled by a redraw.
-  vim.cmd("redraw")
+  -- The gutter width is pinned through 'numberwidth' (see gutter_width), so
+  -- the text width is known without a redraw; one drawn here would put the
+  -- new lines on screen before the padding and the scroll position, which
+  -- reads as a flash. Something else widening the gutter falls back to it.
+  for _, side in ipairs(SIDES) do
+    local textoff = vim.fn.getwininfo(wins[side])[1].textoff
+    if textoff ~= gutter_width() then
+      log.debug("%s pane gutter is %d columns, not %d; redrawing to settle it", side, textoff, gutter_width())
+      vim.cmd("redraw")
+      break
+    end
+  end
   local text_width = {}
   for _, side in ipairs(SIDES) do
     local info = vim.fn.getwininfo(wins[side])[1]
@@ -764,13 +787,15 @@ local function line_start_vcol(win, r, n)
 end
 
 --- What `win` shows: its top line, how many screen lines of that line are
---- scrolled past, and its horizontal scroll.
+--- scrolled past, and its horizontal scroll. A width change can leave
+--- 'skipcol' inside a screen line, which the next redraw moves back to that
+--- line's start, so the line holding it is the one shown first.
 local function pane_view(win)
   local view = vim.api.nvim_win_call(win, vim.fn.winsaveview)
   local skipcol = view.skipcol or 0
   return {
     topline = view.topline,
-    skipped = skipcol > 0 and lines_before(win, view.topline - 1, skipcol) or 0,
+    skipped = skipcol > 0 and math.max(lines_before(win, view.topline - 1, skipcol + 1) - 1, 0) or 0,
     leftcol = view.leftcol,
   }
 end
@@ -867,6 +892,7 @@ local function render(anchor, offset)
 
   for _, side in ipairs(SIDES) do
     if S.panes[side] then
+      pin_gutter(S.panes[side])
       set_lines(S.bufs[side], text[side])
       decorate(side)
       decorate_notes(side)
@@ -1026,6 +1052,9 @@ local function show(root, source, navigator, old, new)
   name_buffers()
   make_sources(old, new)
   render({ block = 1 })
+  -- The parse runs in slices queued back to back, and nothing is drawn until
+  -- the queue is empty: paint the finished view first, highlighted after.
+  vim.cmd("redraw")
   for _, side in ipairs(SIDES) do
     if S.sources[side] then S.sources[side]:parse() end
   end

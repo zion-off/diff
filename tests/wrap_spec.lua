@@ -165,6 +165,46 @@ return {
     assert_aligned()
   end },
 
+  { "expanding context draws nothing until the rows are padded and in place", function()
+    local redraws = 0
+    local probe = vim.api.nvim_create_namespace("test_redraw_probe")
+    vim.api.nvim_set_decoration_provider(probe, { on_start = function() redraws = redraws + 1 end })
+    vim.api.nvim_set_current_win(pane("new"))
+    local sep
+    for i, item in ipairs(S().layout.items) do
+      if item.sep and i > 1 then sep = i break end
+    end
+    vim.api.nvim_win_set_cursor(pane("new"), { sep, 0 })
+    dv.expand("cursor")
+    vim.api.nvim_set_decoration_provider(probe, {})
+    H.eq(redraws, 0, "a redraw inside the expand puts a half-made frame on screen")
+    H.eq(vim.fn.getwininfo(pane("new"))[1].textoff, 2 + S().lnum_width + 1, "gutter known without a redraw")
+    assert_aligned()
+    assert_same_screen()
+    dv.expand("reset")
+  end },
+
+  { "a width change part-way through a wrapped top line leaves the panes on the same screen lines", function()
+    local old, new = pane("old"), pane("new")
+    vim.wo[old].smoothscroll, vim.wo[new].smoothscroll = true, true
+    vim.api.nvim_set_current_win(new)
+    for _ = 1, 40 do
+      scroll("<C-e>")
+      if vim.fn.winsaveview().skipcol > 0 then break end
+    end
+    H.ok(vim.fn.winsaveview().skipcol > 0, "should be part-way through a wrapped row")
+    S().align_ms = 1000 -- as slow as a large file, so the re-align is debounced
+    vim.api.nvim_win_set_width(old, vim.api.nvim_win_get_width(old) - 9)
+    vim.cmd("doautocmd WinResized")
+    scroll(function() end)
+    H.wait(function() return S().wrap_widths.old == vim.api.nvim_win_get_width(old) end, "debounced re-align")
+    assert_same_screen()
+    vim.wo[old].smoothscroll, vim.wo[new].smoothscroll = false, false
+    dv.balance_panes()
+    vim.cmd("doautocmd WinResized")
+    scroll("gg")
+  end },
+
   { "wrap = false leaves lines unwrapped and unpadded", function()
     require("diff.config").setup({ wrap = false })
     dv.open(S().root, S().source, S().navigator)
