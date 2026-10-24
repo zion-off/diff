@@ -2,6 +2,7 @@ local M = {}
 
 local config = require("diff.config")
 local log    = require("diff.log").scope("notes")
+local chrome = require("diff.chrome")
 
 -- Namespace for highlights in the notes panel
 local NS = vim.api.nvim_create_namespace("diff_nvim_notes")
@@ -232,7 +233,10 @@ local function load_notes_lines()
   end
 
   if #lines == 0 then
-    lines = { "# diff.nvim Notes", "", "No notes yet." }
+    -- The window's status line already says "Notes", so a markdown heading
+    -- repeating it is just syntax on screen. An empty panel says it is empty
+    -- and how to fill it.
+    lines = { "", "  No notes yet.", "", "  Leave one on a diff line and it", "  appears here." }
   end
   return lines
 end
@@ -277,10 +281,13 @@ function M.toggle_notes(repo_root)
   M.get_notes_path(repo_root)
 
   local cfg   = config.get()
-  local width = cfg.notes_width or 40
+  -- A fixed width configured for a wide terminal would swallow a narrow one.
+  local width = math.max(24, math.min(cfg.notes_width or 40, math.floor(vim.o.columns * 0.33)))
 
   -- Create a scratch buffer
   local buf = vim.api.nvim_create_buf(false, true)
+  chrome.tag(buf, "notes")
+  chrome.name(buf, "diff.nvim Notes")
   vim.api.nvim_set_option_value("buftype",    "nofile",   { buf = buf })
   vim.api.nvim_set_option_value("bufhidden",  "wipe",     { buf = buf })
   vim.api.nvim_set_option_value("filetype",   "markdown", { buf = buf })
@@ -317,11 +324,13 @@ function M.toggle_notes(repo_root)
     linebreak   = true,
     number      = false,
     signcolumn  = "no",
+    foldcolumn  = "0",
     cursorline  = true,
   }
   for k, v in pairs(wopts) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
+  chrome.dress(win, { label = "Notes", right = "q close · dd delete" })
 
   M._panel = { win = win, buf = buf }
 
@@ -360,6 +369,9 @@ function M._apply_notes_highlights(buf, lines)
     elseif line:match("^> ") then
       vim.api.nvim_buf_add_highlight(buf, NS, "DiffNvimNoteText", lnr, 0, -1)
     elseif line:match("^%*") then
+      vim.api.nvim_buf_add_highlight(buf, NS, "Comment", lnr, 0, -1)
+    elseif line:match("^  %u") then
+      -- The empty-state hint: a note about the panel, not a note in it.
       vim.api.nvim_buf_add_highlight(buf, NS, "Comment", lnr, 0, -1)
     end
   end
