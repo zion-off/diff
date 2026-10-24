@@ -626,7 +626,8 @@ return {
     local m = vim.fn.maparg("<leader>gb", "n", false, true)
     H.eq(m.desc, "user mapping")
     for _, b in ipairs(vim.api.nvim_list_bufs()) do
-      H.ok(not vim.api.nvim_buf_get_name(b):match("^diff://"), "leaked buffer " .. vim.api.nvim_buf_get_name(b))
+      local kind = require("diff.chrome").kind(b)
+      H.ok(not kind, "leaked buffer " .. (kind or "") .. " " .. vim.api.nvim_buf_get_name(b))
     end
   end },
 

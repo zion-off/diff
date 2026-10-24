@@ -18,6 +18,7 @@ local content = require("diff.content")
 local engine  = require("diff.diff_engine")
 local syntax  = require("diff.syntax")
 local word_diff = require("diff.word_diff")
+local chrome  = require("diff.chrome")
 
 local NS       = vim.api.nvim_create_namespace("diff_nvim_diff")
 local NS_WORDS = vim.api.nvim_create_namespace("diff_nvim_words")
@@ -197,6 +198,7 @@ local function pane_opts(win, bound)
     cursorbind     = bound,
     diff           = false,
   })
+  chrome.dress(win, { fillchars = { eob = " " } })
 end
 
 local function header_opts(win)
@@ -208,12 +210,13 @@ local function header_opts(win)
     -- With 'laststatus' 1/2 the header gets its own status line; draw it as a
     -- thin rule under the filename instead of a "[Scratch]" bar.
     statusline = "%#DiffNvimHeaderRule#%=",
-    fillchars = "stl:─,stlnc:─",
+    fillchars = chrome.fillchars(win, { stl = "─", stlnc = "─", eob = " " }),
   })
 end
 
-local function scratch_buf(bufhidden)
+local function scratch_buf(bufhidden, kind)
   local buf = vim.api.nvim_create_buf(false, true)
+  chrome.tag(buf, kind or "diff-scratch")
   vim.bo[buf].buftype    = "nofile"
   vim.bo[buf].bufhidden  = bufhidden
   vim.bo[buf].swapfile   = false
@@ -232,7 +235,7 @@ local setup_keymaps -- defined below; installed once per pane buffer
 
 local function pane_buf(side)
   if not valid_buf(S.bufs[side]) then
-    S.bufs[side] = scratch_buf("hide")
+    S.bufs[side] = scratch_buf("hide", "diff-pane")
     setup_keymaps(S.bufs[side], side)
   end
   return S.bufs[side]
@@ -245,10 +248,10 @@ local function host_window()
   if valid_win(main) then return main end
   local best, best_w
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))
+    local kind = chrome.kind(vim.api.nvim_win_get_buf(win))
     local w = vim.api.nvim_win_get_width(win)
-    if win ~= S.header_win and not name:match("^diff://file") and not name:match("^diff://commit")
-      and not name:match("^diff://mode%-bar") and (not best_w or w > best_w) then
+    local is_panel = kind == "file-panel" or kind == "commit-panel" or kind == "mode-bar"
+    if win ~= S.header_win and not is_panel and (not best_w or w > best_w) then
       best, best_w = win, w
     end
   end
@@ -429,6 +432,20 @@ local function decorate_notes(side)
   end
 end
 
+--- Name each pane's status line. Side by side, the only thing distinguishing
+--- the two panes is colour; saying which is which costs a line that is
+--- otherwise blank. A lone pane needs no label — the header names the file.
+local function dress_panes()
+  local split = S.panes.old and S.panes.new
+  for _, side in ipairs(SIDES) do
+    local win = S.panes[side]
+    if valid_win(win) then
+      local label = split and (side == "old" and "Before" or "After") or ""
+      chrome.dress(win, { label = label, fillchars = { eob = " " } })
+    end
+  end
+end
+
 local function render_header()
   if not (valid_buf(S.header_buf) and S.source) then return end
   local src, m = S.source, S.model
@@ -453,6 +470,17 @@ local function render_header()
   for _, s in ipairs(spans) do
     pcall(vim.api.nvim_buf_set_extmark, S.header_buf, NS_HEAD, 0, s[1], { end_col = s[2], hl_group = s[3] })
   end
+  dress_panes()
+end
+
+--- The windows currently showing diff panes, for callers that treat the two
+--- of them as one surface (they share a cursor).
+function M.pane_wins()
+  local out = {}
+  for _, side in ipairs(SIDES) do
+    if valid_win(S.panes[side]) then table.insert(out, S.panes[side]) end
+  end
+  return out
 end
 
 --- Pad item row `r` of `side` with inline virtual text so it wraps onto
@@ -842,29 +870,31 @@ local function mode_for(source)
   return "split"
 end
 
---- Renaming a buffer makes Neovim keep an unlisted buffer under the old name
---- (as `:file` does, even with :keepalt); wipe it so renames cannot leak.
-local function rename_buf(buf, name)
-  local old = vim.api.nvim_buf_get_name(buf)
-  if old == name then return end
-  pcall(vim.api.nvim_buf_set_name, buf, name)
-  if old == "" then return end
-  for _, b in ipairs(vim.api.nvim_list_bufs()) do
-    if b ~= buf and vim.api.nvim_buf_get_name(b) == old and #vim.fn.win_findbuf(b) == 0 then
-      pcall(vim.api.nvim_buf_delete, b, { force = true })
-    end
-  end
-end
-
+--- Name the pane buffers for the tab line. The reader sees a file, not a
+--- plugin URL, so the name is the file's own — but always qualified by which
+--- side of the comparison it is, so the name can never come out equal to the
+--- real file's and steal `:e`, `gf` or a jump to it.
 local function name_buffers()
   local src = S.source
-  local tag = src.kind == "commit" and src.hash:sub(1, 7)
-    or src.kind == "range" and src.base .. "..."
-    or (src.staged and "index" or "worktree")
+  local qualifier = src.kind == "commit" and src.hash:sub(1, 7)
+    or src.kind == "range" and src.base
+    or (src.staged and "staged" or nil)
   for _, side in ipairs(SIDES) do
-    if valid_buf(S.bufs[side]) then
-      rename_buf(S.bufs[side],
-        string.format("diff://%s/%s/%s", tag, side, side == "old" and (src.old_path or src.path) or src.path))
+    local buf = S.bufs[side]
+    if valid_buf(buf) then
+      if not S.panes[side] then
+        -- Not on screen: park it under a name that cannot collide with the
+        -- visible pane's, which would be rejected as a duplicate.
+        chrome.name(buf, "diff.nvim pane " .. side)
+      else
+        local path = side == "old" and (src.old_path or src.path) or src.path
+        local parts = {
+          vim.fn.fnamemodify(path, ":t"),
+          side == "old" and "(before)" or "(after)",
+        }
+        if qualifier then table.insert(parts, "@ " .. qualifier) end
+        chrome.name(buf, table.concat(parts, " "))
+      end
     end
   end
 end
