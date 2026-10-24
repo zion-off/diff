@@ -321,6 +321,40 @@ return {
     H.wait(function() return S().model.added == added end, "live refresh back")
   end },
 
+  { "a run of changed rows takes one tint and one sign, shown on each of its rows", function()
+    open_file("a%.lua", "src/a.lua")
+    local added = S().model.added
+    local edited = vim.deepcopy(a_new)
+    edited[81], edited[82] = "local v81 = 810", "local v82 = 820"
+    H.write(repo, "src/a.lua", H.text(edited))
+    H.wait(function() return S().model.added == added + 2 end, "live refresh")
+
+    local win, buf = pane("new"), S().bufs.new
+    local first = find_item(function(it) return it.row and S().model.rows[it.row].new == 80 end) - 1
+    local ns = vim.api.nvim_get_namespaces().diff_nvim_diff
+    local tints, signs = {}, {}
+    for _, m in ipairs(vim.api.nvim_buf_get_extmarks(buf, ns, { first, 0 }, { first + 3, 0 }, { details = true, overlap = true })) do
+      if m[4].hl_group == "DiffNvimAdded" then table.insert(tints, m) end
+      if m[4].sign_text then table.insert(signs, m) end
+    end
+    H.eq(#tints, 1, "one tint for the run")
+    H.eq({ tints[1][2], tints[1][4].end_row }, { first, first + 3 }, "tint reaches into the row after the run")
+    H.eq(#signs, 1, "one sign mark for the run")
+
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { first + 1, 0 })
+    vim.cmd("redraw")
+    local function sign_at(r)
+      local pos = vim.fn.screenpos(win, r + 1, 1)
+      return vim.fn.screenstring(pos.row, vim.fn.win_screenpos(win)[2])
+    end
+    H.eq({ sign_at(first), sign_at(first + 1), sign_at(first + 2) }, { "▍", "▍", "▍" })
+    H.ok(sign_at(first + 3) ~= "▍", "no sign on the row after the run")
+
+    H.write(repo, "src/a.lua", H.text(a_new))
+    H.wait(function() return S().model.added == added end, "live refresh back")
+  end },
+
   { "a background refresh never cancels an open in flight", function()
     open_file("b%.lua", "src/b.lua")
     local seen = view_events

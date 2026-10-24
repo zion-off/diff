@@ -366,38 +366,47 @@ local function decorate(side)
   local change_hl = side == "old" and "DiffNvimRemoved" or "DiffNvimAdded"
   local sign_hl   = side == "old" and "DiffNvimGutterRemoved" or "DiffNvimGutterAdded"
 
+  -- A run of changed rows takes two marks, whatever its length: the tint as
+  -- a range rather than 'line_hl_group' (a line highlight is painted at a
+  -- layer the word-level marks cannot reach, so it swallows them whatever
+  -- their priority), reaching into the row after the run so 'hl_eol' carries
+  -- it to the edge of the pane; and the sign, which a mark shows on every row
+  -- it spans, so it ends on the run's last row.
+  local run_start
+  local function close_run(last)
+    if not run_start then return end
+    vim.api.nvim_buf_set_extmark(buf, NS, run_start, 0, {
+      end_row = last + 1, end_col = 0, hl_group = change_hl, hl_eol = true,
+      priority = PRIORITY_LINE_BG,
+    })
+    vim.api.nvim_buf_set_extmark(buf, NS, run_start, 0, {
+      end_row = last, end_col = 0, sign_text = "▍", sign_hl_group = sign_hl,
+      priority = PRIORITY_LINE_BG,
+    })
+    run_start = nil
+  end
+
   for i, item in ipairs(S.layout.items) do
     local r = i - 1
+    local row = not item.sep and S.model.rows[item.row]
+    if row and row.change and row[side] then
+      run_start = run_start or r
+    else
+      close_run(r - 1)
+    end
     if item.sep then
       sep_marks[r] = vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
         line_hl_group = "DiffNvimSeparator",
         virt_text = separator_virt(side, item.sep), virt_text_pos = "overlay",
         priority = PRIORITY_LINE_BG,
       })
-    else
-      local row = S.model.rows[item.row]
-      if not row[side] then
-        vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
-          line_hl_group = "DiffNvimFiller", priority = PRIORITY_LINE_BG,
-        })
-      elseif row.change then
-        -- A range reaching into the next row with 'hl_eol', not
-        -- 'line_hl_group': a line highlight is painted at a layer the
-        -- word-level marks cannot reach, so it swallows them whatever their
-        -- priority. Ranged, they layer normally — and spanning the line break
-        -- is what carries the tint past the text to the edge of the pane.
-        vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
-          end_row = r + 1, end_col = 0, hl_group = change_hl, hl_eol = true,
-          priority = PRIORITY_LINE_BG,
-        })
-        -- The sign goes on its own single-row mark: carried on the range
-        -- above it would be placed on both of the rows that range spans.
-        vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
-          sign_text = "▍", sign_hl_group = sign_hl, priority = PRIORITY_LINE_BG,
-        })
-      end
+    elseif not row[side] then
+      vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
+        line_hl_group = "DiffNvimFiller", priority = PRIORITY_LINE_BG,
+      })
     end
   end
+  close_run(#S.layout.items - 1)
 end
 
 --- Redraw only the separators (their headings need the syntax parse).
