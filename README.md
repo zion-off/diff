@@ -348,22 +348,24 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimGutterRemoved` | Gutter `▍` for removed |
 | `DiffNvimGutterChanged` | Gutter `▍` for changed |
 | `DiffNvimSectionHeader` | "Staged Changes" / "Changes" headers |
-| `DiffNvimStagedFile` | Staged file name |
-| `DiffNvimUnstagedFile` | Unstaged file name |
+| `DiffNvimChevron` | `▾` / `▸` before a section or a commit |
+| `DiffNvimFileName` | File name in a panel |
+| `DiffNvimAddedFile` | Added or untracked file name |
 | `DiffNvimDeletedFile` | Deleted file name |
-| `DiffNvimStatusModified` | `[M]` badge |
-| `DiffNvimStatusAdded` | `[A]` badge |
-| `DiffNvimStatusDeleted` | `[D]` badge |
-| `DiffNvimStatusRenamed` | `[R]` badge |
-| `DiffNvimStatusUntracked` | `[?]` badge |
+| `DiffNvimDirName` | Directory row of a file tree |
+| `DiffNvimHint` | Explanatory text (empty states, counts) |
+| `DiffNvimStatusModified` | `M` badge |
+| `DiffNvimStatusAdded` | `A` badge |
+| `DiffNvimStatusDeleted` | `D` badge |
+| `DiffNvimStatusRenamed` | `R` badge |
+| `DiffNvimStatusUntracked` | `?` badge |
 | `DiffNvimCommitHash` | Commit short hash |
-| `DiffNvimCommitAuthor` | Commit author |
-| `DiffNvimCommitTime` | Relative timestamp |
+| `DiffNvimCommitMeta` | Author and age under a commit subject |
 | `DiffNvimCommitSubject` | Commit subject |
-| `DiffNvimRefHead` | `HEAD` ref badge |
-| `DiffNvimRefBranch` | Local branch badge |
-| `DiffNvimRefRemote` | Remote tracking badge |
-| `DiffNvimRefTag` | Tag badge |
+| `DiffNvimRefHead` | `HEAD` ref pill |
+| `DiffNvimRefBranch` | Local branch pill |
+| `DiffNvimRefRemote` | Remote tracking pill |
+| `DiffNvimRefTag` | Tag pill |
 | `DiffNvimNoteHeader` | `## Note` heading in notes panel |
 | `DiffNvimNoteText` | Note body text |
 | `DiffNvimActiveFile` | Panel row of the file shown in the diff view |

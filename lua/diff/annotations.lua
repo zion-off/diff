@@ -376,10 +376,10 @@ function M._apply_notes_highlights(buf, lines)
     elseif line:match("^> ") then
       vim.api.nvim_buf_add_highlight(buf, NS, "DiffNvimNoteText", lnr, 0, -1)
     elseif line:match("^%*") then
-      vim.api.nvim_buf_add_highlight(buf, NS, "Comment", lnr, 0, -1)
+      vim.api.nvim_buf_add_highlight(buf, NS, "DiffNvimHint", lnr, 0, -1)
     elseif line:match("^  %u") then
       -- The empty-state hint: a note about the panel, not a note in it.
-      vim.api.nvim_buf_add_highlight(buf, NS, "Comment", lnr, 0, -1)
+      vim.api.nvim_buf_add_highlight(buf, NS, "DiffNvimHint", lnr, 0, -1)
     end
   end
 end

@@ -90,23 +90,48 @@ local function surfaces(p)
       separator_bg = p.separator_bg, hover_bg = p.hover_bg,
       active_bg = p.hover_bg, tab_active_bg = p.tab_active_bg,
       accent = p.ref_head, title_fg = p.title_fg, dim_fg = p.separator_fg,
-    }
+    }, nil
   end
-  -- An accent to tint hover and the active file towards, so they read as
-  -- "selected" rather than merely "a different grey".
-  local accent = hl_attr("Function", "fg") or hl_attr("Identifier", "fg") or fg
+  -- The colour picked-out text is drawn in: the prompt glyph and the matched
+  -- letters of the branch picker.
+  local accent = hl_attr("Directory", "fg") or hl_attr("Function", "fg") or fg
+  -- Hover, the active file and the active mode are selections in a list, so
+  -- they are tints of the theme's own list selection (the completion menu's
+  -- selected item), else of its visual selection. Tinting towards a syntax
+  -- colour instead turned them olive wherever that colour was yellow.
+  local sel = hl_attr("PmenuSel", "bg") or hl_attr("Visual", "bg")
+  local function select_tint(alpha, accent_alpha)
+    return sel and blend(bg, sel, alpha) or blend(bg, accent, accent_alpha)
+  end
   return {
     header_bg    = blend(bg, fg, 0.10),
     filler_bg    = blend(bg, fg, 0.04),
     separator_bg = blend(bg, fg, 0.05),
-    hover_bg     = blend(bg, accent, 0.14),
-    active_bg    = blend(bg, accent, 0.20),
-    tab_active_bg = blend(bg, accent, 0.22),
+    hover_bg     = select_tint(0.35, 0.14),
+    active_bg    = select_tint(0.55, 0.20),
+    tab_active_bg = select_tint(0.65, 0.22),
     accent       = string.format("#%06x", accent),
     -- Text tiers: secondary chrome text, and dim text that recedes further.
     title_fg     = blend(fg, bg, 0.25),
     dim_fg       = blend(fg, bg, 0.55),
-  }
+  }, bg
+end
+
+--- The first foreground colour defined among `groups`.
+local function first_fg(...)
+  for _, group in ipairs({ ... }) do
+    local fg = hl_attr(group, "fg")
+    if fg then return fg end
+  end
+  return nil
+end
+
+--- A ref pill: the ref's colour on a tint of it, so it reads as a label
+--- attached to the commit rather than more metadata.
+local function pill(color, bg, extra)
+  local spec = vim.tbl_extend("force", { fg = color }, extra or {})
+  if bg and type(color) == "number" then spec.bg = blend(bg, color, 0.16) end
+  return spec
 end
 
 -- Default highlight definitions: group name -> nvim_set_hl opts.
@@ -114,11 +139,17 @@ end
 -- so they remain muted regardless of colorscheme. Re-built on ColorScheme autocmd.
 local function build_defaults()
   local p = vim.o.background == "light" and LIGHT or DARK
-  local s = surfaces(p)
-  -- Status colours are foreground-only: a file name in a list must never gain
-  -- a block of background (linking to Error drags one in, and a deleted file
-  -- then reads as an alert rather than an entry).
-  local error_fg = hl_attr("DiagnosticError", "fg") or hl_attr("ErrorMsg", "fg") or p.gutter_removed
+  local s, bg = surfaces(p)
+  -- Interface colours come from the theme's git colours, never from its
+  -- syntax groups: linking a badge to Type or a file name to String brought
+  -- the code's styling along — italics on every badge, staged files green
+  -- as strings. They are foreground-only: a file name in a list must never
+  -- gain a block of background, and a deleted file must not read as an alert.
+  local added   = first_fg("GitSignsAdd", "diffAdded", "Added", "String") or p.gutter_added
+  local changed = first_fg("GitSignsChange", "diffChanged", "Changed", "DiagnosticWarn") or p.gutter_changed
+  local removed = first_fg("GitSignsDelete", "diffRemoved", "Removed", "DiagnosticError") or p.gutter_removed
+  local renamed = first_fg("Special", "Identifier") or changed
+  local text_fg = hl_attr("Normal", "fg")
   return {
     -- Diff line backgrounds (PRIORITY_LINE_BG=50: below tree-sitter ~100)
     -- Explicit bg; fg=NONE so tree-sitter foreground colours show through.
@@ -141,47 +172,51 @@ local function build_defaults()
     DiffNvimGutterRemoved   = { fg = p.gutter_removed, bold = true },
     DiffNvimGutterChanged   = { fg = p.gutter_changed, bold = true },
 
-    -- File panel status badges
-    DiffNvimStatusModified  = { link = "Type" },
-    DiffNvimStatusAdded     = { link = "String" },
-    DiffNvimStatusDeleted   = { fg = error_fg },
-    DiffNvimStatusRenamed   = { link = "Special" },
-    DiffNvimStatusUntracked = { link = "Comment" },
+    -- Status badges
+    DiffNvimStatusModified  = { fg = changed },
+    DiffNvimStatusAdded     = { fg = added },
+    DiffNvimStatusDeleted   = { fg = removed },
+    DiffNvimStatusRenamed   = { fg = renamed },
+    DiffNvimStatusUntracked = { fg = added },
 
-    -- Section headers (bold)
-    DiffNvimSectionHeader   = { bold = true, link = "Title" },
+    -- Section headings inside a panel, in the panel title's colour, and the
+    -- disclosure marker before a section or a commit
+    DiffNvimSectionHeader   = { fg = s.title_fg, bold = true },
+    DiffNvimChevron         = { fg = s.dim_fg },
 
-    -- File panel names
-    DiffNvimStagedFile      = { link = "String" },
-    DiffNvimUnstagedFile    = { link = "Normal" },
-    DiffNvimDeletedFile     = { fg = error_fg },
+    -- File names follow the file's status, never the section it is listed
+    -- in: neutral, a new file in the added colour, a deleted one struck out.
+    DiffNvimFileName        = text_fg and { fg = text_fg } or { link = "Normal" },
+    DiffNvimAddedFile       = { fg = added },
+    DiffNvimDeletedFile     = { fg = removed, strikethrough = true },
+    -- Directory rows of a file tree, and quiet explanatory text
+    DiffNvimDirName         = { fg = s.dim_fg },
+    DiffNvimHint            = { fg = s.dim_fg },
 
     -- File panel diffstat counts
     DiffNvimStatAdded       = { fg = p.gutter_added,   bold = false },
     DiffNvimStatRemoved     = { fg = p.gutter_removed, bold = false },
 
-    -- Commit panel
-    DiffNvimCommitHash      = { link = "Identifier" },
-    DiffNvimCommitAuthor    = { link = "Comment" },
-    DiffNvimCommitTime      = { link = "Comment" },
-    DiffNvimCommitSubject   = { link = "Normal" },
-    -- Dim metadata line beneath a commit subject (two-line layout)
-    DiffNvimCommitMeta      = { link = "Comment" },
-    -- Full commit message body shown when a commit is expanded inline
-    DiffNvimCommitBody      = { link = "Comment" },
+    -- Commit panel: the subject as text; the hash, author and age under it
+    -- as metadata, a step back
+    DiffNvimCommitHash      = { fg = s.dim_fg },
+    DiffNvimCommitSubject   = text_fg and { fg = text_fg } or { link = "Normal" },
+    DiffNvimCommitMeta      = { fg = s.dim_fg },
+    -- Commit message body in the tooltip
+    DiffNvimCommitBody      = { fg = s.title_fg },
     -- Cursor highlight spanning both header lines (subject + author/date) of
     -- the commit the cursor is on.
     DiffNvimCommitCursor    = { link = "CursorLine" },
 
-    -- Ref badges
-    DiffNvimRefHead         = { fg = p.ref_head, bold = true },
-    DiffNvimRefBranch       = { link = "String" },
-    DiffNvimRefRemote       = { link = "Identifier" },
-    DiffNvimRefTag          = { link = "Constant" },
+    -- Ref pills
+    DiffNvimRefHead         = pill(hl_attr("DiagnosticWarn", "fg") or p.ref_head, bg, { bold = true }),
+    DiffNvimRefBranch       = pill(added, bg),
+    DiffNvimRefRemote       = pill(first_fg("Directory", "Identifier") or changed, bg),
+    DiffNvimRefTag          = pill(first_fg("Constant", "Number") or changed, bg),
 
     -- Notes
     DiffNvimNoteHeader      = { bold = true, link = "WarningMsg" },
-    DiffNvimNoteText        = { link = "Comment" },
+    DiffNvimNoteText        = { fg = s.title_fg },
     DiffNvimNoteMarker      = { fg = p.note_marker, bold = true },
     DiffNvimNoteVirtText    = { fg = p.note_virt, italic = true },
 
@@ -192,9 +227,6 @@ local function build_defaults()
     -- A separator under the mouse pointer (click to expand)
     DiffNvimSeparatorHover     = { fg = p.separator_fg, bg = s.hover_bg, italic = true },
     DiffNvimSeparatorDeclHover = { fg = p.separator_fg, bg = s.hover_bg, italic = true, bold = true },
-
-    -- Commit file entries
-    DiffNvimCommitFileEntry = { link = "Normal" },
 
     -- The file currently shown in the diff view, marked in either panel. A
     -- quiet tint, not Visual: it is a standing mark, not a selection, and has
@@ -207,10 +239,10 @@ local function build_defaults()
     DiffNvimEdgeHover       = { fg = p.edge_hover, bold = true },
     DiffNvimEdgeHoverStatus = { bg = p.edge_hover },
     -- Mode bar above the sidebar
-    DiffNvimModeBranch      = { link = "Title" },
-    DiffNvimModeTag         = { link = "Comment" },
-    DiffNvimModeClose       = { link = "WarningMsg" },
-    DiffNvimModeTab         = { link = "Comment" },
+    DiffNvimModeBranch      = text_fg and { fg = text_fg, bold = true } or { link = "Normal" },
+    DiffNvimModeTag         = { fg = s.dim_fg },
+    DiffNvimModeClose       = { fg = removed },
+    DiffNvimModeTab         = { fg = s.dim_fg },
     DiffNvimModeTabActive   = { bg = s.tab_active_bg, bold = true },
     -- Mode bar item under the cursor, while the bar has keyboard focus
     DiffNvimModeCursor      = { link = "CursorLine" },
@@ -231,7 +263,7 @@ local function build_defaults()
     DiffNvimPickerTitle       = { link = "FloatTitle" },
     DiffNvimPickerFooter      = { fg = p.separator_fg },
     DiffNvimPickerPrompt      = { fg = s.accent, bold = true },
-    DiffNvimPickerPlaceholder = { fg = p.separator_fg, italic = true },
+    DiffNvimPickerPlaceholder = { fg = s.dim_fg },
     DiffNvimPickerCaret       = { reverse = true },
     DiffNvimPickerCount       = { fg = p.separator_fg },
     DiffNvimPickerRule        = { fg = p.separator_fg },

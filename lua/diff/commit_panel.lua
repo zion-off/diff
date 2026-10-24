@@ -90,7 +90,7 @@ local function build(width)
     local chevron = d and CHEVRON.open or CHEVRON.closed
     local line1 = chevron .. util.trunc(commit.subject or "", math.max(8, width - vim.api.nvim_strwidth(chevron)))
     local r1 = push(line1, { type = "commit", key = "commit:" .. commit.hash, commit = commit })
-    table.insert(hl, { r1, "DiffNvimCommitMeta", 0, #chevron })
+    table.insert(hl, { r1, "DiffNvimChevron", 0, #chevron })
     table.insert(hl, { r1, "DiffNvimCommitSubject", #chevron, #line1 })
 
     local meta = META_INDENT .. hash_str
@@ -101,8 +101,9 @@ local function build(width)
     local meta_end = #meta
     local pills = {}
     for _, ref in ipairs(commit.refs or {}) do
-      local pill = " [" .. ref .. "]"
-      if vim.api.nvim_strwidth(meta .. pill) <= width then
+      local pill = " " .. ref .. " "
+      if vim.api.nvim_strwidth(meta .. " " .. pill) <= width then
+        meta = meta .. " "
         table.insert(pills, { #meta, #meta + #pill, ref_hl(ref) })
         meta = meta .. pill
       end
@@ -125,7 +126,7 @@ local function build(width)
         local pad = META_INDENT .. string.rep("  ", depth)
         local name = util.trunc_middle(display, math.max(1, width - #pad - 1))
         local r = push(pad .. name .. "/", { type = "commit_dir", commit = commit })
-        table.insert(hl, { r, "Comment", #pad, #pad + #name + 1 })
+        table.insert(hl, { r, "DiffNvimDirName", #pad, #pad + #name + 1 })
         for _, child in ipairs(util.sort_tree_children(cur.children)) do render_node(child, depth + 1) end
       end
       render_node = function(node, depth)
@@ -135,7 +136,7 @@ local function build(width)
         local line, cols = util.file_row(width, META_INDENT .. string.rep("  ", depth), node.name, stat, stat_w,
           util.STATUS_BADGE[f.status] or "·")
         local r = push(line, { type = "commit_file", key = file_key(commit.hash, f.path), commit = commit, file = f })
-        table.insert(hl, { r, "DiffNvimCommitFileEntry", cols.name[1], cols.name[2] })
+        table.insert(hl, { r, util.file_name_hl(f.status), cols.name[1], cols.name[2] })
         table.insert(hl, { r, util.STATUS_HL[f.status] or "DiffNvimStatusUntracked", cols.badge[1], cols.badge[2] })
         if cols.stat then
           local base = cols.stat[1]
@@ -288,8 +289,9 @@ local function tooltip_lines(commit, body)
   if #refs > 0 then
     local line, spans = "", {}
     for _, ref in ipairs(refs) do
-      local pill = (line == "" and "" or " ") .. "[" .. ref .. "]"
-      table.insert(spans, { #line + (line == "" and 0 or 1), #line + #pill, ref_hl(ref) })
+      if line ~= "" then line = line .. " " end
+      local pill = " " .. ref .. " "
+      table.insert(spans, { #line, #line + #pill, ref_hl(ref) })
       line = line .. pill
     end
     table.insert(lines, line)

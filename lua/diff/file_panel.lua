@@ -40,13 +40,6 @@ end
 
 local S = fresh_state()
 
-local function file_hl(file, section)
-  if file.status == "deleted" then return "DiffNvimDeletedFile" end
-  if section == "staged" then return "DiffNvimStagedFile" end
-  if section == "branch" then return "DiffNvimCommitFileEntry" end
-  return "DiffNvimUnstagedFile"
-end
-
 local function file_key(section, path)
   return "file:" .. section .. ":" .. path
 end
@@ -99,7 +92,7 @@ local function build(width)
     local name = util.trunc_middle(display, math.max(1, width - #indent - 2))
     local line = indent .. name .. "/" .. (is_collapsed and "…" or "")
     local r = push(line, { type = "dir_node", key = "dir:" .. key, section = section, dir_key = key })
-    table.insert(hl, { r, "Comment", #indent, #line })
+    table.insert(hl, { r, "DiffNvimDirName", #indent, #line })
     if is_collapsed then return end
     for _, child in ipairs(util.sort_tree_children(cur.children)) do
       render_node(child, depth + 1, section, dir_path .. "/")
@@ -116,7 +109,7 @@ local function build(width)
     local line, cols = util.file_row(width, string.rep("  ", depth + 1), node.name, stat, stat_w,
       util.STATUS_BADGE[f.status] or "·")
     local r = push(line, { type = "file", key = file_key(section, f.path), section = section, file = f })
-    table.insert(hl, { r, file_hl(f, section), cols.name[1], cols.name[2] })
+    table.insert(hl, { r, util.file_name_hl(f.status), cols.name[1], cols.name[2] })
     table.insert(hl, { r, util.STATUS_HL[f.status] or "DiffNvimStatusUntracked", cols.badge[1], cols.badge[2] })
     if cols.stat then
       local base = cols.stat[1]
@@ -127,9 +120,13 @@ local function build(width)
 
   local function render_section(section, label)
     local files = section_files(section)
-    local r = push((S.collapsed[section] and "▶ " or "▼ ") .. label .. " (" .. #files .. ")",
+    local chevron = S.collapsed[section] and "▸ " or "▾ "
+    local title = label .. " "
+    local r = push(chevron .. title .. "(" .. #files .. ")",
       { type = "header", key = "header:" .. section, section = section })
-    table.insert(hl, { r, "DiffNvimSectionHeader", 0, -1 })
+    table.insert(hl, { r, "DiffNvimChevron", 0, #chevron })
+    table.insert(hl, { r, "DiffNvimSectionHeader", #chevron, #chevron + #title })
+    table.insert(hl, { r, "DiffNvimHint", #chevron + #title, -1 })
     if S.collapsed[section] then return end
     for _, child in ipairs(util.sort_tree_children(util.build_file_tree(files).children)) do
       render_node(child, 0, section, "")
@@ -138,7 +135,7 @@ local function build(width)
 
   local function note(text)
     push(util.trunc("  " .. text, math.max(8, width)), { type = "blank" })
-    table.insert(hl, { #lines - 1, "Comment", 0, -1 })
+    table.insert(hl, { #lines - 1, "DiffNvimHint", 0, -1 })
   end
   if S.branch_mode then
     if S.branch and S.branch.files then

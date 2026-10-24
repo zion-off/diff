@@ -147,6 +147,14 @@ M.STATUS_HL = {
   unknown   = "DiffNvimStatusUntracked",
 }
 
+--- The highlight of a file's name, from its status alone: the section a
+--- file is listed in says nothing about how it should look.
+function M.file_name_hl(status)
+  if status == "deleted" then return "DiffNvimDeletedFile" end
+  if status == "added" or status == "untracked" then return "DiffNvimAddedFile" end
+  return "DiffNvimFileName"
+end
+
 --- "+12 -3" for a file's diffstat, with the byte ranges of the two counts
 --- (nil when that count is zero); "bin" for a binary file, "" for none.
 --- @param st table|nil  { added, deleted, binary }
@@ -171,25 +179,25 @@ end
 
 --- Lay out a file row `width` columns wide: `indent`, the name (cut in the
 --- middle to fit), then at the right the diffstat right-aligned in a column
---- `stat_w` wide and the status badge. Rows sharing a `stat_w` line their
+--- `stat_w` wide and the status letter, one column in from the edge so it
+--- does not sit on the window border. Rows sharing a `stat_w` line their
 --- stats and badges up in columns. A stat wider than its column is left out
 --- rather than cut: half a number is worse than none.
 --- @return string line, table cols  byte ranges { name = {s, e}, stat = {s, e}|nil, badge = {s, e} }
 function M.file_row(width, indent, name, stat, stat_w, badge)
   if #stat > stat_w then stat = "" end
-  local badge_text = "[" .. badge .. "]"
   local stat_col = stat_w > 0 and ("  " .. string.rep(" ", stat_w - #stat) .. stat) or ""
-  local right = stat_col .. " " .. badge_text
+  local right = stat_col .. "  " .. badge .. " "
   local right_w = vim.api.nvim_strwidth(right)
   local shown = M.trunc_middle(name, math.max(1, width - #indent - right_w - 1))
   local pad = math.max(1, width - #indent - vim.api.nvim_strwidth(shown) - right_w)
   local line = indent .. shown .. string.rep(" ", pad) .. right
-  local badge_s = #line - #badge_text
-  local stat_e = badge_s - 1
+  local badge_s = #line - #badge - 1
+  local stat_e = badge_s - 2
   return line, {
     name = { #indent, #indent + #shown },
     stat = stat ~= "" and { stat_e - #stat, stat_e } or nil,
-    badge = { badge_s, #line },
+    badge = { badge_s, badge_s + #badge },
   }
 end
 

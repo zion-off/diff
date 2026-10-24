@@ -376,7 +376,7 @@ return {
     -- Stats right-aligned in one column, badges in the last, as in the file panel.
     local width = vim.api.nvim_win_get_width(sidebar._commit_win)
     for _, i in ipairs({ 4, 6 }) do H.eq(vim.api.nvim_strwidth(rows[i]), width, rows[i]) end
-    H.ok(rows[4]:match("  %+1 %[M%]$") and rows[6]:match("%+1 %-1 %[M%]$"), rows[4] .. "\n" .. rows[6])
+    H.ok(rows[4]:match("  %+1  M $") and rows[6]:match("%+1 %-1  M $"), rows[4] .. "\n" .. rows[6])
     cp.activate_line(panel_row("b%.lua", sidebar._commit_buf))
     H.wait(function() return S().source and S().source.kind == "commit" and S().layout end, "commit diff")
     H.eq(vim.api.nvim_buf_get_lines(S().bufs.new, 0, -1, false), { "return 13" })

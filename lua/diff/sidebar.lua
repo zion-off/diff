@@ -754,7 +754,7 @@ function M.render_placeholder(win)
     local longest = 0
     for _, h in ipairs(hints) do longest = math.max(longest, vim.api.nvim_strwidth(h)) end
     if longest <= width or i == #PLACEHOLDER_HINTS then
-      for _, h in ipairs(hints) do table.insert(body, { h, "Comment" }) end
+      for _, h in ipairs(hints) do table.insert(body, { h, "DiffNvimHint" }) end
       break
     end
   end
