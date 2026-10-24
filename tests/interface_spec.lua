@@ -99,6 +99,12 @@ return {
     local gutter = vim.api.nvim_eval_statusline(vim.wo[win].statuscolumn,
       { winid = win, use_statuscol_lnum = cursor(win) }).str
     H.eq(gutter:match("(%d+)%s*$"), "30", "gutter must show the file line number, got " .. vim.inspect(gutter))
+    -- A collapsed-context row carries its band across the gutter too.
+    local sep = find_item(function(it) return it.sep end)
+    local ev = vim.api.nvim_eval_statusline(vim.wo[win].statuscolumn,
+      { winid = win, use_statuscol_lnum = sep, highlights = true })
+    H.eq(ev.highlights[1].group, "DiffNvimSeparator", vim.inspect(ev))
+    H.eq(vim.api.nvim_strwidth(ev.str), vim.api.nvim_strwidth(gutter), "the band spans the whole gutter")
   end },
 
   { "a line inside a collapsed block comment is highlighted as a comment", function()
@@ -123,6 +129,8 @@ return {
     local host = pane("new")
     open_file("new%.lua", "new.lua")
     H.eq(pane("old"), nil)
+    local header = vim.api.nvim_buf_get_lines(S().header_buf, 0, 1, false)[1]
+    H.ok(header:match("new%.lua  new file  %+1$"), "no zero count: " .. header)
     H.eq(pane("new"), host)
     H.eq(#vim.api.nvim_tabpage_list_wins(0), 5, "sidebar×3 + header + one pane")
     open_file("a%.lua", "src/a.lua")
@@ -189,7 +197,7 @@ return {
     vim.cmd("redraw")
     local pos = vim.fn.screenpos(pane("old"), ins, 1)
     H.ok(pos.row > 0, "filler row on screen")
-    H.eq(vim.fn.screenstring(pos.row, pos.col), "░")
+    H.eq(vim.fn.screenstring(pos.row, pos.col), "╱")
   end },
 
   { "s stages the hunk under the cursor and the view refreshes in place", function()
@@ -445,6 +453,9 @@ return {
     H.eq(#marks(sidebar._commit_buf, cp_ns), 0)
     local virt = marks(S().bufs.new, "diff_nvim_hover")[1][4].virt_text
     H.ok(virt[#virt][1]:match("click to expand"), vim.inspect(virt))
+    local gutter = vim.api.nvim_eval_statusline(vim.wo[pane("new")].statuscolumn,
+      { winid = pane("new"), use_statuscol_lnum = sep, highlights = true })
+    H.eq(gutter.highlights[1].group, "DiffNvimSeparatorHover", "the gutter takes the hover tint too")
     over_row(pane("new"), find_item(function(it) return not it.sep end))
     H.wait(function() return #marks(S().bufs.new, "diff_nvim_hover") == 0 end, "separator untinted")
 

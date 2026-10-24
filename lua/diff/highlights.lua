@@ -90,6 +90,7 @@ local function surfaces(p)
       separator_bg = p.separator_bg, hover_bg = p.hover_bg,
       active_bg = p.hover_bg, tab_active_bg = p.tab_active_bg,
       accent = p.ref_head, title_fg = p.title_fg, dim_fg = p.separator_fg,
+      filler_fg = p.filler_fg,
     }, nil
   end
   -- The colour picked-out text is drawn in: the prompt glyph and the matched
@@ -114,6 +115,8 @@ local function surfaces(p)
     -- Text tiers: secondary chrome text, and dim text that recedes further.
     title_fg     = blend(fg, bg, 0.25),
     dim_fg       = blend(fg, bg, 0.55),
+    -- The filler hatch: just visible on its band, never louder than text.
+    filler_fg    = blend(bg, fg, 0.16),
   }, bg
 end
 
@@ -159,7 +162,7 @@ local function build_defaults()
     -- The filler's glyphs are drawn as an overlay, which replaces the cell
     -- highlight outright: the band's colour has to ride on them, or the row
     -- below a deletion shows Normal between the hatching.
-    DiffNvimFillerChar      = { fg = p.filler_fg, bg = s.filler_bg },
+    DiffNvimFillerChar      = { fg = s.filler_fg, bg = s.filler_bg },
 
     -- Word-level highlights (PRIORITY_WORD_HL=150: above tree-sitter ~100)
     -- More saturated than line bg so changed tokens stand out, fg=NONE so
@@ -220,13 +223,14 @@ local function build_defaults()
     DiffNvimNoteMarker      = { fg = p.note_marker, bold = true },
     DiffNvimNoteVirtText    = { fg = p.note_virt, italic = true },
 
-    -- Separators (collapsed hunks)
-    DiffNvimSeparator       = { fg = p.separator_fg, bg = s.separator_bg, italic = true },
-    -- Enclosing-declaration heading shown next to a collapsed separator
-    DiffNvimSeparatorDecl   = { fg = p.separator_fg, bg = s.separator_bg, italic = true, bold = true },
+    -- Separators (collapsed context): a quiet band with the hidden count, and
+    -- the enclosing declaration a step brighter, so the band says where in
+    -- the file it is without shouting it in bold italics
+    DiffNvimSeparator       = { fg = s.dim_fg, bg = s.separator_bg },
+    DiffNvimSeparatorDecl   = { fg = s.title_fg, bg = s.separator_bg },
     -- A separator under the mouse pointer (click to expand)
-    DiffNvimSeparatorHover     = { fg = p.separator_fg, bg = s.hover_bg, italic = true },
-    DiffNvimSeparatorDeclHover = { fg = p.separator_fg, bg = s.hover_bg, italic = true, bold = true },
+    DiffNvimSeparatorHover     = { fg = s.dim_fg, bg = s.hover_bg },
+    DiffNvimSeparatorDeclHover = { fg = s.title_fg, bg = s.hover_bg },
 
     -- The file currently shown in the diff view, marked in either panel. A
     -- quiet tint, not Visual: it is a standing mark, not a selection, and has
@@ -273,8 +277,11 @@ local function build_defaults()
     -- Full-width filename header bar spanning both diff panes. A raised
     -- surface a step above Normal — linking it to StatusLine made it the
     -- brightest, heaviest band on screen while naming the least urgent thing.
-    DiffNvimHeader          = { bold = true, bg = s.header_bg },
-    -- "Before" / "After" over each pane of a split, on the header's surface
+    DiffNvimHeader          = { bg = s.header_bg },
+    -- The file name in it, the one bold thing; its directory and notes recede
+    DiffNvimHeaderName      = { fg = text_fg, bg = s.header_bg, bold = true },
+    -- "Before" / "After" over each pane of a split, the directory and notes,
+    -- on the header's surface
     DiffNvimHeaderLabel     = { fg = s.dim_fg, bg = s.header_bg },
   }
 end

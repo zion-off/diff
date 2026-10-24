@@ -19,6 +19,7 @@ local engine  = require("diff.diff_engine")
 local syntax  = require("diff.syntax")
 local word_diff = require("diff.word_diff")
 local chrome  = require("diff.chrome")
+local util    = require("diff.util")
 
 local NS       = vim.api.nvim_create_namespace("diff_nvim_diff")
 local NS_WORDS = vim.api.nvim_create_namespace("diff_nvim_words")
@@ -163,7 +164,11 @@ local function set_opts(win, opts)
   end
 end
 
-local STATUSCOL = "%s%#LineNr#%{v:lua.require'diff.diff_view'.statuscol()} "
+-- %{% %}: the gutter returns its own highlights, so a collapsed-context row
+-- can carry its band across the gutter instead of starting after it.
+local STATUSCOL = "%{%v:lua.require'diff.diff_view'.statuscol()%}"
+-- Cells of the sign column ('signcolumn' "yes:1").
+local SIGN_WIDTH = 2
 
 --- Whether panes soft-wrap. Split panes wrap only when their rows can be
 --- kept aligned; otherwise the scroll sync would drift apart.
@@ -344,7 +349,10 @@ local function apply_hover(side)
   })
 end
 
-local FILLER = string.rep("░", 400)
+-- A fine diagonal hatch, drawn faintly: the gap where one side has no lines
+-- should read as absence, not as the heaviest block on the screen.
+local FILLER_CHAR = "╱"
+local FILLER = string.rep(FILLER_CHAR, 400)
 
 --- Persistent per-row decorations: line backgrounds, gutter signs and
 --- separators. Word highlights, filler patterns and syntax are drawn lazily
@@ -467,31 +475,57 @@ local function header_key()
   return table.concat(parts, ":")
 end
 
+--- The header as { text, hl } parts: the path with its directory receding
+--- behind the file name, what the comparison is against, any notes about
+--- the file, and its diffstat.
+local function header_parts(src, m)
+  local parts = { { "  " } }
+  local function add(text, hl) table.insert(parts, { text, hl }) end
+  local function path(p)
+    local dir, name = p:match("^(.*/)([^/]+)$")
+    if dir then add(dir, "DiffNvimHeaderLabel") end
+    add(name or p, "DiffNvimHeaderName")
+  end
+  if src.old_path and src.old_path ~= src.path then
+    path(src.old_path)
+    add(" → ", "DiffNvimHeaderLabel")
+  end
+  path(src.path)
+
+  local notes = {}
+  if src.kind == "commit" then table.insert(notes, "@ " .. src.hash:sub(1, 7)) end
+  if src.kind == "range" then table.insert(notes, "vs " .. src.base) end
+  if src.status == "added" or src.status == "untracked" then table.insert(notes, "new file") end
+  if src.status == "deleted" then table.insert(notes, "deleted") end
+  if src.binary then table.insert(notes, "binary") end
+  if m and m.old.eol ~= m.new.eol then table.insert(notes, "newline at end of file changed") end
+  for _, note in ipairs(notes) do add("  " .. note, "DiffNvimHeaderLabel") end
+
+  if m then
+    local stat, add_range, del_range = util.diffstat({ added = m.added, deleted = m.removed })
+    if stat ~= "" then
+      add("  ")
+      if add_range then add(stat:sub(add_range[1] + 1, add_range[2]), "DiffNvimStatAdded") end
+      if add_range and del_range then add(" ") end
+      if del_range then add(stat:sub(del_range[1] + 1, del_range[2]), "DiffNvimStatRemoved") end
+    end
+  end
+  return parts
+end
+
 local function render_header()
   if not (valid_buf(S.header_buf) and S.source) then return end
-  local src, m = S.source, S.model
-  local text = "  " .. src.path
-  if src.old_path and src.old_path ~= src.path then text = "  " .. src.old_path .. " → " .. src.path end
-  if src.kind == "commit" then text = text .. "  @ " .. src.hash:sub(1, 7) end
-  if src.kind == "range" then text = text .. "  vs " .. src.base end
-  if src.status == "added" or src.status == "untracked" then text = text .. "  (new file)" end
-  if src.status == "deleted" then text = text .. "  (deleted)" end
-  if src.binary then text = text .. "  (binary)" end
-
-  local spans = {}
-  if m then
-    if m.old.eol ~= m.new.eol then text = text .. "  (newline at end of file changed)" end
-    local add, del = "+" .. m.added, "-" .. m.removed
-    table.insert(spans, { #text + 2, #text + 2 + #add, "DiffNvimStatAdded" })
-    table.insert(spans, { #text + 3 + #add, #text + 3 + #add + #del, "DiffNvimStatRemoved" })
-    text = text .. "  " .. add .. " " .. del
+  local text, spans = "", {}
+  for _, part in ipairs(header_parts(S.source, S.model)) do
+    if part[2] then table.insert(spans, { #text, #text + #part[1], part[2] }) end
+    text = text .. part[1]
   end
   text = label_panes(text, spans)
   S.header_widths = header_key()
   set_lines(S.header_buf, { text })
   vim.api.nvim_buf_clear_namespace(S.header_buf, NS_HEAD, 0, -1)
-  for _, s in ipairs(spans) do
-    pcall(vim.api.nvim_buf_set_extmark, S.header_buf, NS_HEAD, 0, s[1], { end_col = s[2], hl_group = s[3] })
+  for _, span in ipairs(spans) do
+    pcall(vim.api.nvim_buf_set_extmark, S.header_buf, NS_HEAD, 0, span[1], { end_col = span[2], hl_group = span[3] })
   end
 end
 
@@ -526,7 +560,7 @@ local function pad_to_height(side, r, row, target, width, pads)
   -- a filler draws its pattern, a changed row its own tint, context nothing.
   local char, hl = " ", nil
   if not row[side] then
-    char, hl = "░", "DiffNvimFillerChar"
+    char, hl = FILLER_CHAR, "DiffNvimFillerChar"
   elseif row.change then
     hl = side == "old" and "DiffNvimRemoved" or "DiffNvimAdded"
   end
@@ -876,10 +910,15 @@ vim.api.nvim_set_decoration_provider(NS_WORDS, {
 --- expressions get g:statusline_winid), so the current window is the pane.
 function M.statuscol()
   local side = side_of_win(vim.api.nvim_get_current_win())
-  if not side or not S.layout or vim.v.virtnum ~= 0 then return "" end
-  local row = row_of_item(item_at(vim.v.lnum))
-  local n = row and row[side]
-  return string.format("%" .. S.lnum_width .. "s", n and tostring(n) or "")
+  local blank = string.rep(" ", S.lnum_width)
+  if not side or not S.layout then return "%s%#LineNr#" .. blank .. " " end
+  local item = item_at(vim.v.lnum)
+  if item and item.sep then
+    local hl = S.hover == vim.v.lnum and "DiffNvimSeparatorHover" or "DiffNvimSeparator"
+    return "%#" .. hl .. "#" .. string.rep(" ", SIGN_WIDTH) .. blank .. " "
+  end
+  local n = vim.v.virtnum == 0 and row_of_item(item) and row_of_item(item)[side]
+  return "%s%#LineNr#" .. string.format("%" .. S.lnum_width .. "s", n and tostring(n) or "") .. " "
 end
 
 -- ---------------------------------------------------------------------------
