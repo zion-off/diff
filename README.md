@@ -1,5 +1,7 @@
 # diff.nvim
 
+<img width="1470" height="956" alt="screenshot" src="https://github.com/user-attachments/assets/1c391d8f-a446-448c-b82b-75e10296b468" />
+
 A NeoVim plugin that replicates the Git source-control UX of VSCode's SCM sidebar — with an enhanced code-review annotation feature.
 
 ---
