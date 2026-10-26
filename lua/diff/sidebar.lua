@@ -843,6 +843,7 @@ function M.open(info)
   nmap(km.toggle_notes, function() require("diff.annotations").toggle_notes(M._repo_root) end, "Toggle notes panel")
   nmap(km.preview_branch, M.pick_preview_branch, "Preview branch")
   nmap(km.branch_changes, M.toggle_branch_mode, "Toggle branch changes")
+  nmap(km.toggle_layout, function() require("diff.diff_view").toggle_layout() end, "Toggle split / unified")
 
   M.refresh()
   log.info("opened interface for %s (git dir %s) in %.1f ms", info.root, info.git_dir, elapsed())

@@ -1,10 +1,11 @@
---- diff.nvim — side-by-side diff view.
+--- diff.nvim — diff view, split side by side or unified in one column.
 ---
 --- The view owns a header window and one or two pane windows inside the
---- interface's main area. Those windows and their buffers live for as long as
---- the view is open: opening another file, expanding context or a live refresh
---- only replaces buffer content, so the layout never reflows and focus never
---- jumps.
+--- interface's main area. A pane is named for what it shows: "old" or "new"
+--- (one side, in a split or alone) or "unified" (both, interleaved). Those
+--- windows and their buffers live for as long as the view is open: opening
+--- another file, expanding context or a live refresh only replaces buffer
+--- content, so the layout never reflows and focus never jumps.
 ---
 --- State flows one way: content.load -> diff_engine.compute (model) ->
 --- diff_engine.layout (items) -> render. Keymaps read the current state, so
@@ -38,6 +39,7 @@ local EXPAND_STEP = 10
 local WATCH_DEBOUNCE_MS = 150
 
 local SIDES = { "old", "new" }
+local PANES = { "old", "new", "unified" }
 
 -- Aligning wrapped split panes needs per-line screen heights (Neovim 0.10+).
 local CAN_ALIGN_WRAP = vim.api.nvim_win_text_height ~= nil
@@ -53,14 +55,15 @@ local function fresh_state()
   return {
     header_win = nil, header_buf = nil,
     extra_win  = nil,           -- second pane (old side) in split mode
-    bufs  = {},                 -- side -> pane buffer (persist while open)
-    panes = {},                 -- side -> window currently showing that side
+    mode  = nil,                -- "split", "unified", "new" or "old"
+    bufs  = {},                 -- pane -> pane buffer (persist while open)
+    panes = {},                 -- pane -> window currently showing it
     root = nil, source = nil, navigator = nil,
     model = nil, layout = nil, ctx = nil, reveals = {},
     sources = {},               -- side -> syntax Source
     words = {},                 -- model row -> word ranges (lazy)
     lnum_width = 1,
-    sep_marks = {},             -- side -> { [row] = extmark id } of separators
+    sep_marks = {},             -- pane -> { [row] = extmark id } of separators and hunk headers
     hover = nil,                -- layout row under the mouse pointer
     header_widths = nil,        -- window widths the header was laid out for
     wrap_widths = {},           -- side -> pane width the wrap padding was computed for
@@ -77,6 +80,9 @@ end
 
 local S = fresh_state()
 
+-- The layout picked with the toggle, kept for the rest of the session.
+local chosen_layout
+
 local function valid_win(w) return w ~= nil and vim.api.nvim_win_is_valid(w) end
 local function valid_buf(b) return b ~= nil and vim.api.nvim_buf_is_valid(b) end
 
@@ -86,15 +92,22 @@ local function notify(msg, level)
   vim.notify("diff.nvim: " .. msg, level or vim.log.levels.INFO)
 end
 
---- Side shown in `buf`, or nil when it is not one of our panes.
-local function side_of_buf(buf)
-  if buf == S.bufs.old then return "old" end
-  if buf == S.bufs.new then return "new" end
+--- Pane shown in `buf`, or nil when it is not one of ours.
+local function pane_of_buf(buf)
+  for _, p in ipairs(PANES) do
+    if buf == S.bufs[p] then return p end
+  end
 end
 
-local function side_of_win(win)
-  if win == S.panes.old then return "old" end
-  if win == S.panes.new then return "new" end
+local function pane_of_win(win)
+  for _, p in ipairs(PANES) do
+    if win == S.panes[p] then return p end
+  end
+end
+
+--- The pane that takes focus: the new side, else whichever one is shown.
+local function focus_pane()
+  return S.panes.new or S.panes.unified or S.panes.old
 end
 
 local function item_at(idx)
@@ -103,6 +116,187 @@ end
 
 local function row_of_item(item)
   return item and item.row and S.model.rows[item.row] or nil
+end
+
+-- ---------------------------------------------------------------------------
+-- Panes
+--
+-- What sets the panes apart, kept in one place: which side and line a row
+-- shows, the gutter, and the band drawn on rows that hold no line. A side
+-- pane ("old" or "new") shows one side, with fillers where it has no line;
+-- the unified pane shows both, each changed line on a row of its own. The
+-- functions take a layout item and its model row (nil for a band).
+-- ---------------------------------------------------------------------------
+
+-- Cells of the sign column ('signcolumn' "yes:1").
+local SIGN_WIDTH = 2
+-- Cells of the +/- marker the unified pane sets before the code, and a space.
+local MARKER_WIDTH = 2
+
+local function numbered(n, width)
+  return string.format("%" .. width .. "s", n and tostring(n) or "")
+end
+
+--- Whether the band of `item` is under the mouse pointer: only one that
+--- hides rows reacts to it, since only that one expands when clicked.
+local function band_hovered(item, lnum)
+  return item.sep ~= nil and S.hover == lnum
+end
+
+local function band_hls(pane, hovered)
+  if hovered then return pane.hover_band_hl, pane.hover_decl_hl end
+  return pane.band_hl, pane.decl_hl
+end
+
+local function side_pane(side)
+  local pane = {
+    sides = { side },
+    label = side == "old" and "(before)" or "(after)",
+    signs = true,
+    band_hl = "DiffNvimSeparator", decl_hl = "DiffNvimSeparatorDecl",
+    hover_band_hl = "DiffNvimSeparatorHover", hover_decl_hl = "DiffNvimSeparatorDeclHover",
+    hover_line_hl = "DiffNvimHover",
+  }
+
+  function pane.path(src)
+    return side == "old" and (src.old_path or src.path) or src.path
+  end
+
+  --- The side and line the row shows; nothing on a filler.
+  function pane.side_line(_, row)
+    if row[side] then return side, row[side] end
+  end
+
+  --- The file lines the row stands for, old and new.
+  function pane.lines_at(_, row)
+    if side == "old" then return row.old, nil end
+    return nil, row.new
+  end
+
+  function pane.gutter_width()
+    return SIGN_WIDTH + S.lnum_width + 1
+  end
+
+  --- "··· N hidden lines ···" and the declaration the hidden lines end in.
+  function pane.band_virt(item, hovered)
+    local hl, decl_hl = band_hls(pane, hovered)
+    local span = engine.separator_span(S.model, item.sep)
+    local virt = { { string.format("··· %d hidden lines ···", span.count), hl } }
+    local src = S.sources[side]
+    local heading = src and span[side][2] and src:enclosing_decl(span[side][2])
+    if heading then table.insert(virt, { "  " .. heading, decl_hl }) end
+    if hovered then table.insert(virt, { "  click to expand", hl }) end
+    return virt
+  end
+
+  function pane.gutter(item, row, lnum)
+    if item and not row then
+      local hl = band_hls(pane, band_hovered(item, lnum))
+      return "%#" .. hl .. "#" .. string.rep(" ", pane.gutter_width())
+    end
+    local n = vim.v.virtnum == 0 and row and row[side]
+    return "%s%#LineNr#" .. numbered(n, S.lnum_width) .. " "
+  end
+
+  return pane
+end
+
+--- The declaration a hunk is in, searched for where git searches: in the
+--- old file, from the line before the hunk (or before the gap, for a hunk
+--- with no old lines).
+local function hunk_heading(hunk)
+  local line = hunk.old_count == 0 and hunk.old_first or hunk.old_first - 1
+  local src = S.sources.old
+  return src and line > 0 and src:enclosing_decl(line) or nil
+end
+
+local GUTTER_STYLE = {
+  old = { nr = "DiffNvimRemovedNr", marker_hl = "DiffNvimRemovedMarker", marker = "-" },
+  new = { nr = "DiffNvimAddedNr",   marker_hl = "DiffNvimAddedMarker",   marker = "+" },
+  context = { nr = "LineNr", marker_hl = "LineNr", marker = " " },
+}
+
+local UNIFIED = {
+  sides = { "new", "old" },
+  label = "(diff)",
+  signs = false, -- changed rows are marked +/- in the gutter instead
+  band_hl = "DiffNvimHunkHeader", decl_hl = "DiffNvimHunkHeaderDecl",
+  hover_band_hl = "DiffNvimHunkHeaderHover", hover_decl_hl = "DiffNvimHunkHeaderDeclHover",
+  hover_line_hl = "DiffNvimHunkHeaderHover",
+}
+
+function UNIFIED.path(src)
+  return src.path
+end
+
+--- A changed line on its own side; context on the new side.
+function UNIFIED.side_line(item, row)
+  local side = item.side or "new"
+  return side, row[side]
+end
+
+--- Context stands for its line on both sides.
+function UNIFIED.lines_at(item, row)
+  if item.side == "old" then return row.old, nil end
+  if item.side == "new" then return nil, row.new end
+  return row.old, row.new
+end
+
+function UNIFIED.gutter_width()
+  return SIGN_WIDTH + 2 * (S.lnum_width + 1) + MARKER_WIDTH
+end
+
+--- Each run of rows is headed by its @@ range and the declaration it is in,
+--- as on GitHub. A header with rows hidden above it (and the band hiding
+--- rows after the last run) expands when clicked.
+function UNIFIED.band_virt(item, hovered)
+  local hl, decl_hl = band_hls(UNIFIED, hovered)
+  local virt = {}
+  if item.hunk then
+    table.insert(virt, { engine.hunk_header(item.hunk), hl })
+    local heading = hunk_heading(item.hunk)
+    if heading then table.insert(virt, { " " .. heading, decl_hl }) end
+  end
+  if hovered then
+    local count = engine.separator_span(S.model, item.sep).count
+    table.insert(virt, { string.format("%s%d hidden lines — click to expand", item.hunk and "  " or "", count), hl })
+  end
+  return virt
+end
+
+--- After GitHub's: the old and new line numbers, then a +/- marker, tinted
+--- with the row. A wrapped line's continuation keeps the tint without the
+--- numbers. A band carries its colour across the gutter, with an expand
+--- mark when it hides rows.
+function UNIFIED.gutter(item, row, lnum)
+  local w = S.lnum_width
+  local first = vim.v.virtnum == 0
+  if item and not row then
+    local hl = band_hls(UNIFIED, band_hovered(item, lnum))
+    local mark = item.sep and first and "↕" or " "
+    -- '↕' is two cells wide under 'ambiwidth' "double".
+    local pad = SIGN_WIDTH + 2 * w + 1 - vim.api.nvim_strwidth(mark)
+    return "%#" .. hl .. "#" .. string.rep(" ", pad) .. mark .. string.rep(" ", 1 + MARKER_WIDTH)
+  end
+  if not row then return "%s%#LineNr#" .. string.rep(" ", UNIFIED.gutter_width() - SIGN_WIDTH) end
+  local old, new = UNIFIED.lines_at(item, row)
+  local style = GUTTER_STYLE[item.side or "context"]
+  return "%s%#" .. style.nr .. "#" .. numbered(first and old, w) .. " " .. numbered(first and new, w) .. " "
+    .. "%#" .. style.marker_hl .. "#" .. (first and style.marker or " ") .. " "
+end
+
+local PANE = { old = side_pane("old"), new = side_pane("new"), unified = UNIFIED }
+
+--- The side whose text pane `p` shows for `item`, and the line.
+local function side_line(p, item)
+  local row = row_of_item(item)
+  if row then return PANE[p].side_line(item, row) end
+end
+
+--- The file lines `item` stands for in pane `p`: old, new.
+local function lines_at(p, item)
+  local row = row_of_item(item)
+  if row then return PANE[p].lines_at(item, row) end
 end
 
 local function fire_view_changed()
@@ -167,20 +361,13 @@ end
 -- %{% %}: the gutter returns its own highlights, so a collapsed-context row
 -- can carry its band across the gutter instead of starting after it.
 local STATUSCOL = "%{%v:lua.require'diff.diff_view'.statuscol()%}"
--- Cells of the sign column ('signcolumn' "yes:1").
-local SIGN_WIDTH = 2
-
---- Columns the gutter takes: signs, the line number and a space.
-local function gutter_width()
-  return SIGN_WIDTH + S.lnum_width + 1
-end
 
 --- Neovim learns a 'statuscolumn' width only by drawing it, and forgets it
 --- whenever the line count changes, measuring text as if the gutter were
 --- 'numberwidth' wide until the next redraw. Matching 'numberwidth' to the
 --- gutter keeps every measurement right in between.
-local function pin_gutter(win)
-  set_opts(win, { numberwidth = gutter_width() - SIGN_WIDTH })
+local function pin_gutter(win, p)
+  set_opts(win, { numberwidth = PANE[p].gutter_width() - SIGN_WIDTH })
 end
 
 --- Whether panes soft-wrap. Split panes wrap only when their rows can be
@@ -251,12 +438,30 @@ end
 
 local setup_keymaps -- defined below; installed once per pane buffer
 
-local function pane_buf(side)
-  if not valid_buf(S.bufs[side]) then
-    S.bufs[side] = scratch_buf("hide", "diff-pane")
-    setup_keymaps(S.bufs[side], side)
+local function pane_buf(p)
+  if not valid_buf(S.bufs[p]) then
+    S.bufs[p] = scratch_buf("hide", "diff-pane")
+    setup_keymaps(S.bufs[p], p)
   end
-  return S.bufs[side]
+  return S.bufs[p]
+end
+
+--- Empty the pane buffers that are off screen, so a pane switched away from
+--- does not keep the last file it showed, and its marks, while the view is
+--- open.
+local function release_hidden_panes()
+  for _, p in ipairs(PANES) do
+    local buf = S.bufs[p]
+    if not S.panes[p] and valid_buf(buf) and S.sep_marks[p] then
+      log.debug("releasing the hidden %s pane", p)
+      syntax.unbind(buf)
+      for _, ns in ipairs({ NS, NS_NOTES, NS_WRAP, NS_HOVER }) do
+        vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+      end
+      set_lines(buf, {})
+      S.sep_marks[p] = nil
+    end
+  end
 end
 
 --- The window the primary pane lives in: the interface's main area, or the
@@ -288,8 +493,9 @@ local function split_from(anchor, cmd)
   return win
 end
 
---- Arrange header + panes for `mode` ("split", "new" or "old"), reusing
---- every window that already exists. Returns the mode actually achieved.
+--- Arrange header + panes for `mode` ("split", "unified", "new" or "old"),
+--- reusing every window that already exists. Returns the mode actually
+--- achieved: a split with no room for it falls back to unified.
 local function ensure_layout(mode)
   local host = host_window()
   if not host then return nil end
@@ -304,7 +510,7 @@ local function ensure_layout(mode)
     end
   end
 
-  local primary = mode == "old" and "old" or "new"
+  local primary = mode == "split" and "new" or mode
   S.panes = { [primary] = host }
   if vim.api.nvim_win_get_buf(host) ~= pane_buf(primary) then
     vim.api.nvim_win_set_buf(host, pane_buf(primary))
@@ -320,9 +526,9 @@ local function ensure_layout(mode)
       end
       S.panes.old = S.extra_win
     else
-      log.warn("no room for a split diff; showing the new side only")
-      notify("not enough width for a split diff — showing the new side only", vim.log.levels.WARN)
-      mode = "new"
+      log.warn("no room for a split diff; showing a unified diff")
+      notify("not enough width for a split diff — showing a unified diff", vim.log.levels.WARN)
+      return ensure_layout("unified")
     end
   elseif valid_win(S.extra_win) then
     pcall(vim.api.nvim_win_close, S.extra_win, true)
@@ -330,6 +536,9 @@ local function ensure_layout(mode)
   end
 
   for _, win in pairs(S.panes) do pane_opts(win, mode == "split") end
+  if S.mode ~= mode then log.debug("layout %s -> %s", tostring(S.mode), mode) end
+  S.mode = mode
+  release_hidden_panes()
   return mode
 end
 
@@ -337,29 +546,16 @@ end
 -- Rendering
 -- ---------------------------------------------------------------------------
 
---- @param hovered boolean|nil  under the mouse pointer: tinted, with a hint
-local function separator_virt(side, sep, hovered)
-  local hl, decl_hl = "DiffNvimSeparator", "DiffNvimSeparatorDecl"
-  if hovered then hl, decl_hl = "DiffNvimSeparatorHover", "DiffNvimSeparatorDeclHover" end
-  local span = engine.separator_span(S.model, sep)
-  local virt = { { string.format("··· %d hidden lines ···", span.count), hl } }
-  local src = S.sources[side]
-  local heading = src and span[side][2] and src:enclosing_decl(span[side][2])
-  if heading then table.insert(virt, { "  " .. heading, decl_hl }) end
-  if hovered then table.insert(virt, { "  click to expand", hl }) end
-  return virt
-end
-
 --- Tint the separator under the mouse pointer, in every pane.
-local function apply_hover(side)
-  local buf = S.bufs[side]
+local function apply_hover(p)
+  local buf = S.bufs[p]
   if not valid_buf(buf) then return end
   vim.api.nvim_buf_clear_namespace(buf, NS_HOVER, 0, -1)
   local item = S.hover and S.layout and S.layout.items[S.hover]
   if not (item and item.sep) then return end
   vim.api.nvim_buf_set_extmark(buf, NS_HOVER, S.hover - 1, 0, {
-    line_hl_group = "DiffNvimHover",
-    virt_text = separator_virt(side, item.sep, true), virt_text_pos = "overlay",
+    line_hl_group = PANE[p].hover_line_hl,
+    virt_text = PANE[p].band_virt(item, true), virt_text_pos = "overlay",
     priority = PRIORITY_HOVER,
   })
 end
@@ -373,49 +569,50 @@ local FILLER = string.rep(FILLER_CHAR, 400)
 --- separators. Word highlights, filler patterns and syntax are drawn lazily
 --- for the rows on screen: a filler's pattern as a persistent extmark costs
 --- ~30x a plain one, and a large insertion has tens of thousands of fillers.
-local function decorate(side)
-  local buf = S.bufs[side]
+local function decorate(p)
+  local buf = S.bufs[p]
   vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
   local sep_marks = {}
-  S.sep_marks[side] = sep_marks
-  local change_hl = side == "old" and "DiffNvimRemoved" or "DiffNvimAdded"
-  local sign_hl   = side == "old" and "DiffNvimGutterRemoved" or "DiffNvimGutterAdded"
+  S.sep_marks[p] = sep_marks
+  local pane = PANE[p]
 
   -- A run of changed rows takes two marks, whatever its length: the tint as
   -- a range rather than 'line_hl_group' (a line highlight is painted at a
   -- layer the word-level marks cannot reach, so it swallows them whatever
   -- their priority), reaching into the row after the run so 'hl_eol' carries
   -- it to the edge of the pane; and the sign, which a mark shows on every row
-  -- it spans, so it ends on the run's last row.
-  local run_start
+  -- it spans, so it ends on the run's last row. A unified pane's removed
+  -- lines and the added lines below them are two runs.
+  local run_start, run_side
   local function close_run(last)
     if not run_start then return end
     vim.api.nvim_buf_set_extmark(buf, NS, run_start, 0, {
-      end_row = last + 1, end_col = 0, hl_group = change_hl, hl_eol = true,
-      priority = PRIORITY_LINE_BG,
+      end_row = last + 1, end_col = 0, hl_eol = true, priority = PRIORITY_LINE_BG,
+      hl_group = run_side == "old" and "DiffNvimRemoved" or "DiffNvimAdded",
     })
-    vim.api.nvim_buf_set_extmark(buf, NS, run_start, 0, {
-      end_row = last, end_col = 0, sign_text = "▍", sign_hl_group = sign_hl,
-      priority = PRIORITY_LINE_BG,
-    })
-    run_start = nil
+    if pane.signs then
+      vim.api.nvim_buf_set_extmark(buf, NS, run_start, 0, {
+        end_row = last, end_col = 0, sign_text = "▍", priority = PRIORITY_LINE_BG,
+        sign_hl_group = run_side == "old" and "DiffNvimGutterRemoved" or "DiffNvimGutterAdded",
+      })
+    end
+    run_start, run_side = nil, nil
   end
 
   for i, item in ipairs(S.layout.items) do
     local r = i - 1
-    local row = not item.sep and S.model.rows[item.row]
-    if row and row.change and row[side] then
-      run_start = run_start or r
-    else
-      close_run(r - 1)
-    end
-    if item.sep then
+    local row = row_of_item(item)
+    local side = side_line(p, item)
+    local tint = row and row.change and side or nil
+    if tint ~= run_side then close_run(r - 1) end
+    if tint then run_start, run_side = run_start or r, tint end
+    if not row then
       sep_marks[r] = vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
-        line_hl_group = "DiffNvimSeparator",
-        virt_text = separator_virt(side, item.sep), virt_text_pos = "overlay",
+        line_hl_group = pane.band_hl,
+        virt_text = pane.band_virt(item), virt_text_pos = "overlay",
         priority = PRIORITY_LINE_BG,
       })
-    elseif not row[side] then
+    elseif not side then
       vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
         line_hl_group = "DiffNvimFiller", priority = PRIORITY_LINE_BG,
       })
@@ -424,33 +621,41 @@ local function decorate(side)
   close_run(#S.layout.items - 1)
 end
 
---- Redraw only the separators (their headings need the syntax parse).
-local function decorate_separators(side)
-  local buf = S.bufs[side]
-  for r, id in pairs(S.sep_marks[side] or {}) do
+--- Redraw only the separators and hunk headers (their headings need the
+--- syntax parse).
+local function decorate_separators(p)
+  local buf = S.bufs[p]
+  for r, id in pairs(S.sep_marks[p] or {}) do
     local item = S.layout.items[r + 1]
-    if item and item.sep then
+    if item and not item.row then
       pcall(vim.api.nvim_buf_set_extmark, buf, NS, r, 0, {
-        id = id, line_hl_group = "DiffNvimSeparator",
-        virt_text = separator_virt(side, item.sep), virt_text_pos = "overlay",
+        id = id, line_hl_group = PANE[p].band_hl,
+        virt_text = PANE[p].band_virt(item), virt_text_pos = "overlay",
         priority = PRIORITY_LINE_BG,
       })
     end
   end
 end
 
-local function decorate_notes(side)
-  local buf = S.bufs[side]
+local function decorate_notes(p)
+  local buf = S.bufs[p]
   vim.api.nvim_buf_clear_namespace(buf, NS_NOTES, 0, -1)
   local notes = require("diff.annotations").notes_for(S.root, S.source.path)
   if #notes == 0 then return end
-  local row_of_line = {}
+  local row_of_line = { old = {}, new = {} }
   for i, item in ipairs(S.layout.items) do
-    local row = row_of_item(item)
-    if row and row[side] then row_of_line[row[side]] = i - 1 end
+    local old, new = lines_at(p, item)
+    if old then row_of_line.old[old] = i - 1 end
+    if new then row_of_line.new[new] = i - 1 end
   end
   for _, note in ipairs(notes) do
-    local r = (not note.side or note.side == side) and row_of_line[note.line_start]
+    -- Notes written before sides were recorded show wherever their line does.
+    local r
+    if note.side then
+      r = row_of_line[note.side] and row_of_line[note.side][note.line_start]
+    else
+      r = row_of_line.new[note.line_start] or row_of_line.old[note.line_start]
+    end
     if r then
       local preview = note.text:sub(1, 40) .. (#note.text > 40 and "…" or "")
       vim.api.nvim_buf_set_extmark(buf, NS_NOTES, r, 0, {
@@ -565,8 +770,8 @@ end
 --- of them as one surface (they share a cursor).
 function M.pane_wins()
   local out = {}
-  for _, side in ipairs(SIDES) do
-    if valid_win(S.panes[side]) then table.insert(out, S.panes[side]) end
+  for _, p in ipairs(PANES) do
+    if valid_win(S.panes[p]) then table.insert(out, S.panes[p]) end
   end
   return out
 end
@@ -656,8 +861,8 @@ local function align_wrapped()
   -- reads as a flash. Something else widening the gutter falls back to it.
   for _, side in ipairs(SIDES) do
     local textoff = vim.fn.getwininfo(wins[side])[1].textoff
-    if textoff ~= gutter_width() then
-      log.debug("%s pane gutter is %d columns, not %d; redrawing to settle it", side, textoff, gutter_width())
+    if textoff ~= PANE[side].gutter_width() then
+      log.debug("%s pane gutter is %d columns, not %d; redrawing to settle it", side, textoff, PANE[side].gutter_width())
       vim.cmd("redraw")
       break
     end
@@ -712,15 +917,19 @@ local function align_wrapped()
     S.source.path, padded, text_width.old, text_width.new, S.align_ms)
 end
 
---- Bind each visible pane to its syntax source.
+--- Bind each visible pane to the syntax sources of the sides it shows.
 local function bind_syntax()
-  for _, side in ipairs(SIDES) do
-    local buf, src = S.bufs[side], S.sources[side]
-    if S.panes[side] and src then
-      syntax.bind(buf, { src }, function(row0)
-        local row = row_of_item(item_at(row0 + 1))
-        local line = row and row[side]
-        return line and line - 1 or nil
+  for _, p in ipairs(PANES) do
+    local buf, sources = S.bufs[p], {}
+    if S.panes[p] then
+      for _, side in ipairs(PANE[p].sides) do
+        if S.sources[side] then table.insert(sources, S.sources[side]) end
+      end
+    end
+    if #sources > 0 then
+      syntax.bind(buf, sources, function(row0)
+        local side, line = side_line(p, item_at(row0 + 1))
+        if line and S.sources[side] then return line - 1, S.sources[side] end
       end)
     elseif valid_buf(buf) then
       syntax.unbind(buf)
@@ -736,8 +945,7 @@ local function resolve_anchor(anchor)
   if not anchor then return 1 end
   local items = S.layout.items
   if anchor.block then
-    local blk = S.model.blocks[anchor.block]
-    return blk and S.layout.index_of[blk.first] or 1
+    return S.layout.block_start[anchor.block] or 1
   end
   if anchor.sep_from then
     for i, item in ipairs(items) do
@@ -758,7 +966,8 @@ local function resolve_anchor(anchor)
     end
     target = best
   end
-  if S.layout.index_of[target] then return S.layout.index_of[target] end
+  local shown = engine.item_of(S.layout, target, anchor.side)
+  if shown then return shown end
   for i, item in ipairs(items) do
     if item.sep and target >= item.sep.first and target <= item.sep.last then return i end
   end
@@ -768,21 +977,24 @@ end
 --- Describe what is under the cursor of `win` so it can be found again after
 --- the layout changes, plus its screen offset from the top of the window.
 local function capture_anchor(win)
-  win = valid_win(win) and win or S.panes.new or S.panes.old
+  win = valid_win(win) and win or focus_pane()
   if not (valid_win(win) and S.layout) then return nil, nil end
-  local side = side_of_win(win) or "new"
+  local p = pane_of_win(win) or "new"
   local idx = vim.api.nvim_win_get_cursor(win)[1]
   local offset = idx - vim.fn.getwininfo(win)[1].topline
   local item = item_at(idx)
+  -- A hunk header hiding nothing stands for the first row under it.
+  if item and not item.row and not item.sep then item = item_at(idx + 1) end
   if not item then return nil, offset end
   if item.sep then
     local span = engine.separator_span(S.model, item.sep)
     return { side = "new", line = span.new[1] }, offset
   end
-  local row = S.model.rows[item.row]
-  if row[side] then return { side = side, line = row[side] }, offset end
-  local other = side == "old" and "new" or "old"
-  return { side = other, line = row[other] }, offset
+  local side, line = side_line(p, item)
+  if line then return { side = side, line = line }, offset end
+  -- A filler: the line beside it, in the other pane of the split.
+  local other = p == "old" and "new" or "old"
+  return { side = other, line = S.model.rows[item.row][other] }, offset
 end
 
 -- Scroll sync. 'scrollbind' cannot keep split panes locked: it follows only
@@ -905,50 +1117,50 @@ end
 local function render(anchor, offset)
   local elapsed = require("diff.log").timer()
   local m = S.model
-  S.layout = engine.layout(m, S.ctx, S.reveals)
+  local build = S.mode == "unified" and engine.unified_layout or engine.layout
+  S.layout = build(m, S.ctx, S.reveals)
 
-  local text = { old = {}, new = {} }
-  for i, item in ipairs(S.layout.items) do
-    local row = row_of_item(item)
-    for _, side in ipairs(SIDES) do
-      text[side][i] = row and row[side] and m[side].lines[row[side]] or ""
-    end
-  end
-
-  for _, side in ipairs(SIDES) do
-    if S.panes[side] then
-      pin_gutter(S.panes[side])
-      set_lines(S.bufs[side], text[side])
-      decorate(side)
-      decorate_notes(side)
-      apply_hover(side)
+  for _, p in ipairs(PANES) do
+    if S.panes[p] then
+      local text = {}
+      for i, item in ipairs(S.layout.items) do
+        local side, line = side_line(p, item)
+        text[i] = side and m[side].lines[line] or ""
+      end
+      pin_gutter(S.panes[p], p)
+      set_lines(S.bufs[p], text)
+      decorate(p)
+      decorate_notes(p)
+      apply_hover(p)
     end
   end
   bind_syntax()
   render_header()
   align_wrapped()
   place_cursor(resolve_anchor(anchor), offset)
-  log.debug("render %s: %d rows, %d items in %.1f ms", S.source.path, #m.rows, #S.layout.items, elapsed())
+  log.debug("render %s (%s): %d rows, %d items in %.1f ms", S.source.path, S.mode, #m.rows, #S.layout.items, elapsed())
 end
 
 -- Filler patterns and word-level highlights, drawn on demand for the rows
 -- that are on screen.
 vim.api.nvim_set_decoration_provider(NS_WORDS, {
   on_win = function(_, _, buf)
-    return S.layout ~= nil and side_of_buf(buf) ~= nil
+    return S.layout ~= nil and pane_of_buf(buf) ~= nil
   end,
   on_line = function(_, _, buf, r)
-    local side = side_of_buf(buf)
-    local item = side and item_at(r + 1)
+    local p = pane_of_buf(buf)
+    local item = p and item_at(r + 1)
     local row = row_of_item(item)
-    if row and not row[side] then
+    if not row then return end
+    local side = side_line(p, item)
+    if not side then
       pcall(vim.api.nvim_buf_set_extmark, buf, NS_WORDS, r, 0, {
         virt_text = { { FILLER, "DiffNvimFillerChar" } }, virt_text_pos = "overlay",
         priority = PRIORITY_LINE_BG, ephemeral = true,
       })
       return
     end
-    if not (row and row.change and row.old and row.new) then return end
+    if not (row.change and row.old and row.new) then return end
     local w = S.words[item.row]
     if not w then
       local ok, o, n = pcall(word_diff.compute, S.model.old.lines[row.old], S.model.new.lines[row.new])
@@ -969,16 +1181,10 @@ vim.api.nvim_set_decoration_provider(NS_WORDS, {
 --- %{} items are evaluated with the drawn window made current (only %!
 --- expressions get g:statusline_winid), so the current window is the pane.
 function M.statuscol()
-  local side = side_of_win(vim.api.nvim_get_current_win())
-  local blank = string.rep(" ", S.lnum_width)
-  if not side or not S.layout then return "%s%#LineNr#" .. blank .. " " end
+  local p = pane_of_win(vim.api.nvim_get_current_win())
+  if not p or not S.layout then return "%s%#LineNr#" .. string.rep(" ", S.lnum_width) .. " " end
   local item = item_at(vim.v.lnum)
-  if item and item.sep then
-    local hl = S.hover == vim.v.lnum and "DiffNvimSeparatorHover" or "DiffNvimSeparator"
-    return "%#" .. hl .. "#" .. string.rep(" ", SIGN_WIDTH) .. blank .. " "
-  end
-  local n = vim.v.virtnum == 0 and row_of_item(item) and row_of_item(item)[side]
-  return "%s%#LineNr#" .. string.format("%" .. S.lnum_width .. "s", n and tostring(n) or "") .. " "
+  return PANE[p].gutter(item, row_of_item(item), vim.v.lnum)
 end
 
 -- ---------------------------------------------------------------------------
@@ -986,14 +1192,33 @@ end
 -- ---------------------------------------------------------------------------
 
 local function destroy_sources()
+  for _, p in ipairs(PANES) do
+    if valid_buf(S.bufs[p]) then syntax.unbind(S.bufs[p]) end
+  end
   for _, side in ipairs(SIDES) do
-    if valid_buf(S.bufs[side]) then syntax.unbind(S.bufs[side]) end
     if S.sources[side] then S.sources[side]:destroy() end
   end
   S.sources = {}
 end
 
+local warned_bad_layout = false
+
+--- The layout diffs open in: the one toggled to this session, else the
+--- configured one.
+local function preferred_layout()
+  local choice = chosen_layout or config.get().layout
+  if choice ~= "split" and choice ~= "unified" then
+    if not warned_bad_layout then
+      log.warn("layout %s is neither \"split\" nor \"unified\"; using split", vim.inspect(choice))
+      warned_bad_layout = true
+    end
+    return "split"
+  end
+  return choice
+end
+
 local function mode_for(source)
+  if preferred_layout() == "unified" then return "unified" end
   if source.status == "added" or source.status == "untracked" then return "new" end
   if source.status == "deleted" then return "old" end
   return "split"
@@ -1008,19 +1233,15 @@ local function name_buffers()
   local qualifier = src.kind == "commit" and src.hash:sub(1, 7)
     or src.kind == "range" and src.base
     or (src.staged and "staged" or nil)
-  for _, side in ipairs(SIDES) do
-    local buf = S.bufs[side]
+  for _, p in ipairs(PANES) do
+    local buf = S.bufs[p]
     if valid_buf(buf) then
-      if not S.panes[side] then
+      if not S.panes[p] then
         -- Not on screen: park it under a name that cannot collide with the
         -- visible pane's, which would be rejected as a duplicate.
-        chrome.name(buf, "diff.nvim pane " .. side)
+        chrome.name(buf, "diff.nvim pane " .. p)
       else
-        local path = side == "old" and (src.old_path or src.path) or src.path
-        local parts = {
-          vim.fn.fnamemodify(path, ":t"),
-          side == "old" and "(before)" or "(after)",
-        }
+        local parts = { vim.fn.fnamemodify(PANE[p].path(src), ":t"), PANE[p].label }
         if qualifier then table.insert(parts, "@ " .. qualifier) end
         chrome.name(buf, table.concat(parts, " "))
       end
@@ -1028,23 +1249,50 @@ local function name_buffers()
   end
 end
 
-local function make_sources(old, new)
-  destroy_sources()
-  local src = S.source
-  if S.panes.new then S.sources.new = syntax.source(src.path, new.lines) end
-  if S.panes.old then
-    local ft = S.sources.new and S.sources.new.ft ~= "" and S.sources.new.ft or nil
-    S.sources.old = syntax.source(src.old_path or src.path, old.lines, ft)
+--- Sides shown by the panes on screen, as a set.
+local function shown_sides()
+  local out = {}
+  for p in pairs(S.panes) do
+    for _, side in ipairs(PANE[p].sides) do out[side] = true end
   end
+  return out
+end
+
+--- Match the syntax sources to the sides on screen: create the missing ones
+--- and drop those no pane shows any more, which a refresh would otherwise
+--- keep updating and reparsing.
+--- @return table[] the sources created, still to be parsed
+local function sync_sources(old, new)
+  local src, shown, created = S.source, shown_sides(), {}
   for _, side in ipairs(SIDES) do
-    local s = S.sources[side]
-    if s then
-      -- Separator headings need the parse; redraw them once it lands.
-      s:on_ready(function()
-        if S.sources[side] == s and S.layout and valid_buf(S.bufs[side]) then decorate_separators(side) end
-      end)
+    if not shown[side] and S.sources[side] then
+      log.debug("dropping the %s syntax source", side)
+      S.sources[side]:destroy()
+      S.sources[side] = nil
     end
   end
+  local function add(side, s)
+    S.sources[side] = s
+    table.insert(created, s)
+    -- Separator headings need the parse; redraw them once it lands.
+    s:on_ready(function()
+      if S.sources[side] ~= s or not S.layout then return end
+      for p in pairs(S.panes) do
+        if vim.tbl_contains(PANE[p].sides, side) and valid_buf(S.bufs[p]) then decorate_separators(p) end
+      end
+    end)
+  end
+  if shown.new and not S.sources.new then add("new", syntax.source(src.path, new.lines)) end
+  if shown.old and not S.sources.old then
+    local ft = S.sources.new and S.sources.new.ft ~= "" and S.sources.new.ft or nil
+    add("old", syntax.source(src.old_path or src.path, old.lines, ft))
+  end
+  return created
+end
+
+local function make_sources(old, new)
+  destroy_sources()
+  return sync_sources(old, new)
 end
 
 local function show_binary(root, source, navigator)
@@ -1075,21 +1323,19 @@ local function show(root, source, navigator, old, new)
   S.words   = {}
   S.lnum_width = #tostring(math.max(#old.lines, #new.lines, 1))
   name_buffers()
-  make_sources(old, new)
+  local sources = make_sources(old, new)
   render({ block = 1 })
   -- The parse runs in slices queued back to back, and nothing is drawn until
   -- the queue is empty: paint the finished view first, highlighted after.
   vim.cmd("redraw")
-  for _, side in ipairs(SIDES) do
-    if S.sources[side] then S.sources[side]:parse() end
-  end
+  for _, s in ipairs(sources) do s:parse() end
 
   if source.kind == "worktree" and not source.staged and source.status ~= "deleted" then
     start_watcher(root .. "/" .. source.path)
   else
     stop_watcher()
   end
-  pcall(vim.api.nvim_set_current_win, S.panes.new or S.panes.old)
+  pcall(vim.api.nvim_set_current_win, focus_pane())
   fire_view_changed()
 end
 
@@ -1155,7 +1401,7 @@ function M.refresh_content()
       return
     end
     local focus = vim.api.nvim_get_current_win()
-    local anchor, offset = capture_anchor(side_of_win(focus) and focus or nil)
+    local anchor, offset = capture_anchor(pane_of_win(focus) and focus or nil)
     -- Carry the cursor line and expanded ranges over to the new content.
     if anchor then
       anchor.line = engine.line_mapper(S.model[anchor.side].lines, (anchor.side == "old" and old or new).lines)(anchor.line)
@@ -1180,9 +1426,9 @@ end
 
 local function current_pane()
   local win = vim.api.nvim_get_current_win()
-  if side_of_win(win) then return win, side_of_win(win) end
-  local fallback = S.panes.new or S.panes.old
-  return fallback, side_of_win(fallback)
+  if pane_of_win(win) then return win, pane_of_win(win) end
+  local fallback = focus_pane()
+  return fallback, pane_of_win(fallback)
 end
 
 local function cursor_idx()
@@ -1229,9 +1475,8 @@ end
 function M.retarget(source)
   local cur = S.source
   if not cur then return end
-  local function single(src) return src.status == "added" or src.status == "deleted" end
   -- A change of pane layout or a binary file needs a fresh open.
-  if cur.binary or single(cur) ~= single(source) or cur.status ~= source.status and single(source) then
+  if cur.binary or mode_for(cur) ~= mode_for(source) then
     return M.open(S.root, source, S.navigator)
   end
   S.source = source
@@ -1251,11 +1496,11 @@ end
 
 --- The mouse pointer is over row `line` of window `win` (nil: elsewhere).
 function M.hover(win, line)
-  line = side_of_win(win) and line or nil
+  line = pane_of_win(win) and line or nil
   if line == S.hover then return end
   S.hover = line
-  for _, side in ipairs(SIDES) do
-    if S.panes[side] then apply_hover(side) end
+  for _, p in ipairs(PANES) do
+    if S.panes[p] then apply_hover(p) end
   end
 end
 
@@ -1263,7 +1508,7 @@ end
 --- expands one step, like `expand_context` on it.
 --- @return boolean handled
 function M.click(win, line)
-  if not (S.layout and side_of_win(win)) then return false end
+  if not (S.layout and pane_of_win(win)) then return false end
   local item = S.layout.items[line]
   if not (item and item.sep) then return false end
   vim.api.nvim_set_current_win(win)
@@ -1283,14 +1528,14 @@ function M.jump_hunk(dir)
   local current = block_at_cursor()
   local target
   if dir > 0 then
-    for _, blk in ipairs(S.model.blocks) do
-      local i = S.layout.index_of[blk.first]
+    for b, blk in ipairs(S.model.blocks) do
+      local i = S.layout.block_start[b]
       if i and i > idx and blk ~= current then target = i break end
     end
   else
     for b = #S.model.blocks, 1, -1 do
       local blk = S.model.blocks[b]
-      local i = S.layout.index_of[blk.first]
+      local i = S.layout.block_start[b]
       if i and i < idx and blk ~= current then target = i break end
     end
   end
@@ -1301,15 +1546,15 @@ function M.jump_hunk(dir)
   end
 end
 
---- Keys for a vertical move of `count` rows that skips filler rows on `side`.
-local function vertical_keys(side, dir)
+--- Keys for a vertical move of `count` rows that skips filler rows in pane `p`.
+local function vertical_keys(p, dir)
   if not S.layout then return dir > 0 and "j" or "k" end
   local items = S.layout.items
   local row = vim.api.nvim_win_get_cursor(0)[1]
   local start = row
   for _ = 1, vim.v.count1 do
     local nxt = row + dir
-    while items[nxt] and items[nxt].row and not S.model.rows[items[nxt].row][side] do
+    while items[nxt] and items[nxt].row and not side_line(p, items[nxt]) do
       nxt = nxt + dir
     end
     if not items[nxt] then break end
@@ -1366,9 +1611,11 @@ local function new_line_near(idx)
     local i = idx
     while items[i] do
       local item = items[i]
+      -- A hunk header names the hunk below it, whatever it hides above.
+      if item.hunk then return math.max(item.hunk.new_first, 1) end
       if item.sep then return engine.separator_span(S.model, item.sep).new[1] end
-      local row = S.model.rows[item.row]
-      if row.new then return row.new end
+      local row = row_of_item(item)
+      if row and row.new then return row.new end
       i = i + step
     end
   end
@@ -1397,7 +1644,9 @@ function M.goto_neighbor(dir)
   M.open(S.root, nxt, S.navigator)
 end
 
-local function leave_note(side)
+--- A note goes on the side of the first line it covers; a unified
+--- selection's lines on the other side are left out of its range.
+local function leave_note(p)
   return function()
     if not S.model then return end
     local first, last
@@ -1412,15 +1661,19 @@ local function leave_note(side)
     end
     if last < first then first, last = last, first end
 
-    local lines = {}
+    local side, lines = nil, {}
     for i = first, last do
-      local row = row_of_item(item_at(i))
-      if row and row[side] then table.insert(lines, row[side]) end
+      local item = item_at(i)
+      side = side or side_line(p, item)
+      local old, new = lines_at(p, item)
+      local line = side == "old" and old or side == "new" and new or nil
+      if line then table.insert(lines, line) end
     end
     if #lines == 0 then
       notify("cannot leave a note on a filler or separator line", vim.log.levels.WARN)
       return
     end
+    log.debug("note on %s %s lines %d-%d (rows %d-%d)", S.source.path, side, lines[1], lines[#lines], first, last)
     require("diff.annotations").prompt_note({
       file_path  = S.source.path,
       line_start = lines[1],
@@ -1434,16 +1687,54 @@ end
 --- Re-draw note markers after a note is added or removed.
 function M.refresh_annotations()
   if not S.layout then return end
-  for _, side in ipairs(SIDES) do
-    if S.panes[side] and valid_buf(S.bufs[side]) then decorate_notes(side) end
+  for _, p in ipairs(PANES) do
+    if S.panes[p] and valid_buf(S.bufs[p]) then decorate_notes(p) end
   end
+end
+
+--- Show diffs split or unified from now on, redrawing the open one in place
+--- with the cursor on the same line.
+--- @param layout "split"|"unified"
+function M.set_layout(layout)
+  chosen_layout = layout
+  log.info("layout set to %s", layout)
+  if not S.model then
+    -- Nothing to redraw (no diff, or a binary file): it applies to the next.
+    notify("diffs now open " .. layout)
+    return
+  end
+  local was_focused = pane_of_win(vim.api.nvim_get_current_win()) ~= nil
+  local anchor, offset = capture_anchor(current_pane())
+  if not ensure_layout(mode_for(S.source)) then
+    log.warn("no window for the %s layout", layout)
+    return
+  end
+  -- The row under the pointer is a row of the old layout.
+  S.hover = nil
+  name_buffers()
+  local created = sync_sources(S.model.old, S.model.new)
+  render(anchor, offset)
+  for _, s in ipairs(created) do s:parse() end
+  if was_focused then pcall(vim.api.nvim_set_current_win, focus_pane()) end
+end
+
+--- The layout the open diff is drawn in, or, with no diff drawn (none
+--- open, or a binary file), the one the next will open in.
+--- @return "split"|"unified"
+function M.layout()
+  if not S.model then return preferred_layout() end
+  return S.mode == "unified" and "unified" or "split"
+end
+
+function M.toggle_layout()
+  M.set_layout(M.layout() == "unified" and "split" or "unified")
 end
 
 -- ---------------------------------------------------------------------------
 -- Keymaps (installed once per pane buffer; they read the current state)
 -- ---------------------------------------------------------------------------
 
-setup_keymaps = function(buf, side)
+setup_keymaps = function(buf, p)
   local km = config.get().keymaps or {}
   local function map(mode, key, rhs, desc, extra)
     if not key or key == "" then return end
@@ -1451,7 +1742,7 @@ setup_keymaps = function(buf, side)
       { buffer = buf, nowait = true, silent = true, desc = desc .. " (diff)" }, extra or {}))
   end
 
-  map({ "n", "v" }, km.leave_note, leave_note(side), "Leave note")
+  map({ "n", "v" }, km.leave_note, leave_note(p), "Leave note")
   map("n", km.toggle_notes, function() require("diff.annotations").toggle_notes(S.root) end, "Toggle notes panel")
   map("n", km.next_hunk, function() M.jump_hunk(1) end, "Next hunk")
   map("n", km.prev_hunk, function() M.jump_hunk(-1) end, "Previous hunk")
@@ -1463,10 +1754,11 @@ setup_keymaps = function(buf, side)
   map("n", km.expand_context, function() M.expand("cursor") end, "Expand context here")
   map("n", km.expand_all, function() M.expand("all") end, "Show all context")
   map("n", km.collapse_all, function() M.expand("reset") end, "Collapse context")
+  map("n", km.toggle_layout, M.toggle_layout, "Toggle split / unified")
 
   -- Filler rows hold no content, so vertical moves step over them.
   for key, dir in pairs({ j = 1, k = -1, ["<Down>"] = 1, ["<Up>"] = -1 }) do
-    map("n", key, function() return vertical_keys(side, dir) end, "Move, skipping filler rows", { expr = true })
+    map("n", key, function() return vertical_keys(p, dir) end, "Move, skipping filler rows", { expr = true })
   end
 
   -- l expands a separator; anywhere else it is the ordinary motion (and

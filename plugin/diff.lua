@@ -27,6 +27,25 @@ vim.api.nvim_create_user_command("DiffNvimPreviewBranch", function()
   require("diff").preview_branch()
 end, { desc = "Preview another branch's commits without checking it out" })
 
+vim.api.nvim_create_user_command("DiffNvimLayout", function(opts)
+  local dv = require("diff.diff_view")
+  if opts.args == "" then
+    dv.toggle_layout()
+  elseif opts.args == "split" or opts.args == "unified" then
+    dv.set_layout(opts.args)
+  else
+    require("diff.log").scope("cmd").warn("DiffNvimLayout: unknown layout %q", opts.args)
+    vim.notify("diff.nvim: layout is split or unified", vim.log.levels.ERROR)
+  end
+end, {
+  nargs = "?",
+  -- A Lua completion is a customlist, which Neovim does not filter itself.
+  complete = function(lead)
+    return vim.tbl_filter(function(c) return vim.startswith(c, lead) end, { "split", "unified" })
+  end,
+  desc = "Show diffs split or unified (no argument toggles)",
+})
+
 vim.api.nvim_create_user_command("DiffNvimNotes", function()
   require("diff")._with_repo(function(info)
     require("diff.annotations").toggle_notes(info.root)

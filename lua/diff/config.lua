@@ -6,6 +6,7 @@ M.defaults = {
   notes_width = 40,          -- width of the notes right-side split
   context_lines = 3, -- lines of context around each hunk (nil = show all)
   wrap = true, -- soft-wrap long lines in the diff panes, keeping split panes row-aligned
+  layout = "split", -- "split" (side by side) or "unified" (one column); toggled with keymaps.toggle_layout
   notes_path = nil, -- nil = XDG default (ignored; kept for backward compat)
   auto_refresh = true,
   base_branch = nil, -- branch mode compares against this; nil = origin/HEAD, else main or master
@@ -33,6 +34,7 @@ M.defaults = {
     expand_context       = "zo",
     expand_all           = "zR",
     collapse_all         = "zM",
+    toggle_layout        = "<leader>gv",
     commit_tooltip       = "K",
   },
   highlights = {},

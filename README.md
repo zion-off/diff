@@ -16,6 +16,7 @@ A NeoVim plugin that replicates the Git source-control UX of VSCode's SCM sideba
 | **Branch changes** | Press `<leader>gB` to see everything the branch changed since it left `main`, like a pull request's "Files changed" tab |
 | **Branch preview** | Browse another branch's commits without checking it out — pick from a floating list with `<leader>gb` |
 | **Split Diff View** | Side-by-side old/new diff computed in-process with Neovim's built-in xdiff — no `git diff` subprocess |
+| **Unified Diff View** | GitHub-style single column: old and new line numbers, `-` / `+` markers, removed lines above added ones and `@@` hunk headers naming the enclosing function; toggle with `<leader>gv` |
 | **Accurate syntax highlighting** | Tree-sitter parses each whole file once (asynchronously on 0.11+), so collapsed context never breaks highlighting |
 | **Line-level colours** | Subtle red for removed, green for added — layered on top of syntax colours |
 | **Word-level highlights** | Darker red/green marks the exact tokens that changed within a line |
@@ -110,6 +111,11 @@ require("diff").setup({
   -- on 0.9 split panes stay unwrapped.
   wrap = true,
 
+  -- How diffs are drawn: "split" (default, side by side) or "unified" (one
+  -- column, as on GitHub). keymaps.toggle_layout switches for the rest of the
+  -- session. A split with no room for two panes is drawn unified.
+  layout = "split",
+
   -- Log verbosity: "trace" | "debug" | "info" | "warn" (default) | "error" | "off".
   -- The log lives at stdpath("log")/diff.nvim.log; open it with :DiffNvimLog.
   log_level = "warn",
@@ -137,6 +143,7 @@ require("diff").setup({
     expand_context       = "zo",
     expand_all           = "zR",
     collapse_all         = "zM",
+    toggle_layout        = "<leader>gv",
     commit_tooltip       = "K",
   },
 
@@ -166,6 +173,7 @@ require("diff").setup({
 | `<leader>N` | Toggle notes panel |
 | `<leader>gb` | Preview another branch (open branch picker) |
 | `<leader>gB` | Toggle branch mode (see [Branch Changes](#branch-changes)) |
+| `<leader>gv` | Toggle the diff view between split and unified |
 
 ### File Status Panel
 
@@ -210,11 +218,14 @@ Opened with `<leader>gb` (or `:DiffNvimPreviewBranch`).
 | `l` / `zo` | Reveal 10 more lines at each edge of the collapsed section under the cursor (`zo` uses the nearest one) |
 | `zR` | Show all context |
 | `zM` | Collapse back to the configured context |
+| `<leader>gv` | Toggle split / unified, keeping the cursor on its line |
 | `<leader>n` | Leave a note on current / visual selection |
 | `<leader>N` | Toggle notes panel |
 | `q` | Close diff view |
 
 `j` / `k` step over filler rows. The cursor starts on the first change, and stays on its line when the file changes on disk.
+
+In the unified view, clicking a `@@` header (or `l` / `zo` on it) reveals the lines hidden above it. A note left on a selection that covers both removed and added lines goes on the side of its first line.
 
 Hunk staging uses zero-context patches. A change directly next to a final line without a trailing newline cannot be expressed that way; the plugin says so instead of guessing, and the whole file can still be staged from the panel.
 
@@ -236,6 +247,7 @@ Hunk staging uses zero-context patches. A change directly next to a final line w
 | `:DiffNvimToggle` | Toggle sidebar |
 | `:DiffNvimPreviewBranch` | Preview another branch's commits without checking it out |
 | `:DiffNvimNotes` | Toggle notes panel |
+| `:DiffNvimLayout [split\|unified]` | Show diffs split or unified (no argument toggles) |
 | `:DiffNvimRefresh` | Re-fetch the panels |
 | `:DiffNvimLog` | Open the log file |
 
@@ -382,6 +394,11 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimRule` | Divider drawn as the status line of the plugin's windows |
 | `DiffNvimSeparator` | Collapsed-context marker |
 | `DiffNvimSeparatorHover` | Collapsed-context marker under the mouse pointer |
+| `DiffNvimHunkHeader` | `@@ -12,7 +12,9 @@` hunk header in the unified view |
+| `DiffNvimHunkHeaderDecl` | Function name after a hunk header |
+| `DiffNvimHunkHeaderHover` / `DiffNvimHunkHeaderDeclHover` | Hunk header under the mouse pointer (click to expand) |
+| `DiffNvimAddedNr` / `DiffNvimRemovedNr` | Line numbers of added / removed lines in the unified view |
+| `DiffNvimAddedMarker` / `DiffNvimRemovedMarker` | `+` / `-` marker in the unified view |
 | `DiffNvimModeBranch` | Branch name in the mode bar |
 | `DiffNvimModeTag` | `(preview)` / `(worktree)` tag and `▾` in the mode bar |
 | `DiffNvimModeClose` | `✕` that returns to your branch |

@@ -12,6 +12,10 @@ local DARK = {
   removed_bg      = "#2b1116",  -- very dark red    — line background
   added_word_bg   = "#1a4728",  -- medium dark green — word highlight
   removed_word_bg = "#4a1520",  -- medium dark red   — word highlight
+  added_nr_bg     = "#14371f",  -- between the two  — unified line numbers
+  removed_nr_bg   = "#3a131b",
+  hunk_bg         = "#121d2f",  -- GitHub's blue hunk header band
+  hunk_hover_bg   = "#18294a",
   filler_bg       = "#1e1e2e",
   filler_fg       = "#3a3a4a",
   separator_bg    = "#1a1a2a",
@@ -34,6 +38,10 @@ local LIGHT = {
   removed_bg      = "#f0dde0",  -- very pale red    — line background
   added_word_bg   = "#b5ddc7",  -- moderate green   — word highlight
   removed_word_bg = "#dbb5bc",  -- moderate red     — word highlight
+  added_nr_bg     = "#cae6d7",  -- between the two  — unified line numbers
+  removed_nr_bg   = "#e6c9ce",
+  hunk_bg         = "#ddf4ff",  -- GitHub's blue hunk header band
+  hunk_hover_bg   = "#c6e6ff",
   filler_bg       = "#f0f0f5",
   filler_fg       = "#c0c0cc",
   separator_bg    = "#e8e8f0",
@@ -90,7 +98,7 @@ local function surfaces(p)
       separator_bg = p.separator_bg, hover_bg = p.hover_bg,
       active_bg = p.hover_bg, tab_active_bg = p.tab_active_bg,
       accent = p.ref_head, title_fg = p.title_fg, dim_fg = p.separator_fg,
-      filler_fg = p.filler_fg,
+      filler_fg = p.filler_fg, hunk_bg = p.hunk_bg, hunk_hover_bg = p.hunk_hover_bg,
     }, nil
   end
   -- The colour picked-out text is drawn in: the prompt glyph and the matched
@@ -104,6 +112,9 @@ local function surfaces(p)
   local function select_tint(alpha, accent_alpha)
     return sel and blend(bg, sel, alpha) or blend(bg, accent, accent_alpha)
   end
+  -- Hunk headers are tinted towards the theme's informational blue, as
+  -- GitHub's are towards its own.
+  local info = hl_attr("DiagnosticInfo", "fg") or accent
   return {
     header_bg    = blend(bg, fg, 0.10),
     filler_bg    = blend(bg, fg, 0.04),
@@ -117,6 +128,8 @@ local function surfaces(p)
     dim_fg       = blend(fg, bg, 0.55),
     -- The filler hatch: just visible on its band, never louder than text.
     filler_fg    = blend(bg, fg, 0.16),
+    hunk_bg       = blend(bg, info, 0.12),
+    hunk_hover_bg = blend(bg, info, 0.22),
   }, bg
 end
 
@@ -153,6 +166,7 @@ local function build_defaults()
   local removed = first_fg("GitSignsDelete", "diffRemoved", "Removed", "DiagnosticError") or p.gutter_removed
   local renamed = first_fg("Special", "Identifier") or changed
   local text_fg = hl_attr("Normal", "fg")
+  local nr_fg = hl_attr("LineNr", "fg") or s.dim_fg
   return {
     -- Diff line backgrounds (PRIORITY_LINE_BG=50: below tree-sitter ~100)
     -- Explicit bg; fg=NONE so tree-sitter foreground colours show through.
@@ -174,6 +188,20 @@ local function build_defaults()
     DiffNvimGutterAdded     = { fg = p.gutter_added,   bold = true },
     DiffNvimGutterRemoved   = { fg = p.gutter_removed, bold = true },
     DiffNvimGutterChanged   = { fg = p.gutter_changed, bold = true },
+
+    -- Unified view gutter, after GitHub's: line numbers on a stronger tint
+    -- than the line, and the +/- marker on the line's own tint so the band
+    -- runs unbroken from the marker into the code
+    DiffNvimAddedNr         = { fg = nr_fg, bg = p.added_nr_bg },
+    DiffNvimRemovedNr       = { fg = nr_fg, bg = p.removed_nr_bg },
+    DiffNvimAddedMarker     = { fg = p.gutter_added,   bg = p.added_bg },
+    DiffNvimRemovedMarker   = { fg = p.gutter_removed, bg = p.removed_bg },
+    -- Unified view hunk headers ("@@ -12,7 +12,9 @@ function …") and the
+    -- declaration after them; hovered when they expand on a click
+    DiffNvimHunkHeader          = { fg = s.dim_fg, bg = s.hunk_bg },
+    DiffNvimHunkHeaderDecl      = { fg = s.title_fg, bg = s.hunk_bg },
+    DiffNvimHunkHeaderHover     = { fg = s.dim_fg, bg = s.hunk_hover_bg },
+    DiffNvimHunkHeaderDeclHover = { fg = s.title_fg, bg = s.hunk_hover_bg },
 
     -- Status badges
     DiffNvimStatusModified  = { fg = changed },
