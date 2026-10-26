@@ -289,6 +289,8 @@ local function build_defaults()
     DiffNvimPickerCount       = { fg = p.separator_fg },
     DiffNvimPickerRule        = { fg = p.separator_fg },
     DiffNvimPickerSelected    = { bg = s.active_bg },
+    DiffNvimPickerCurrent     = { bold = true },
+    DiffNvimPickerRemote      = { fg = s.dim_fg },
     DiffNvimPickerMatch       = { fg = s.accent, bold = true },
 
     -- Full-width filename header bar spanning both diff panes. A raised

@@ -125,16 +125,12 @@ local function render()
       local line   = marker .. b.name .. flag
       table.insert(lines, line)
 
+      -- Names are list text, not ref badges: tinting each one made every row
+      -- look selected. Only the current branch stands out, and remote
+      -- branches step back.
       local row = #lines - 1
-      local hl
-      if b.is_head then
-        hl = "DiffNvimRefHead"
-      elseif b.is_remote then
-        hl = "DiffNvimRefRemote"
-      else
-        hl = "DiffNvimRefBranch"
-      end
-      table.insert(hl_queue, { row, hl, #marker, #marker + #b.name })
+      local hl = b.is_head and "DiffNvimPickerCurrent" or (b.is_remote and "DiffNvimPickerRemote" or nil)
+      if hl then table.insert(hl_queue, { row, hl, #marker, #marker + #b.name }) end
       if flag ~= "" then
         table.insert(hl_queue, { row, "DiffNvimCommitMeta", #marker + #b.name, -1 })
       end
