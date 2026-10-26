@@ -35,6 +35,39 @@ local function check_invariants(model)
   H.eq(next_new - 1, #b, "not every new line was emitted")
 end
 
+--- A unified layout written out as `git diff` writes its hunks: headers
+--- without the function name, then " ", "-" or "+" and the line.
+local function unified_text(m, ctx)
+  local out = {}
+  for _, it in ipairs(engine.unified_layout(m, ctx, {}).items) do
+    if it.hunk then
+      table.insert(out, engine.hunk_header(it.hunk))
+    elseif it.row then
+      local row = m.rows[it.row]
+      local mark = it.side == "old" and "-" or it.side == "new" and "+" or " "
+      local line = it.side == "old" and m.old.lines[row.old] or m.new.lines[row.new]
+      table.insert(out, mark .. line)
+    end
+  end
+  return out
+end
+
+--- What `git diff` prints for the same change, from the first hunk on.
+local function git_hunks(a, b, ctx)
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir, "p")
+  H.write(dir, "a", H.text(a))
+  H.write(dir, "b", H.text(b))
+  local out = vim.fn.systemlist({ "git", "-C", dir, "diff", "--no-index", "--histogram",
+    "--indent-heuristic", "-U" .. ctx, "--", "a", "b" })
+  local hunks, started = {}, false
+  for _, l in ipairs(out) do
+    started = started or l:sub(1, 2) == "@@"
+    if started then table.insert(hunks, (l:gsub("^(@@ .- @@).*$", "%1"))) end
+  end
+  return hunks
+end
+
 return {
   { "insertion, deletion and empty-side conventions", function()
     local m = compute({ "a", "b", "c" }, { "a", "X", "b", "c" })
@@ -197,5 +230,56 @@ return {
     local ms = (vim.uv.hrtime() - t) / 1e6
     check_invariants(m)
     H.ok(ms < 50, string.format("compute+layout took %.1f ms", ms))
+    t = vim.uv.hrtime()
+    engine.unified_layout(m, 3, {})
+    engine.unified_layout(m, nil, {})
+    ms = (vim.uv.hrtime() - t) / 1e6
+    H.ok(ms < 20, string.format("unified layouts took %.1f ms", ms))
+  end },
+
+  { "unified layout reads as git diff: hunk ranges, removed lines before added", function()
+    local a = H.lines(60)
+    local b = H.lines(60, { [10] = "line ten", [40] = "line forty" })
+    table.insert(b, 11, "inserted")
+    table.remove(b, 26)
+    table.insert(b, 53, "late")
+    for _, ctx in ipairs({ 3, 0, 5 }) do
+      H.eq(unified_text(compute(a, b), ctx), git_hunks(a, b, ctx), "context " .. ctx)
+    end
+    -- Unlike git, a single line between two hunks is shown rather than
+    -- headed: the header would take the same row.
+    local joined = H.lines(20, { [5] = "five", [13] = "thirteen" })
+    local text = unified_text(compute(H.lines(20), joined), 3)
+    H.eq(text[1], "@@ -1,16 +1,16 @@")
+    H.ok(vim.tbl_contains(text, " line 9"), "the line between the hunks is shown")
+    -- A whole file added, or deleted, has an empty side numbered 0.
+    H.eq(unified_text(compute({}, { "x", "y" }), 3), { "@@ -0,0 +1,2 @@", "+x", "+y" })
+    H.eq(unified_text(compute({ "x" }, {}), 3), { "@@ -1 +0,0 @@", "-x" })
+  end },
+
+  { "unified layout: separators, block starts and the item of each side", function()
+    local a = H.lines(30)
+    local b = H.lines(30, { [15] = "changed" })
+    local m = compute(a, b)
+    local lay = engine.unified_layout(m, 3, {})
+    local items = lay.items
+    H.ok(items[1].sep and items[1].hunk, "the rows hidden above the hunk sit in its header")
+    H.ok(items[#items].sep and not items[#items].hunk, "rows hidden at the end have no header")
+    local first = lay.block_start[1]
+    H.eq({ items[first].side, items[first + 1].side }, { "old", "new" })
+    H.eq(engine.item_of(lay, items[first].row, "old"), first)
+    H.eq(engine.item_of(lay, items[first].row, "new"), first + 1)
+    local ctx_row = items[2].row
+    H.eq(engine.item_of(lay, ctx_row, "old"), 2, "context shows both sides on one item")
+    H.eq(engine.item_of(lay, ctx_row, "new"), 2)
+    H.eq(engine.item_of(lay, 1, "new"), nil, "hidden rows have no item")
+
+    -- Fully expanded, one header covers the whole file; with no change, none.
+    local all = engine.unified_layout(m, nil, {}).items
+    H.eq(engine.hunk_header(all[1].hunk), "@@ -1,30 +1,30 @@")
+    H.eq(#all, 32)
+    local same = engine.unified_layout(compute(a, a), 3, {}).items
+    H.eq(#same, 30)
+    H.ok(not same[1].hunk)
   end },
 }

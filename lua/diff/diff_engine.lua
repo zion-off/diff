@@ -146,54 +146,182 @@ local function row_of_new(model, line)
   return model._row_of_new[line]
 end
 
+local SIDES = { "old", "new" }
+
+--- Which rows show with `ctx` lines of context around each block and the
+--- `reveals` expanded; nil when every row does.
+--- @return table<integer, boolean>|nil
+local function visibility(model, ctx, reveals)
+  if ctx == nil or #model.blocks == 0 then return nil end
+  local rows, visible = model.rows, {}
+  for _, blk in ipairs(model.blocks) do
+    for r = math.max(1, blk.first - ctx), math.min(#rows, blk.last + ctx) do
+      visible[r] = true
+    end
+  end
+  for _, range in ipairs(reveals or {}) do
+    for line = range[1], range[2] do
+      local r = row_of_new(model, line)
+      if r then visible[r] = true end
+    end
+  end
+  return visible
+end
+
+--- The last row of the hidden run starting at `i`, and whether it is long
+--- enough to collapse behind a separator.
+local function hidden_run(visible, n, i)
+  local j = i
+  while j < n and not visible[j + 1] do j = j + 1 end
+  return j, j - i + 1 >= MIN_COLLAPSE
+end
+
 --- @param model   table
 --- @param ctx     integer|nil  context lines around each block; nil shows all
 --- @param reveals table[]      expanded ranges, { first, last } in new-side lines
---- @return table layout  { items = { {row = i} | {sep = {first, last}} }, index_of = { [row] = item } }
+--- @return table layout  { items = { {row = i} | {sep = {first, last}} },
+---   index_of = { [row] = item }, block_start = { [block] = item } }
 function M.layout(model, ctx, reveals)
-  local rows = model.rows
-  local visible
-
-  if ctx == nil or #model.blocks == 0 then
-    visible = setmetatable({}, { __index = function() return true end })
-  else
-    visible = {}
-    for _, blk in ipairs(model.blocks) do
-      for r = math.max(1, blk.first - ctx), math.min(#rows, blk.last + ctx) do
-        visible[r] = true
-      end
-    end
-    for _, range in ipairs(reveals or {}) do
-      for line = range[1], range[2] do
-        local r = row_of_new(model, line)
-        if r then visible[r] = true end
-      end
-    end
-  end
-
+  local n, visible = #model.rows, visibility(model, ctx, reveals)
   local items, index_of = {}, {}
   local i = 1
-  while i <= #rows do
-    if visible[i] then
-      table.insert(items, { row = i })
+  while i <= n do
+    if not visible or visible[i] then
+      items[#items + 1] = { row = i }
       index_of[i] = #items
       i = i + 1
     else
-      local j = i
-      while j + 1 <= #rows and not visible[j + 1] do j = j + 1 end
-      if j - i + 1 < MIN_COLLAPSE then
+      local j, collapse = hidden_run(visible, n, i)
+      if collapse then
+        items[#items + 1] = { sep = { first = i, last = j } }
+      else
         for r = i, j do
-          table.insert(items, { row = r })
+          items[#items + 1] = { row = r }
           index_of[r] = #items
         end
-      else
-        table.insert(items, { sep = { first = i, last = j } })
       end
       i = j + 1
     end
   end
+  local block_start = {}
+  for b, blk in ipairs(model.blocks) do block_start[b] = index_of[blk.first] end
+  return { items = items, index_of = index_of, block_start = block_start }
+end
 
-  return { items = items, index_of = index_of }
+--- The range a hunk covers on one side, from the lines its items show.
+--- A side with no lines starts at the line before the gap, as in git.
+local function hunk_side(model, first_row, lo, hi, side)
+  if lo then return lo, hi - lo + 1 end
+  for r = first_row - 1, 1, -1 do
+    local line = model.rows[r][side]
+    if line then return line, 0 end
+  end
+  return 0, 0
+end
+
+--- Layout of a unified diff: a single column in which each block shows its
+--- removed lines and then its added lines, as `git diff` and GitHub do.
+---   { row = i, side = "old"|"new" }  a changed line, on that side alone
+---   { row = i }                      a context line (both sides)
+---   { hunk = {...}, sep = {...}? }   heads each visible run with its
+---                                    @@ range, carrying the separator that
+---                                    hides the rows above it, if any
+---   { sep = {...} }                  rows hidden after the last run
+--- index_of maps a context row to its item, side_index[side][row] a changed
+--- row to the item showing that side of it (see item_of). Built in one walk
+--- over the rows, measuring each hunk as its rows are laid out.
+--- @return table layout
+function M.unified_layout(model, ctx, reveals)
+  local rows, n = model.rows, #model.rows
+  local visible = visibility(model, ctx, reveals)
+  local items, count, index_of, block_start = {}, 0, {}, {}
+  local side_index = { old = {}, new = {} }
+  local headed = #model.blocks > 0
+
+  -- The hunk being laid out, and the lines its rows show so far.
+  local hunk, first_row, lo_old, hi_old, lo_new, hi_new
+  local function close_hunk()
+    if hunk and first_row then
+      hunk.old_first, hunk.old_count = hunk_side(model, first_row, lo_old, hi_old, "old")
+      hunk.new_first, hunk.new_count = hunk_side(model, first_row, lo_new, hi_new, "new")
+    end
+    hunk, first_row, lo_old, hi_old, lo_new, hi_new = nil, nil, nil, nil, nil, nil
+  end
+  local function open_hunk(head)
+    close_hunk()
+    hunk = {}
+    head.hunk = hunk
+  end
+
+  local function push(item)
+    count = count + 1
+    items[count] = item
+    return count
+  end
+
+  local function add(r, side)
+    if count == 0 and headed then open_hunk(items[push({})]) end
+    local row = rows[r]
+    first_row = first_row or r
+    local old = side ~= "new" and row.old
+    local new = side ~= "old" and row.new
+    if old then lo_old, hi_old = lo_old or old, old end
+    if new then lo_new, hi_new = lo_new or new, new end
+    return push({ row = r, side = side })
+  end
+
+  local i = 1
+  while i <= n do
+    local row = rows[i]
+    if visible and not visible[i] then
+      local j, collapse = hidden_run(visible, n, i)
+      if collapse then
+        local sep = items[push({ sep = { first = i, last = j } })]
+        if j < n then open_hunk(sep) else close_hunk() end
+      else
+        for r = i, j do index_of[r] = add(r, nil) end
+      end
+      i = j + 1
+    elseif row.change then
+      -- A block's rows are all shown: removed lines first, then added.
+      local j = i
+      while rows[j] and rows[j].block == row.block do j = j + 1 end
+      local first
+      for _, side in ipairs(SIDES) do
+        local by_side = side_index[side]
+        for r = i, j - 1 do
+          if rows[r][side] then
+            by_side[r] = add(r, side)
+            first = first or by_side[r]
+          end
+        end
+      end
+      block_start[row.block] = first
+      i = j
+    else
+      index_of[i] = add(i, nil)
+      i = i + 1
+    end
+  end
+  close_hunk()
+
+  return { items = items, index_of = index_of, block_start = block_start, side_index = side_index }
+end
+
+--- Item of `layout` showing `side` of model row `row`, if it is visible.
+function M.item_of(layout, row, side)
+  local by_side = layout.side_index and layout.side_index[side]
+  return by_side and by_side[row] or layout.index_of[row]
+end
+
+--- A hunk's range as git writes it: "@@ -12,7 +12,9 @@", a count of one
+--- left out.
+--- @return string
+function M.hunk_header(hunk)
+  local function range(first, count)
+    return count == 1 and tostring(first) or string.format("%d,%d", first, count)
+  end
+  return string.format("@@ -%s +%s @@", range(hunk.old_first, hunk.old_count), range(hunk.new_first, hunk.new_count))
 end
 
 --- Describe the hidden span of a separator in both files' coordinates.
