@@ -162,7 +162,7 @@ local function build(width)
   end
   -- The mode bar names the previewed branch; its working tree is not here.
   if S.preview then
-    note("Working-tree changes are shown for your own branch; see Branch changes.")
+    note("Working-tree changes are shown for your own branch; the branch's own are under Since.")
     return lines, hl, map
   end
   render_section("staged", "Staged Changes")

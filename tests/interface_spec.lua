@@ -652,7 +652,8 @@ return {
       H.eq(stl(win), " ", tostring(kind) .. " fillchars: " .. vim.wo[win].fillchars)
     end
     laststatus(2)
-    H.eq(stl(sidebar._bar_win), "─", "a rule again under per-window status lines")
+    H.eq(stl(sidebar._file_win), "─", "a rule again under per-window status lines")
+    H.eq(stl(sidebar._bar_win), " ", "the mode bar is set off by space, not a rule")
     open_file("a%.lua", "src/a.lua")
   end },
 
@@ -710,7 +711,7 @@ return {
     -- Items are tinted under the pointer, like rows.
     local real_getmousepos = vim.fn.getmousepos
     vim.fn.getmousepos = function()
-      return { winid = sidebar._bar_win, line = 2, winrow = 2, wincol = col_of(2, "Branch changes"),
+      return { winid = sidebar._bar_win, line = 2, winrow = 2, wincol = col_of(2, "Since"),
         screenrow = vim.fn.screenpos(sidebar._bar_win, 2, 1).row }
     end
     press("<MouseMove>")
@@ -759,19 +760,19 @@ return {
     vim.fn.getmousepos, sidebar.pick_preview_branch = real_getmousepos, pick
     vim.api.nvim_set_current_win(sidebar._file_win)
 
-    H.ok(mb.click(2, col_of(2, "Branch changes")))
+    H.ok(mb.click(2, col_of(2, "Since")))
     H.wait(function() return pcall(panel_row, "Branch Changes vs") end, "branch mode")
-    H.eq(mb.click(2, col_of(2, "Branch changes")), false, "the active mode is not a button")
+    H.eq(mb.click(2, col_of(2, "Since")), false, "the selected half is not a button")
     H.ok(mb.click(2, col_of(2, "Changes")))
     H.wait(function() return pcall(panel_row, "Staged") end, "changes mode")
     H.eq(sidebar._branch_mode, false)
 
     sidebar.set_preview_branch("topic")
-    H.wait(function() return bar()[1]:match("⎇ topic %(preview%)") and bar()[1]:match("✕") end,
+    H.wait(function() return bar()[1]:match("⎇ topic ⌃⌄  Preview") and bar()[1]:match("Done") end,
       "preview shown: " .. vim.inspect(bar()))
-    H.ok(mb.click(1, col_of(1, "✕")))
+    H.ok(mb.click(1, col_of(1, "Done")))
     H.wait(function() return sidebar._preview_branch == nil and bar()[1]:match(vim.pesc(base)) end, "home again")
-    H.ok(not bar()[1]:match("✕"))
+    H.ok(not bar()[1]:match("Done"))
 
     -- The bar never scrolls its rows away, and a narrow sidebar shortens a label.
     vim.api.nvim_set_current_win(sidebar._bar_win)
@@ -779,9 +780,9 @@ return {
     press("<C-e>")
     H.eq(vim.fn.line("w0"), 1)
     local width = vim.api.nvim_win_get_width(sidebar._bar_win)
-    vim.api.nvim_win_set_width(sidebar._bar_win, 24)
+    vim.api.nvim_win_set_width(sidebar._bar_win, 20)
     mb.render()
-    H.ok(bar()[2]:match("Branch %s*$"), vim.inspect(bar()))
+    H.ok(bar()[2]:match("Branch"), "a base name that does not fit falls back: " .. vim.inspect(bar()))
     vim.api.nvim_win_set_width(sidebar._bar_win, width)
     mb.render()
     -- <CR> on the active mode does nothing.

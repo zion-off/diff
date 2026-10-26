@@ -259,20 +259,20 @@ Hunk staging uses zero-context patches. A change directly next to a final line w
 A two-row strip at the top of the sidebar keeps the interface's modes in view:
 
 ```
-⎇ feature/x ▾                     ↑2 ↓1
-  Changes   Branch changes
+ ⎇ feature/x ⌃⌄                   ↑2 ↓1
+      Changes          Since main
 ```
 
-- The first row is the branch the panels show, as one header cell: click
+- The first row is the branch the panels show, as a pop-up button: click
   anywhere on it (or press `<CR>` on it) to open the branch picker, the same as
   `<leader>gb`. On the right it shows how far the branch is ahead of (`↑`) and
   behind (`↓`) its upstream, read with the working-tree status at no extra
-  cost; in branch mode it shows the base the branch is compared with
-  (`→ main`) instead. While another branch is previewed, or another worktree
-  shown, it is tagged `(preview)` / `(worktree)` and a `✕` takes you back to
-  your own branch.
-- The second row switches the file panel between your working-tree changes and
-  the branch's changes, the same as `<leader>gB`. The active one is underlined.
+  cost. Previewing another branch, or showing another worktree, tints the row
+  and names the mode (`Preview` / `Worktree`); **Done** takes you back to your
+  own branch.
+- The second row is a segmented control switching the file panel between your
+  working-tree changes and everything the branch changed since its base
+  (**Since main**), the same as `<leader>gB`. The selected half is raised.
 
 ## Branch Changes
 
@@ -400,11 +400,13 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimAddedNr` / `DiffNvimRemovedNr` | Line numbers of added / removed lines |
 | `DiffNvimAddedMarker` / `DiffNvimRemovedMarker` | `+` / `-` marker before added / removed lines |
 | `DiffNvimModeBranch` | Branch name in the mode bar |
-| `DiffNvimModeCellHover` | The mode bar's branch row under the mouse pointer |
-| `DiffNvimModeTag` | `(preview)` / `(worktree)` tag and `▾` in the mode bar |
-| `DiffNvimModeClose` | `✕` that returns to your branch |
-| `DiffNvimModeTab` | Inactive mode in the mode bar |
-| `DiffNvimModeTabActive` | Active mode in the mode bar |
+| `DiffNvimModeCell` / `DiffNvimModeCellHover` | The branch row of the mode bar (under the mouse pointer) |
+| `DiffNvimModeTag` | `⌃⌄` and the upstream counts in the branch row |
+| `DiffNvimModeAway` / `DiffNvimModeAwayBranch` / `DiffNvimModeAwayTag` | The branch row while previewing another branch or worktree |
+| `DiffNvimModeDone` | **Done**, which returns to your branch |
+| `DiffNvimModeAwayHover` | The branch row or **Done** under the mouse pointer while previewing |
+| `DiffNvimModeTrack` / `DiffNvimModeTrackHover` | Unselected half of the mode control (under the mouse pointer) |
+| `DiffNvimModeSegment` | Selected half of the mode control |
 
 ---
 

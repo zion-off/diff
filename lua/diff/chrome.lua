@@ -39,6 +39,9 @@ local function esc(s) return (tostring(s or ""):gsub("%%", "%%%%")) end
 --- 'statusline' of "" means "fall back to the global one", which is the
 --- default ruler.
 M.RULE = "%#DiffNvimRule#"
+-- A status line drawn as empty space, for a window whose edge is better
+-- marked by spacing than by a line.
+M.SPACER = "%#Normal#"
 
 --- A panel heading for 'winbar': the title in capitals on a raised band,
 --- with an optional dimmer segment pushed to the far end. Percent signs in
@@ -55,7 +58,8 @@ end
 
 --- Dress a plugin window: hide the end-of-buffer tildes, head it with
 --- `opts.label` / `opts.right` when given, and draw its status line as a
---- rule. `opts.fillchars` adds further entries.
+--- rule, or as blank space with `opts.spacer`. `opts.fillchars` adds further
+--- entries.
 ---
 --- Headings go in 'winbar', never the status line. A status line is a
 --- footer: a title there sits under the window it names, directly above the
@@ -68,22 +72,28 @@ end
 --- window's fill characters, and a rule set here would draw dashes through
 --- the gaps of the reader's status line.
 --- @param win integer
---- @param opts table|nil { label?, right?, fillchars? }
+---
+--- A spacer under the global bar blanks the separator line below the window
+--- instead ('horiz' is the window's own; the status line glyphs are not).
+--- @param opts table|nil { label?, right?, fillchars?, spacer? }
 function M.dress(win, opts)
   opts = opts or {}
   local global_bar = vim.o.laststatus == 3
   local fc = { eob = " " }
+  local rule = opts.spacer and " " or "─"
   if global_bar then
     local global = vim.go.fillchars
     fc.stl = global:match("stl:([^,]+)") or " "
     fc.stlnc = global:match("stlnc:([^,]+)") or " "
+    if opts.spacer then fc.horiz = " " end
   else
-    fc.stl, fc.stlnc = "─", "─"
+    fc.stl, fc.stlnc = rule, rule
   end
   fc = vim.tbl_extend("force", fc, opts.fillchars or {})
   pcall(vim.api.nvim_set_option_value, "fillchars", M.fillchars(win, fc), { win = win })
   pcall(vim.api.nvim_set_option_value, "winbar", M.winbar(opts.label, opts.right), { win = win })
-  pcall(vim.api.nvim_set_option_value, "statusline", global_bar and "" or M.RULE, { win = win })
+  local statusline = global_bar and "" or (opts.spacer and M.SPACER or M.RULE)
+  pcall(vim.api.nvim_set_option_value, "statusline", statusline, { win = win })
 end
 
 --- Tag `buf` as the plugin's own, so windows can be recognised without

@@ -589,7 +589,7 @@ end
 --- Only the commit panel carries a heading. The mode bar heads the sidebar
 --- and already names the file panel's mode right above it; the file panel's
 --- own sections are titled inside it.
-local function set_panel_win_opts(win, heading)
+local function set_panel_win_opts(win, heading, spacer)
   for k, v in pairs({
     number = false, relativenumber = false, wrap = true, linebreak = false,
     signcolumn = "no", foldcolumn = "0", statuscolumn = "", cursorline = false,
@@ -597,7 +597,7 @@ local function set_panel_win_opts(win, heading)
   }) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
-  chrome.dress(win, { label = heading, right = heading and preview_label() or nil })
+  chrome.dress(win, { label = heading, right = heading and preview_label() or nil, spacer = spacer })
 end
 
 --- Only the window with focus marks a row. Two panels both drawing a cursor
@@ -635,8 +635,9 @@ M.sync_cursorline = sync_cursorline
 --- Re-apply the panel chrome, so a branch preview is named — and stops
 --- being named when it ends — without rebuilding the panels.
 function M.redress_panels()
-  for _, panel in ipairs({ { M._file_win }, { M._commit_win, "Commits" }, { M._bar_win } }) do
-    if is_valid_win(panel[1]) then set_panel_win_opts(panel[1], panel[2]) end
+  -- The mode bar is set off from the panels by space, not a rule.
+  for _, panel in ipairs({ { M._file_win }, { M._commit_win, "Commits" }, { M._bar_win, nil, true } }) do
+    if is_valid_win(panel[1]) then set_panel_win_opts(panel[1], panel[2], panel[3]) end
   end
 end
 
@@ -687,7 +688,7 @@ local function create_mode_bar()
   M._bar_win = vim.api.nvim_get_current_win()
   M._bar_buf = make_panel_buf("mode-bar", "diff.nvim")
   vim.api.nvim_win_set_buf(M._bar_win, M._bar_buf)
-  set_panel_win_opts(M._bar_win)
+  set_panel_win_opts(M._bar_win, nil, true)
   -- Unwrapped, so a narrow sidebar clips its rows instead of wrapping them
   -- out of its two-row window.
   for k, v in pairs({ winfixheight = true, cursorline = false, wrap = false }) do
@@ -1041,6 +1042,10 @@ local function go_home()
   end
 end
 
+-- The base branch, looked up once per repository so the mode bar can name
+-- it ("Since main") before branch mode is ever entered.
+local base_lookup = { root = nil, name = nil }
+
 local function render_mode_bar()
   -- The upstream comes with the working tree's status, which is read only
   -- while the panels show your own branch's changes.
@@ -1053,7 +1058,9 @@ local function render_mode_bar()
     branch_mode = M._branch_mode,
     ahead = upstream and upstream.ahead,
     behind = upstream and upstream.behind,
-    base = M._branch_mode and file_panel.branch_base() or nil,
+    -- What the branch view compares with: the base in use once branch mode
+    -- has loaded, else the configured or looked-up one.
+    base = (M._branch_mode and file_panel.branch_base()) or config.get().base_branch or base_lookup.name,
     actions = {
       pick_branch  = function() M.pick_preview_branch() end,
       go_home      = go_home,
@@ -1061,6 +1068,20 @@ local function render_mode_bar()
       show_branch  = function() if not M._branch_mode then M.toggle_branch_mode() end end,
     },
   })
+end
+
+--- Look the base branch up for the mode bar's label, once per repository
+--- (one process), unless base_branch names it.
+local function lookup_base()
+  local root = M._repo_root
+  if config.get().base_branch or not root or base_lookup.root == root then return end
+  base_lookup.root, base_lookup.name = root, nil
+  git.get_default_base(root, function(base)
+    if base_lookup.root ~= root then return end
+    base_lookup.name = base and base.name or nil
+    log.debug("base branch for the mode bar: %s", tostring(base_lookup.name))
+    if M.is_open() then render_mode_bar() end
+  end)
 end
 
 --- The checked-out branch, read from the work tree's HEAD file (no git
@@ -1103,6 +1124,7 @@ function M.refresh(opts)
   end
   if scope == "all" then
     M._head_name = read_head_name()
+    lookup_base()
     render_mode_bar()
     M.redress_panels()
   end

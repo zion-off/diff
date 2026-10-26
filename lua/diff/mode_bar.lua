@@ -1,16 +1,18 @@
 --- diff.nvim — mode bar: a two-row strip above the sidebar panels that keeps
---- the interface's modes in view and in reach of the mouse.
+--- the interface's modes in view and in reach of the mouse, after the way a
+--- macOS sidebar heads itself.
 ---
----   ⎇ feature/x ▾                  ↑2 ↓1     branch shown: one header cell,
----                                             opening the picker anywhere
----     Changes   Branch changes                file panel mode, the active
----     ‾‾‾‾‾‾‾                                 one underlined
+---    ⎇ feature/x ⌃⌄                  ↑2 ↓1   the branch shown: a pop-up
+---                                            button across the whole row
+---         Changes          Since main        the file panel's view: a
+---                                            segmented control
 ---
---- The cell names how the branch stands against its upstream, or in branch
---- mode the base it is compared with (→ main). While another branch is
---- previewed (or another worktree shown) it is tagged, and a ✕ beside it
---- returns to the home branch. Text in both rows starts in the column the
---- panels' text does.
+--- The branch row says how far the branch is ahead of and behind its
+--- upstream. Previewing another branch (or showing another worktree) is a
+--- mode of its own: the row is tinted, names the mode, and ends in a Done
+--- button that returns to the home branch. The control's halves split the
+--- width evenly, so each is a large target, and the selected one is raised.
+--- Both rows run edge to edge, their text inset a column inside them.
 ---
 --- The bar knows nothing about git or the panels: render() is given what to
 --- show, and each clickable segment carries the action the sidebar supplied.
@@ -69,6 +71,14 @@ local function row_from(parts, row)
   return line, hl, segs
 end
 
+--- `text` centred in `cells` columns, shortened to leave a column either side.
+local function centred(text, cells)
+  text = util.trunc(text, math.max(1, cells - 2))
+  local free = math.max(0, cells - vim.api.nvim_strwidth(text))
+  local left = math.floor(free / 2)
+  return string.rep(" ", left) .. text .. string.rep(" ", free - left)
+end
+
 --- "↑2 ↓1": commits ahead of and behind the upstream; "" when level or unknown.
 local function sync_text(ahead, behind)
   local parts = {}
@@ -80,53 +90,60 @@ end
 local function build(width, info)
   local a = info.actions
   local w = vim.api.nvim_strwidth
+  local away = info.away
 
-  -- Row 1: the branch as one header cell, a ✕ beside it when away from home.
-  local close = info.away and " ✕ " or ""
-  local cell_w = width - w(close)
-  local tag = info.preview and " (preview)" or (info.worktree and " (worktree)" or "")
-  local base = info.base and (" → " .. info.base) or ""
-  local sync = sync_text(info.ahead, info.behind)
+  -- Row 1: the branch as a pop-up button across the row (⌃⌄ is how macOS
+  -- marks picking one of many). Away from home the row is tinted, names the
+  -- mode, and ends in Done; at home it shows the upstream counts. Its text
+  -- keeps the column of margin the control below has on either side.
+  local hl = away
+    and { cell = "DiffNvimModeAway", name = "DiffNvimModeAwayBranch", dim = "DiffNvimModeAwayTag",
+      hover = "DiffNvimModeAwayHover" }
+    or { cell = "DiffNvimModeCell", name = "DiffNvimModeBranch", dim = "DiffNvimModeTag",
+      hover = "DiffNvimModeCellHover" }
+  local done = away and " Done " or ""
+  local mode = info.preview and "  Preview" or (info.worktree and "  Worktree" or "")
+  local sync = away and "" or sync_text(info.ahead, info.behind)
   local right = sync ~= "" and (sync .. " ") or ""
-  local function room() return cell_w - w("⎇ " .. tag .. " ▾" .. base .. right) - 1 end
-  -- A narrow sidebar gives up the base, then the sync counts, before the
-  -- name shrinks below a few characters.
-  if room() < 4 then base = "" end
+  local cell_w = width - w(done) - 1
+  local function room() return cell_w - w("⎇  ⌃⌄" .. mode .. right) - 1 end
+  -- A narrow sidebar gives up the counts, then the mode's name, before the
+  -- branch name shrinks below a few characters.
   if room() < 4 then right = "" end
+  if room() < 4 then mode = "" end
   local name = util.trunc(info.branch or "…", math.max(4, room()))
-  local left = "⎇ " .. name .. tag .. " ▾" .. base
-  local pad = math.max(1, cell_w - w(left) - w(right))
+  local left = "⎇ " .. name .. " ⌃⌄" .. mode
   local pick = a.pick_branch
   local parts1 = {
-    -- The list hover is measured from Normal and vanishes on the cell's
-    -- raised surface, so the cell has a tint of its own.
-    { "⎇ " .. name, "DiffNvimModeBranch", pick, nil, "DiffNvimModeCellHover" },
-    { tag, "DiffNvimModeTag", pick },
-    { " ▾", "DiffNvimModeTag", pick },
-    { base, "DiffNvimModeTag", pick },
-    { string.rep(" ", pad), "DiffNvimModeCell", pick },
-    { right, "DiffNvimModeTag", pick },
+    { " ", hl.cell, pick, nil, hl.hover },
+    { "⎇ " .. name, hl.name, pick },
+    { " ⌃⌄" .. mode, hl.dim, pick },
+    { string.rep(" ", math.max(1, cell_w - w(left) - w(right))), hl.cell, pick },
+    { right, hl.dim, pick },
   }
-  if info.away then table.insert(parts1, { close, "DiffNvimModeClose", a.go_home, nil, "DiffNvimModeCellHover" }) end
+  if away then table.insert(parts1, { done, "DiffNvimModeDone", a.go_home, nil, hl.hover }) end
   local l1, hl1, seg1 = row_from(parts1, 0)
 
-  -- Row 2: the file panel modes, a click target each with a column of
-  -- padding either side. The active one does nothing when clicked (an inert
-  -- segment, so <CR> on it does not fall through to the other).
-  local parts2 = { { " " } }
-  local function tab(label, active, action)
-    action = active and function() end or action
-    vim.list_extend(parts2, {
-      { " ", nil, action, active },
-      { label, active and "DiffNvimModeTabActive" or "DiffNvimModeTab", action, active },
-      { " ", nil, action, active },
-    })
+  -- Row 2: the file panel's view, as a segmented control running edge to
+  -- edge like the row above: a track split into equal halves, the selected
+  -- one raised. The selected half does nothing when clicked (inert, so <CR>
+  -- on it does not fall through to the other), so only the other one reacts
+  -- to the pointer.
+  local left_w = math.floor(width / 2)
+  local right_w = width - left_w
+  local since = info.base and ("Since " .. info.base) or "Branch"
+  if w(since) > right_w - 2 then since = "Branch" end
+  local noop = function() end
+  local function half(label, cells, selected, action)
+    return {
+      centred(label, cells), selected and "DiffNvimModeSegment" or "DiffNvimModeTrack",
+      selected and noop or action, selected or nil, not selected and "DiffNvimModeTrackHover" or nil,
+    }
   end
-  -- " Changes " and " Branch changes " with their gaps take 28 columns.
-  tab("Changes", not info.branch_mode, a.show_changes)
-  table.insert(parts2, { " " })
-  tab(width >= 28 and "Branch changes" or "Branch", info.branch_mode, a.show_branch)
-  local l2, hl2, seg2 = row_from(parts2, 1)
+  local l2, hl2, seg2 = row_from({
+    half("Changes", left_w, not info.branch_mode, a.show_changes),
+    half(since, right_w, info.branch_mode, a.show_branch),
+  }, 1)
 
   return { l1, l2 }, vim.list_extend(hl1, hl2), vim.list_extend(seg1, seg2)
 end

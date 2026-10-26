@@ -94,7 +94,9 @@ local function surfaces(p)
     return {
       header_bg = p.filler_bg, filler_bg = p.filler_bg,
       hover_bg = p.hover_bg,
-      active_bg = p.hover_bg, cell_hover_bg = p.hover_bg,
+      active_bg = p.hover_bg,
+      track_bg = p.filler_bg, segment_bg = p.hover_bg, away_bg = p.hover_bg,
+      cell_hover_bg = p.hover_bg, track_hover_bg = p.hover_bg, away_hover_bg = p.hover_bg,
       accent = p.ref_head, title_fg = p.title_fg, dim_fg = p.separator_fg,
       filler_fg = p.filler_fg, hunk_bg = p.hunk_bg, hunk_hover_bg = p.hunk_hover_bg,
     }, nil
@@ -124,9 +126,18 @@ local function surfaces(p)
     dim_fg       = blend(fg, bg, 0.55),
     -- The filler hatch: just visible on its band, never louder than text.
     filler_fg    = blend(bg, fg, 0.16),
-    -- The mode bar's branch cell under the pointer: a step from its own
-    -- raised surface, where the list hover would not show.
-    cell_hover_bg = blend(bg, fg, 0.17),
+    -- The mode bar's segmented control: a track a step above Normal, its
+    -- selected half raised to the header's level; and the tint of a mode
+    -- you are visiting (another branch, another worktree).
+    track_bg     = blend(bg, fg, 0.045),
+    segment_bg   = blend(bg, fg, 0.10),
+    away_bg      = blend(bg, accent, 0.20),
+    -- Their hover tints, each a step from its own surface: the list hover
+    -- is measured from Normal and vanishes on a raised one. The track's
+    -- stops short of the selected half, so hovering never reads as chosen.
+    cell_hover_bg  = blend(bg, fg, 0.17),
+    track_hover_bg = blend(bg, fg, 0.075),
+    away_hover_bg  = blend(bg, accent, 0.32),
     hunk_bg       = blend(bg, info, 0.12),
     hunk_hover_bg = blend(bg, info, 0.22),
   }, bg
@@ -256,19 +267,25 @@ local function build_defaults()
     DiffNvimEdgeHover       = { fg = p.edge_hover, bold = true },
     DiffNvimEdgeHoverStatus = { bg = p.edge_hover },
     -- Mode bar above the sidebar
-    -- The branch row is a header cell on the raised surface the diff view's
-    -- file header uses, the two reading as one bar across the top; the
-    -- branch name is what leads in it.
+    -- The branch row is a pop-up button on the raised surface the diff
+    -- view's file header uses, the two reading as one bar across the top;
+    -- the branch name is what leads in it.
     DiffNvimModeCell        = { bg = s.header_bg },
     DiffNvimModeBranch      = { fg = text_fg, bg = s.header_bg, bold = true },
     DiffNvimModeTag         = { fg = s.dim_fg, bg = s.header_bg },
     DiffNvimModeCellHover   = { bg = s.cell_hover_bg },
-    DiffNvimModeClose       = { fg = removed, bg = s.header_bg },
-    -- The modes under it: plain text, the active one underlined in the
-    -- accent colour, a step below the cell rather than a block competing
-    -- with it
-    DiffNvimModeTab         = { fg = s.dim_fg },
-    DiffNvimModeTabActive   = { fg = text_fg, underline = true, sp = s.accent },
+    -- Visiting another branch or worktree tints the row, ending in Done
+    DiffNvimModeAway        = { bg = s.away_bg },
+    DiffNvimModeAwayBranch  = { fg = text_fg, bg = s.away_bg, bold = true },
+    DiffNvimModeAwayTag     = { fg = s.title_fg, bg = s.away_bg },
+    DiffNvimModeDone        = { fg = s.accent, bg = s.away_bg, bold = true },
+    DiffNvimModeAwayHover   = { bg = s.away_hover_bg },
+    -- The segmented control under it: the track and its unselected half,
+    -- tinted under the pointer as every clickable item is, and the raised
+    -- selected half
+    DiffNvimModeTrack       = { fg = s.dim_fg, bg = s.track_bg },
+    DiffNvimModeTrackHover  = { fg = text_fg, bg = s.track_hover_bg },
+    DiffNvimModeSegment     = { fg = text_fg, bg = s.segment_bg },
     -- Mode bar item under the cursor, while the bar has keyboard focus
     DiffNvimModeCursor      = { link = "CursorLine" },
 
@@ -351,6 +368,9 @@ local RENAMED = {
   DiffNvimSeparatorDeclHover = "DiffNvimHunkHeaderDeclHover",
   DiffNvimGutterAdded        = "DiffNvimAddedMarker",
   DiffNvimGutterRemoved      = "DiffNvimRemovedMarker",
+  DiffNvimModeClose          = "DiffNvimModeDone",
+  DiffNvimModeTab            = "DiffNvimModeTrack",
+  DiffNvimModeTabActive      = "DiffNvimModeSegment",
 }
 local REMOVED = { DiffNvimGutterChanged = true }
 
