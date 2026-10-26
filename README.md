@@ -386,7 +386,7 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimEdgeHoverStatus` | Status line between panels under the mouse pointer (when it is the draggable edge) |
 | `DiffNvimHeader` | Filename bar above the diff |
 | `DiffNvimHeaderName` | File name in the header |
-| `DiffNvimHeaderLabel` | Directory, notes and "Before" / "After" in the header |
+| `DiffNvimHeaderLabel` | Directory and notes in the header |
 | `DiffNvimPanelTitle` | Panel heading ("COMMITS", "NOTES") |
 | `DiffNvimPanelTitleDim` | Secondary text at the end of a panel heading |
 | `DiffNvimRule` | Divider drawn as the status line of the plugin's windows |

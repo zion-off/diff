@@ -66,7 +66,6 @@ local function fresh_state()
     sep_marks = {},             -- pane -> { [row] = extmark id } of separators and hunk headers
     hover = nil,                -- layout row under the mouse pointer
     wrap_widths = {},           -- side -> pane width the wrap padding was computed for
-    header_widths = nil,        -- window widths the header was laid out for
     synced_view = nil,          -- view both split panes were last left showing
     watcher = nil, watch_timer = nil,
     -- open_gen counts opens, refresh_gen counts in-place refreshes. They are
@@ -667,43 +666,6 @@ local function decorate_notes(p)
   end
 end
 
---- In a split the header spans both panes, and colour is all that tells
---- them apart, so each pane is named at the far end of its part of the
---- header. A label that would run into the file name is left out.
-local function label_panes(text, spans)
-  if not (valid_win(S.panes.old) and valid_win(S.panes.new) and valid_win(S.header_win)) then
-    return text
-  end
-  -- nvim_strwidth, not strdisplaywidth: the latter measures as if the text
-  -- sat in the current window, 'linebreak' included, and overstates any
-  -- line wider than that window — which a pane-wide header is.
-  local width = vim.api.nvim_strwidth(text)
-  local edges = {
-    { "Before", vim.api.nvim_win_get_width(S.panes.old) - 1 },
-    { "After",  vim.api.nvim_win_get_width(S.header_win) - 1 },
-  }
-  for _, edge in ipairs(edges) do
-    local label, start = edge[1], edge[2] - #edge[1]
-    if start >= width + 2 then
-      text = text .. string.rep(" ", start - width)
-      table.insert(spans, { #text, #text + #label, "DiffNvimHeaderLabel" })
-      text = text .. label
-      width = start + #label
-    end
-  end
-  return text
-end
-
---- Widths the header was last laid out for, so a resize relays it only when
---- the panes under it changed.
-local function header_key()
-  local parts = {}
-  for _, win in ipairs({ S.header_win, S.panes.old, S.panes.new }) do
-    table.insert(parts, valid_win(win) and vim.api.nvim_win_get_width(win) or 0)
-  end
-  return table.concat(parts, ":")
-end
-
 --- The header as { text, hl } parts: the path with its directory receding
 --- behind the file name, what the comparison is against, any notes about
 --- the file, and its diffstat.
@@ -749,8 +711,6 @@ local function render_header()
     if part[2] then table.insert(spans, { #text, #text + #part[1], part[2] }) end
     text = text .. part[1]
   end
-  text = label_panes(text, spans)
-  S.header_widths = header_key()
   set_lines(S.header_buf, { text })
   vim.api.nvim_buf_clear_namespace(S.header_buf, NS_HEAD, 0, -1)
   for _, span in ipairs(spans) do
@@ -1834,10 +1794,6 @@ local align_timer
 vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
   group = aug,
   callback = function()
-    if S.source and valid_win(S.header_win) and header_key() ~= S.header_widths then
-      log.trace("pane widths %s; relaying the header", header_key())
-      render_header()
-    end
     if not (S.layout and next(S.wrap_widths)) then return end
     for side, width in pairs(S.wrap_widths) do
       local win = S.panes[side]

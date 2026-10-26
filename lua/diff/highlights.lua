@@ -293,8 +293,7 @@ local function build_defaults()
     DiffNvimHeader          = { bg = s.header_bg },
     -- The file name in it, the one bold thing; its directory and notes recede
     DiffNvimHeaderName      = { fg = text_fg, bg = s.header_bg, bold = true },
-    -- "Before" / "After" over each pane of a split, the directory and notes,
-    -- on the header's surface
+    -- The directory and notes, on the header's surface
     DiffNvimHeaderLabel     = { fg = s.dim_fg, bg = s.header_bg },
   }
 end
