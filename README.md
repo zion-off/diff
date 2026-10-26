@@ -391,7 +391,7 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimHeader` | Filename bar above the diff |
 | `DiffNvimHeaderName` | File name in the header |
 | `DiffNvimHeaderLabel` | Directory and notes in the header |
-| `DiffNvimPanelTitle` | Panel heading ("COMMITS", "NOTES") |
+| `DiffNvimPanelTitle` | Panel heading ("Commits", "Notes") |
 | `DiffNvimPanelTitleDim` | Secondary text at the end of a panel heading |
 | `DiffNvimRule` | Divider drawn as the status line of the plugin's windows |
 | `DiffNvimHunkHeader` | `@@ -12,7 +12,9 @@` hunk header |

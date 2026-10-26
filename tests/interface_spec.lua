@@ -662,7 +662,7 @@ return {
     for _, ls in ipairs({ 2, 3 }) do
       vim.o.laststatus = ls
       vim.api.nvim_exec_autocmds("OptionSet", { pattern = "laststatus" })
-      H.ok(vim.wo[sidebar._commit_win].winbar:match("COMMITS"), vim.wo[sidebar._commit_win].winbar)
+      H.ok(vim.wo[sidebar._commit_win].winbar:match("  Commits%%="), vim.wo[sidebar._commit_win].winbar)
       H.eq(vim.wo[sidebar._file_win].winbar, "", "the mode bar already names the file panel")
       for _, win in ipairs({ sidebar._file_win, sidebar._commit_win, pane("old"), pane("new") }) do
         H.eq(vim.wo[win].statusline, ls == 3 and "" or "%#DiffNvimRule#", "status line of " .. win)

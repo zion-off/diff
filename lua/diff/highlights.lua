@@ -292,10 +292,11 @@ local function build_defaults()
     -- The status line of the plugin's own windows is a divider, not a
     -- heading, so it recedes to the separator colour.
     DiffNvimRule            = { fg = p.separator_fg, bg = s.header_bg },
-    -- Panel headings ('winbar'): the same raised surface as the diff header,
+    -- Panel headings ('winbar'), set like the panels' section headings: on
+    -- Normal's own background (the raised band is for what can be clicked),
     -- the title a step quieter than text so it organises without competing.
-    DiffNvimPanelTitle      = { fg = s.title_fg, bg = s.header_bg, bold = true },
-    DiffNvimPanelTitleDim   = { fg = s.dim_fg, bg = s.header_bg },
+    DiffNvimPanelTitle      = { fg = s.title_fg, bg = bg, bold = true },
+    DiffNvimPanelTitleDim   = { fg = s.dim_fg, bg = bg },
 
     -- Branch picker. The prompt row is the only place typing goes, so it is
     -- lit as an input: glyph in the accent colour, a block caret, a dimmed

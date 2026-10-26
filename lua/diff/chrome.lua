@@ -43,13 +43,16 @@ M.RULE = "%#DiffNvimRule#"
 -- marked by spacing than by a line.
 M.SPACER = "%#Normal#"
 
---- A panel heading for 'winbar': the title in capitals on a raised band,
---- with an optional dimmer segment pushed to the far end. Percent signs in
---- the caller's text are escaped so a branch or path containing one cannot
---- be read as a status-line item. Empty when there is nothing to say.
+--- A panel heading for 'winbar', set like the panels' own section headings
+--- ("Staged Changes"): the title as written, its text in the column theirs
+--- starts in, with an optional dimmer segment pushed to the far end. The
+--- raised band is the mode bar's, for what can be clicked, so a heading
+--- stays off it. Percent signs in the caller's text are escaped so a branch
+--- or path containing one cannot be read as a status-line item. Empty when
+--- there is nothing to say.
 function M.winbar(label, right)
   if (label == nil or label == "") and (right == nil or right == "") then return "" end
-  local line = "%#DiffNvimPanelTitle# " .. esc((label or ""):upper()) .. "%="
+  local line = "%#DiffNvimPanelTitle#  " .. esc(label or "") .. "%="
   if right and right ~= "" then
     line = line .. "%#DiffNvimPanelTitleDim#" .. esc(right) .. " "
   end
