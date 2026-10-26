@@ -81,6 +81,18 @@ return {
     src:destroy()
   end },
 
+  { "regex syntax falls back to the first source with a filetype", function()
+    local empty = syntax.source("script", {}, "")
+    local conf = syntax.source("script", { "# a comment", "key = value" }, "conf")
+    H.ok(not conf:has_parser(), "conf has no tree-sitter parser")
+    local pane = vim.api.nvim_create_buf(false, true)
+    syntax.bind(pane, { empty, conf }, function(row) return row, conf end)
+    H.eq(vim.bo[pane].syntax, "conf")
+    syntax.unbind(pane)
+    empty:destroy()
+    conf:destroy()
+  end },
+
   { "panes are drawn through the decoration provider", function()
     local src = syntax.source("x.lua", LUA)
     src:parse()
@@ -88,7 +100,7 @@ return {
     local pane = vim.api.nvim_create_buf(false, true)
     -- The pane shows only source rows 6–7 behind a separator row.
     vim.api.nvim_buf_set_lines(pane, 0, -1, false, { "", LUA[6], LUA[7] })
-    syntax.bind(pane, src, function(row) return ({ [1] = 5, [2] = 6 })[row] end)
+    syntax.bind(pane, { src }, function(row) return ({ [1] = 5, [2] = 6 })[row] end)
     vim.api.nvim_win_set_buf(0, pane)
     vim.cmd("redraw")
     H.ok(src.cache[5] and src.cache[6], "visible rows should have been queried")

@@ -717,7 +717,7 @@ local function bind_syntax()
   for _, side in ipairs(SIDES) do
     local buf, src = S.bufs[side], S.sources[side]
     if S.panes[side] and src then
-      syntax.bind(buf, src, function(row0)
+      syntax.bind(buf, { src }, function(row0)
         local row = row_of_item(item_at(row0 + 1))
         local line = row and row[side]
         return line and line - 1 or nil

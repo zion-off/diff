@@ -17,7 +17,7 @@ local TS_PRIORITY = (vim.hl or vim.highlight).priorities.treesitter
 
 local SKIP_CAPTURE = { spell = true, nospell = true, conceal = true }
 
--- bindings[pane_buf] = { source = Source, line_of = fun(row0): integer|nil }
+-- bindings[pane_buf] = { sources = Source[], line_of = fun(row0): integer|nil, Source|nil }
 local bindings = {}
 
 local query_cache = {}
@@ -160,7 +160,7 @@ function Source:parse()
     self.ready = true
     log.debug("parsed %s (%d lines) in %.1f ms", self.lang, #self.lines, elapsed())
     for pane_buf, b in pairs(bindings) do
-      if b.source == self then redraw(pane_buf) end
+      if vim.tbl_contains(b.sources, self) then redraw(pane_buf) end
     end
     for _, fn in ipairs(self.listeners) do pcall(fn) end
   end
@@ -259,12 +259,22 @@ end
 -- Pane bindings
 -- ---------------------------------------------------------------------------
 
---- Highlight `pane_buf` from `source`. `line_of(row0)` returns the 0-based
---- source row shown on pane row `row0`, or nil for fillers and separators.
---- Without a tree-sitter parser, falls back to regex syntax on the pane.
-function M.bind(pane_buf, source, line_of)
-  bindings[pane_buf] = { source = source, line_of = line_of }
-  local regex = (not source:has_parser()) and source.ft or ""
+--- Highlight `pane_buf` from `sources`, the whole sides of the diff it
+--- shows. `line_of(row0)` returns the 0-based source row shown on pane row
+--- `row0` and the source it is from (the first when omitted), or nil for
+--- fillers and separators. Without a tree-sitter parser, falls back to
+--- regex syntax on the pane, in the filetype of the first source that has
+--- one (an empty side of the diff may not).
+--- @param sources table[]  Sources; a unified pane shows lines of both sides
+function M.bind(pane_buf, sources, line_of)
+  bindings[pane_buf] = { sources = sources, line_of = line_of }
+  local regex = ""
+  for _, src in ipairs(sources) do
+    if src.ft ~= "" then
+      regex = (not src:has_parser()) and src.ft or ""
+      break
+    end
+  end
   if vim.bo[pane_buf].syntax ~= regex then
     pcall(function() vim.bo[pane_buf].syntax = regex end)
   end
@@ -280,14 +290,19 @@ end
 vim.api.nvim_set_decoration_provider(NS, {
   on_win = function(_, _, buf)
     local b = bindings[buf]
-    return b ~= nil and b.source.ready
+    if not b then return false end
+    for _, src in ipairs(b.sources) do
+      if src.ready then return true end
+    end
+    return false
   end,
   on_line = function(_, _, buf, row)
     local b = bindings[buf]
     if not b then return end
-    local src_row = b.line_of(row)
-    if not src_row then return end
-    for _, c in ipairs(b.source:captures(src_row)) do
+    local src_row, src = b.line_of(row)
+    src = src or b.sources[1]
+    if not (src_row and src.ready) then return end
+    for _, c in ipairs(src:captures(src_row)) do
       pcall(vim.api.nvim_buf_set_extmark, buf, NS, row, c[1], {
         end_row = row, end_col = c[2], hl_group = c[3], priority = c[4], ephemeral = true,
       })
