@@ -109,8 +109,8 @@ end
 -- Mouse
 -- ---------------------------------------------------------------------------
 
--- A click on a panel row activates it (and one on a diff view's "hidden lines"
--- row expands it), even when another window had focus.
+-- A click on a panel row activates it (and one on a diff view's hunk header
+-- reveals the lines it hides), even when another window had focus.
 -- vim.on_key observes the click without mapping <LeftMouse>, so Neovim's own
 -- handling (focus, cursor placement, separator drag-resize) and any user
 -- mapping of the key are untouched. The row is read after Neovim has

@@ -27,8 +27,10 @@ M.LINEMATCH_MAX = 80
 -- should open promptly rather than pair every one of them perfectly.
 M.LINEMATCH_BUDGET = 40000
 
--- Separators hiding fewer rows than this are not worth collapsing; showing
--- the line costs the same space as the "N hidden lines" marker.
+-- Hidden runs shorter than this are shown rather than collapsed: between two
+-- runs, showing them takes no more rows than the hunk header that would hide
+-- them. A run at the top always collapses, since a header is drawn there
+-- either way.
 local MIN_COLLAPSE = 2
 
 local function join(lines)
@@ -168,46 +170,6 @@ local function visibility(model, ctx, reveals)
   return visible
 end
 
---- The last row of the hidden run starting at `i`, and whether it is long
---- enough to collapse behind a separator.
-local function hidden_run(visible, n, i)
-  local j = i
-  while j < n and not visible[j + 1] do j = j + 1 end
-  return j, j - i + 1 >= MIN_COLLAPSE
-end
-
---- @param model   table
---- @param ctx     integer|nil  context lines around each block; nil shows all
---- @param reveals table[]      expanded ranges, { first, last } in new-side lines
---- @return table layout  { items = { {row = i} | {sep = {first, last}} },
----   index_of = { [row] = item }, block_start = { [block] = item } }
-function M.layout(model, ctx, reveals)
-  local n, visible = #model.rows, visibility(model, ctx, reveals)
-  local items, index_of = {}, {}
-  local i = 1
-  while i <= n do
-    if not visible or visible[i] then
-      items[#items + 1] = { row = i }
-      index_of[i] = #items
-      i = i + 1
-    else
-      local j, collapse = hidden_run(visible, n, i)
-      if collapse then
-        items[#items + 1] = { sep = { first = i, last = j } }
-      else
-        for r = i, j do
-          items[#items + 1] = { row = r }
-          index_of[r] = #items
-        end
-      end
-      i = j + 1
-    end
-  end
-  local block_start = {}
-  for b, blk in ipairs(model.blocks) do block_start[b] = index_of[blk.first] end
-  return { items = items, index_of = index_of, block_start = block_start }
-end
-
 --- The range a hunk covers on one side, from the lines its items show.
 --- A side with no lines starts at the line before the gap, as in git.
 local function hunk_side(model, first_row, lo, hi, side)
@@ -219,36 +181,30 @@ local function hunk_side(model, first_row, lo, hi, side)
   return 0, 0
 end
 
---- Layout of a unified diff: a single column in which each block shows its
---- removed lines and then its added lines, as `git diff` and GitHub do.
----   { row = i, side = "old"|"new" }  a changed line, on that side alone
----   { row = i }                      a context line (both sides)
----   { hunk = {...}, sep = {...}? }   heads each visible run with its
----                                    @@ range, carrying the separator that
----                                    hides the rows above it, if any
----   { sep = {...} }                  rows hidden after the last run
---- index_of maps a context row to its item, side_index[side][row] a changed
---- row to the item showing that side of it (see item_of). Built in one walk
---- over the rows, measuring each hunk as its rows are laid out.
---- @return table layout
-function M.unified_layout(model, ctx, reveals)
-  local rows, n = model.rows, #model.rows
-  local visible = visibility(model, ctx, reveals)
-  local items, count, index_of, block_start = {}, 0, {}, {}
-  local side_index = { old = {}, new = {} }
-  local headed = #model.blocks > 0
-
-  -- The hunk being laid out, and the lines its rows show so far.
+--- Collects the items of a layout, as GitHub draws a diff in either view:
+--- every visible run of rows is headed by its @@ range, measured from the
+--- lines its rows show as they are added.
+---   { row = i, side = nil|"old"|"new" }  a row, showing that side alone
+---                                        when one is named
+---   { hunk = {...}, sep = {...}? }       heads a run, carrying the separator
+---                                        that hides the rows above it, if any
+---   { sep = {...} }                      rows hidden after the last run
+--- A diff without changes has no runs to head.
+local function layout_builder(model)
+  local rows, headed = model.rows, #model.blocks > 0
+  local items, count = {}, 0
   local hunk, first_row, lo_old, hi_old, lo_new, hi_new
-  local function close_hunk()
+
+  local function close()
     if hunk and first_row then
       hunk.old_first, hunk.old_count = hunk_side(model, first_row, lo_old, hi_old, "old")
       hunk.new_first, hunk.new_count = hunk_side(model, first_row, lo_new, hi_new, "new")
     end
     hunk, first_row, lo_old, hi_old, lo_new, hi_new = nil, nil, nil, nil, nil, nil
   end
-  local function open_hunk(head)
-    close_hunk()
+
+  local function open(head)
+    close()
     hunk = {}
     head.hunk = hunk
   end
@@ -259,8 +215,11 @@ function M.unified_layout(model, ctx, reveals)
     return count
   end
 
-  local function add(r, side)
-    if count == 0 and headed then open_hunk(items[push({})]) end
+  local build = {}
+
+  --- Add model row `r`, showing `side` of it alone when given; returns its index.
+  function build.row(r, side)
+    if count == 0 and headed then open(items[push({})]) end
     local row = rows[r]
     first_row = first_row or r
     local old = side ~= "new" and row.old
@@ -270,18 +229,75 @@ function M.unified_layout(model, ctx, reveals)
     return push({ row = r, side = side })
   end
 
+  --- Hide rows `first`..`last` behind a separator, heading the run below it.
+  function build.sep(first, last)
+    local sep = items[push({ sep = { first = first, last = last } })]
+    if last < #rows then open(sep) else close() end
+  end
+
+  --- Lay out the run of rows `visible` hides from `first` on: behind a
+  --- separator, or shown when that takes no more rows. Records shown rows in
+  --- `index_of`; returns the row after the run.
+  function build.hidden(visible, first, index_of)
+    local last = first
+    while last < #rows and not visible[last + 1] do last = last + 1 end
+    if first == 1 or last - first + 1 >= MIN_COLLAPSE then
+      build.sep(first, last)
+    else
+      for r = first, last do index_of[r] = build.row(r) end
+    end
+    return last + 1
+  end
+
+  function build.finish()
+    close()
+    return items
+  end
+
+  return build
+end
+
+--- Layout of a split diff: each row pairs an old line with its new one.
+--- Items as layout_builder describes, rows without a side.
+--- @param model   table
+--- @param ctx     integer|nil  context lines around each block; nil shows all
+--- @param reveals table[]      expanded ranges, { first, last } in new-side lines
+--- @return table layout  { items, index_of = { [row] = item }, block_start = { [block] = item } }
+function M.layout(model, ctx, reveals)
+  local n, visible = #model.rows, visibility(model, ctx, reveals)
+  local build, index_of = layout_builder(model), {}
+  local i = 1
+  while i <= n do
+    if not visible or visible[i] then
+      index_of[i] = build.row(i)
+      i = i + 1
+    else
+      i = build.hidden(visible, i, index_of)
+    end
+  end
+  local block_start = {}
+  for b, blk in ipairs(model.blocks) do block_start[b] = index_of[blk.first] end
+  return { items = build.finish(), index_of = index_of, block_start = block_start }
+end
+
+--- Layout of a unified diff: a single column in which each block shows its
+--- removed lines and then its added lines, as `git diff` and GitHub do.
+--- Items as layout_builder describes: a changed line names its side, a
+--- context line does not. index_of maps a context row to its item,
+--- side_index[side][row] a changed row to the item showing that side of it
+--- (see item_of).
+--- @return table layout
+function M.unified_layout(model, ctx, reveals)
+  local rows, n = model.rows, #model.rows
+  local visible = visibility(model, ctx, reveals)
+  local build, index_of, block_start = layout_builder(model), {}, {}
+  local side_index = { old = {}, new = {} }
+
   local i = 1
   while i <= n do
     local row = rows[i]
     if visible and not visible[i] then
-      local j, collapse = hidden_run(visible, n, i)
-      if collapse then
-        local sep = items[push({ sep = { first = i, last = j } })]
-        if j < n then open_hunk(sep) else close_hunk() end
-      else
-        for r = i, j do index_of[r] = add(r, nil) end
-      end
-      i = j + 1
+      i = build.hidden(visible, i, index_of)
     elseif row.change then
       -- A block's rows are all shown: removed lines first, then added.
       local j = i
@@ -291,7 +307,7 @@ function M.unified_layout(model, ctx, reveals)
         local by_side = side_index[side]
         for r = i, j - 1 do
           if rows[r][side] then
-            by_side[r] = add(r, side)
+            by_side[r] = build.row(r, side)
             first = first or by_side[r]
           end
         end
@@ -299,13 +315,12 @@ function M.unified_layout(model, ctx, reveals)
       block_start[row.block] = first
       i = j
     else
-      index_of[i] = add(i, nil)
+      index_of[i] = build.row(i)
       i = i + 1
     end
   end
-  close_hunk()
 
-  return { items = items, index_of = index_of, block_start = block_start, side_index = side_index }
+  return { items = build.finish(), index_of = index_of, block_start = block_start, side_index = side_index }
 end
 
 --- Item of `layout` showing `side` of model row `row`, if it is visible.

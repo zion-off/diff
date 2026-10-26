@@ -1,5 +1,7 @@
 local M = {}
 
+local log = require("diff.log").scope("highlights")
+
 -- ---------------------------------------------------------------------------
 -- Color palettes — chosen to be muted enough that tree-sitter foreground
 -- colors are clearly legible on top of the diff background tints.
@@ -18,7 +20,6 @@ local DARK = {
   hunk_hover_bg   = "#18294a",
   filler_bg       = "#1e1e2e",
   filler_fg       = "#3a3a4a",
-  separator_bg    = "#1a1a2a",
   separator_fg    = "#606070",
   hover_bg        = "#232a3d",
   edge_hover      = "#5f87d7",
@@ -44,7 +45,6 @@ local LIGHT = {
   hunk_hover_bg   = "#c6e6ff",
   filler_bg       = "#f0f0f5",
   filler_fg       = "#c0c0cc",
-  separator_bg    = "#e8e8f0",
   separator_fg    = "#909099",
   hover_bg        = "#e3eaf7",
   edge_hover      = "#3a6fc4",
@@ -62,7 +62,7 @@ local LIGHT = {
 -- Deriving chrome colours from the colorscheme
 --
 -- The diff tints above are hand-picked and stay fixed. The plugin's *chrome*
--- — header bar, filler bands, collapsed separators, hover and the active-file
+-- — header bar, filler bands, hunk headers, hover and the active-file
 -- mark — must instead sit a measured step away from whatever Normal is, or it
 -- lands at the wrong weight on every theme but the one it was tuned for.
 -- ---------------------------------------------------------------------------
@@ -87,7 +87,7 @@ local function blend(base, other, alpha)
 end
 
 --- Surfaces a measured distance from Normal: a raised one for the header,
---- quieter ones for fillers and separators, and tints for hover and the
+--- quieter ones for fillers and hunk headers, and tints for hover and the
 --- active file. Falls back to the static palette when Normal carries no
 --- background (a transparent terminal), where there is nothing to derive from.
 local function surfaces(p)
@@ -95,7 +95,7 @@ local function surfaces(p)
   if not bg or not fg then
     return {
       header_bg = p.filler_bg, filler_bg = p.filler_bg,
-      separator_bg = p.separator_bg, hover_bg = p.hover_bg,
+      hover_bg = p.hover_bg,
       active_bg = p.hover_bg, tab_active_bg = p.tab_active_bg,
       accent = p.ref_head, title_fg = p.title_fg, dim_fg = p.separator_fg,
       filler_fg = p.filler_fg, hunk_bg = p.hunk_bg, hunk_hover_bg = p.hunk_hover_bg,
@@ -118,7 +118,6 @@ local function surfaces(p)
   return {
     header_bg    = blend(bg, fg, 0.10),
     filler_bg    = blend(bg, fg, 0.04),
-    separator_bg = blend(bg, fg, 0.05),
     hover_bg     = select_tint(0.35, 0.14),
     active_bg    = select_tint(0.55, 0.20),
     tab_active_bg = select_tint(0.65, 0.22),
@@ -184,20 +183,15 @@ local function build_defaults()
     DiffNvimAddedWord       = { bg = p.added_word_bg,    fg = "NONE" },
     DiffNvimRemovedWord     = { bg = p.removed_word_bg,  fg = "NONE" },
 
-    -- Gutter indicators (palette-adaptive for light/dark mode)
-    DiffNvimGutterAdded     = { fg = p.gutter_added,   bold = true },
-    DiffNvimGutterRemoved   = { fg = p.gutter_removed, bold = true },
-    DiffNvimGutterChanged   = { fg = p.gutter_changed, bold = true },
-
-    -- Unified view gutter, after GitHub's: line numbers on a stronger tint
-    -- than the line, and the +/- marker on the line's own tint so the band
-    -- runs unbroken from the marker into the code
+    -- Diff gutter, after GitHub's: line numbers on a stronger tint than the
+    -- line, and the +/- marker on the line's own tint so the band runs
+    -- unbroken from the marker into the code
     DiffNvimAddedNr         = { fg = nr_fg, bg = p.added_nr_bg },
     DiffNvimRemovedNr       = { fg = nr_fg, bg = p.removed_nr_bg },
     DiffNvimAddedMarker     = { fg = p.gutter_added,   bg = p.added_bg },
     DiffNvimRemovedMarker   = { fg = p.gutter_removed, bg = p.removed_bg },
-    -- Unified view hunk headers ("@@ -12,7 +12,9 @@ function …") and the
-    -- declaration after them; hovered when they expand on a click
+    -- Hunk headers ("@@ -12,7 +12,9 @@ function …") and the declaration
+    -- after them; hovered when they expand on a click
     DiffNvimHunkHeader          = { fg = s.dim_fg, bg = s.hunk_bg },
     DiffNvimHunkHeaderDecl      = { fg = s.title_fg, bg = s.hunk_bg },
     DiffNvimHunkHeaderHover     = { fg = s.dim_fg, bg = s.hunk_hover_bg },
@@ -250,15 +244,6 @@ local function build_defaults()
     DiffNvimNoteText        = { fg = s.title_fg },
     DiffNvimNoteMarker      = { fg = p.note_marker, bold = true },
     DiffNvimNoteVirtText    = { fg = p.note_virt, italic = true },
-
-    -- Separators (collapsed context): a quiet band with the hidden count, and
-    -- the enclosing declaration a step brighter, so the band says where in
-    -- the file it is without shouting it in bold italics
-    DiffNvimSeparator       = { fg = s.dim_fg, bg = s.separator_bg },
-    DiffNvimSeparatorDecl   = { fg = s.title_fg, bg = s.separator_bg },
-    -- A separator under the mouse pointer (click to expand)
-    DiffNvimSeparatorHover     = { fg = s.dim_fg, bg = s.hover_bg },
-    DiffNvimSeparatorDeclHover = { fg = s.title_fg, bg = s.hover_bg },
 
     -- The file currently shown in the diff view, marked in either panel. A
     -- quiet tint, not Visual: it is a standing mark, not a selection, and has
@@ -349,8 +334,46 @@ local function apply_highlights()
   end
 end
 
+-- Groups the diff view no longer draws, and those that took their place.
+local RENAMED = {
+  DiffNvimSeparator          = "DiffNvimHunkHeader",
+  DiffNvimSeparatorDecl      = "DiffNvimHunkHeaderDecl",
+  DiffNvimSeparatorHover     = "DiffNvimHunkHeaderHover",
+  DiffNvimSeparatorDeclHover = "DiffNvimHunkHeaderDeclHover",
+  DiffNvimGutterAdded        = "DiffNvimAddedMarker",
+  DiffNvimGutterRemoved      = "DiffNvimRemovedMarker",
+}
+local REMOVED = { DiffNvimGutterChanged = true }
+
+--- `overrides` with those of retired groups moved to the groups that took
+--- their place (unless those are overridden too), so they keep taking effect.
+local function migrate(overrides)
+  local out, retired = vim.deepcopy(overrides), {}
+  for old, new in pairs(RENAMED) do
+    if out[old] then
+      log.warn("highlight %s is now %s; applying its override there", old, new)
+      out[new] = out[new] or out[old]
+      out[old] = nil
+      table.insert(retired, old .. " → " .. new)
+    end
+  end
+  for old in pairs(REMOVED) do
+    if out[old] then
+      log.warn("highlight %s is no longer drawn; its override is ignored", old)
+      out[old] = nil
+      table.insert(retired, old .. " (no longer drawn)")
+    end
+  end
+  if #retired > 0 then
+    table.sort(retired)
+    vim.notify("diff.nvim: renamed highlight groups in your config: " .. table.concat(retired, ", "),
+      vim.log.levels.WARN)
+  end
+  return out
+end
+
 function M.setup(opts)
-  _user_overrides = (opts and opts.highlights) or {}
+  _user_overrides = migrate((opts and opts.highlights) or {})
   apply_highlights()
 
   -- Re-apply on every ColorScheme change so our groups survive theme switches

@@ -200,7 +200,7 @@ return {
     dv.expand("cursor")
     vim.api.nvim_set_decoration_provider(probe, {})
     H.eq(redraws, 0, "a redraw inside the expand puts a half-made frame on screen")
-    H.eq(vim.fn.getwininfo(pane("new"))[1].textoff, 2 + S().lnum_width + 1, "gutter known without a redraw")
+    H.eq(vim.fn.getwininfo(pane("new"))[1].textoff, 2 + S().lnum_width + 1 + 2, "gutter known without a redraw")
     assert_aligned()
     assert_same_screen()
     dv.expand("reset")

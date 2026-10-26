@@ -65,8 +65,8 @@ local function fresh_state()
     lnum_width = 1,
     sep_marks = {},             -- pane -> { [row] = extmark id } of separators and hunk headers
     hover = nil,                -- layout row under the mouse pointer
-    header_widths = nil,        -- window widths the header was laid out for
     wrap_widths = {},           -- side -> pane width the wrap padding was computed for
+    header_widths = nil,        -- window widths the header was laid out for
     synced_view = nil,          -- view both split panes were last left showing
     watcher = nil, watch_timer = nil,
     -- open_gen counts opens, refresh_gen counts in-place refreshes. They are
@@ -122,16 +122,26 @@ end
 -- Panes
 --
 -- What sets the panes apart, kept in one place: which side and line a row
--- shows, the gutter, and the band drawn on rows that hold no line. A side
--- pane ("old" or "new") shows one side, with fillers where it has no line;
--- the unified pane shows both, each changed line on a row of its own. The
--- functions take a layout item and its model row (nil for a band).
+-- shows, and the gutter. A side pane ("old" or "new") shows one side, with
+-- fillers where it has no line; the unified pane shows both, each changed
+-- line on a row of its own. Both draw GitHub's gutter (line numbers tinted
+-- with the row, then a +/- marker) and head each run of rows with its @@
+-- range. The functions take a layout item and its model row (nil for a band).
 -- ---------------------------------------------------------------------------
 
 -- Cells of the sign column ('signcolumn' "yes:1").
 local SIGN_WIDTH = 2
--- Cells of the +/- marker the unified pane sets before the code, and a space.
+-- Cells of the +/- marker set before the code, and a space.
 local MARKER_WIDTH = 2
+
+local BAND_HL = "DiffNvimHunkHeader"
+local BAND_HOVER_HL = "DiffNvimHunkHeaderHover"
+
+local GUTTER_STYLE = {
+  old = { nr = "DiffNvimRemovedNr", marker_hl = "DiffNvimRemovedMarker", marker = "-" },
+  new = { nr = "DiffNvimAddedNr",   marker_hl = "DiffNvimAddedMarker",   marker = "+" },
+  context = { nr = "LineNr", marker_hl = "LineNr", marker = " " },
+}
 
 local function numbered(n, width)
   return string.format("%" .. width .. "s", n and tostring(n) or "")
@@ -143,19 +153,68 @@ local function band_hovered(item, lnum)
   return item.sep ~= nil and S.hover == lnum
 end
 
-local function band_hls(pane, hovered)
-  if hovered then return pane.hover_band_hl, pane.hover_decl_hl end
-  return pane.band_hl, pane.decl_hl
+local function band_hls(hovered)
+  if hovered then return BAND_HOVER_HL, "DiffNvimHunkHeaderDeclHover" end
+  return BAND_HL, "DiffNvimHunkHeaderDecl"
+end
+
+--- Whether pane `p` draws the text of the bands. GitHub's hunk header spans
+--- both sides of a split, so its text goes in the left pane alone and the
+--- band runs on through the right one.
+local function heads_bands(p)
+  return p ~= "new" or not valid_win(S.panes.old)
+end
+
+--- The declaration a hunk is in, searched for where git searches: in the
+--- old file, from the line before the hunk (or before the gap, for a hunk
+--- with no old lines).
+local function hunk_heading(hunk)
+  local line = hunk.old_count == 0 and hunk.old_first or hunk.old_first - 1
+  local src = S.sources.old
+  return src and line > 0 and src:enclosing_decl(line) or nil
+end
+
+--- What a band says: the run's @@ range and the declaration it is in, as
+--- on GitHub (`header`), then, under the pointer, what a click reveals
+--- (`hint`). A band hiding rows after the last run has no header.
+local function hunk_virt(item, hovered, header, hint)
+  local hl, decl_hl = band_hls(hovered)
+  local virt = {}
+  if header and item.hunk then
+    table.insert(virt, { engine.hunk_header(item.hunk), hl })
+    local heading = hunk_heading(item.hunk)
+    if heading then table.insert(virt, { " " .. heading, decl_hl }) end
+  end
+  if hovered and hint then
+    local count = engine.separator_span(S.model, item.sep).count
+    table.insert(virt, { string.format("%s%d hidden lines — click to expand", #virt > 0 and "  " or "", count), hl })
+  end
+  return virt
+end
+
+--- A band carries its colour across the gutter of pane `p`, with an expand
+--- mark beside the band's text when it hides rows. `numbers` is the width
+--- of the line numbers.
+local function band_gutter(p, item, lnum, numbers)
+  local mark = heads_bands(p) and item.sep and vim.v.virtnum == 0 and "↕" or " "
+  -- '↕' is two cells wide under 'ambiwidth' "double".
+  local pad = SIGN_WIDTH + numbers - vim.api.nvim_strwidth(mark)
+  return "%#" .. band_hls(band_hovered(item, lnum)) .. "#" .. string.rep(" ", pad) .. mark
+    .. string.rep(" ", 1 + MARKER_WIDTH)
+end
+
+--- A row's line numbers (`numbers`, laid out), then its marker, in `style`.
+--- A wrapped line's continuation (not `first`) keeps the tint without the
+--- marker; its numbers are left blank by the caller.
+local function numbered_gutter(style, first, numbers)
+  return "%s%#" .. style.nr .. "#" .. numbers .. " "
+    .. "%#" .. style.marker_hl .. "#" .. (first and style.marker or " ") .. " "
 end
 
 local function side_pane(side)
   local pane = {
     sides = { side },
     label = side == "old" and "(before)" or "(after)",
-    signs = true,
-    band_hl = "DiffNvimSeparator", decl_hl = "DiffNvimSeparatorDecl",
-    hover_band_hl = "DiffNvimSeparatorHover", hover_decl_hl = "DiffNvimSeparatorDeclHover",
-    hover_line_hl = "DiffNvimHover",
   }
 
   function pane.path(src)
@@ -174,55 +233,31 @@ local function side_pane(side)
   end
 
   function pane.gutter_width()
-    return SIGN_WIDTH + S.lnum_width + 1
+    return SIGN_WIDTH + S.lnum_width + 1 + MARKER_WIDTH
   end
 
-  --- "··· N hidden lines ···" and the declaration the hidden lines end in.
+  --- In a split the hint goes in the right pane's part of the band, where
+  --- the left pane's header text cannot crowd it out.
   function pane.band_virt(item, hovered)
-    local hl, decl_hl = band_hls(pane, hovered)
-    local span = engine.separator_span(S.model, item.sep)
-    local virt = { { string.format("··· %d hidden lines ···", span.count), hl } }
-    local src = S.sources[side]
-    local heading = src and span[side][2] and src:enclosing_decl(span[side][2])
-    if heading then table.insert(virt, { "  " .. heading, decl_hl }) end
-    if hovered then table.insert(virt, { "  click to expand", hl }) end
-    return virt
+    local split = valid_win(S.panes.old) and valid_win(S.panes.new)
+    return hunk_virt(item, hovered, heads_bands(side), side == "new" or not split)
   end
 
+  --- A filler carries its band across the gutter, as a hunk header does.
   function pane.gutter(item, row, lnum)
-    if item and not row then
-      local hl = band_hls(pane, band_hovered(item, lnum))
-      return "%#" .. hl .. "#" .. string.rep(" ", pane.gutter_width())
-    end
-    local n = vim.v.virtnum == 0 and row and row[side]
-    return "%s%#LineNr#" .. numbered(n, S.lnum_width) .. " "
+    if item and not row then return band_gutter(side, item, lnum, S.lnum_width) end
+    if row and not row[side] then return "%#DiffNvimFiller#" .. string.rep(" ", pane.gutter_width()) end
+    local first = vim.v.virtnum == 0
+    local style = GUTTER_STYLE[row and row.change and side or "context"]
+    return numbered_gutter(style, first, numbered(first and row and row[side], S.lnum_width))
   end
 
   return pane
 end
 
---- The declaration a hunk is in, searched for where git searches: in the
---- old file, from the line before the hunk (or before the gap, for a hunk
---- with no old lines).
-local function hunk_heading(hunk)
-  local line = hunk.old_count == 0 and hunk.old_first or hunk.old_first - 1
-  local src = S.sources.old
-  return src and line > 0 and src:enclosing_decl(line) or nil
-end
-
-local GUTTER_STYLE = {
-  old = { nr = "DiffNvimRemovedNr", marker_hl = "DiffNvimRemovedMarker", marker = "-" },
-  new = { nr = "DiffNvimAddedNr",   marker_hl = "DiffNvimAddedMarker",   marker = "+" },
-  context = { nr = "LineNr", marker_hl = "LineNr", marker = " " },
-}
-
 local UNIFIED = {
   sides = { "new", "old" },
   label = "(diff)",
-  signs = false, -- changed rows are marked +/- in the gutter instead
-  band_hl = "DiffNvimHunkHeader", decl_hl = "DiffNvimHunkHeaderDecl",
-  hover_band_hl = "DiffNvimHunkHeaderHover", hover_decl_hl = "DiffNvimHunkHeaderDeclHover",
-  hover_line_hl = "DiffNvimHunkHeaderHover",
 }
 
 function UNIFIED.path(src)
@@ -246,43 +281,18 @@ function UNIFIED.gutter_width()
   return SIGN_WIDTH + 2 * (S.lnum_width + 1) + MARKER_WIDTH
 end
 
---- Each run of rows is headed by its @@ range and the declaration it is in,
---- as on GitHub. A header with rows hidden above it (and the band hiding
---- rows after the last run) expands when clicked.
 function UNIFIED.band_virt(item, hovered)
-  local hl, decl_hl = band_hls(UNIFIED, hovered)
-  local virt = {}
-  if item.hunk then
-    table.insert(virt, { engine.hunk_header(item.hunk), hl })
-    local heading = hunk_heading(item.hunk)
-    if heading then table.insert(virt, { " " .. heading, decl_hl }) end
-  end
-  if hovered then
-    local count = engine.separator_span(S.model, item.sep).count
-    table.insert(virt, { string.format("%s%d hidden lines — click to expand", item.hunk and "  " or "", count), hl })
-  end
-  return virt
+  return hunk_virt(item, hovered, true, true)
 end
 
---- After GitHub's: the old and new line numbers, then a +/- marker, tinted
---- with the row. A wrapped line's continuation keeps the tint without the
---- numbers. A band carries its colour across the gutter, with an expand
---- mark when it hides rows.
+--- The old and new line numbers side by side.
 function UNIFIED.gutter(item, row, lnum)
-  local w = S.lnum_width
-  local first = vim.v.virtnum == 0
-  if item and not row then
-    local hl = band_hls(UNIFIED, band_hovered(item, lnum))
-    local mark = item.sep and first and "↕" or " "
-    -- '↕' is two cells wide under 'ambiwidth' "double".
-    local pad = SIGN_WIDTH + 2 * w + 1 - vim.api.nvim_strwidth(mark)
-    return "%#" .. hl .. "#" .. string.rep(" ", pad) .. mark .. string.rep(" ", 1 + MARKER_WIDTH)
-  end
+  if item and not row then return band_gutter("unified", item, lnum, 2 * S.lnum_width + 1) end
   if not row then return "%s%#LineNr#" .. string.rep(" ", UNIFIED.gutter_width() - SIGN_WIDTH) end
   local old, new = UNIFIED.lines_at(item, row)
-  local style = GUTTER_STYLE[item.side or "context"]
-  return "%s%#" .. style.nr .. "#" .. numbered(first and old, w) .. " " .. numbered(first and new, w) .. " "
-    .. "%#" .. style.marker_hl .. "#" .. (first and style.marker or " ") .. " "
+  local first, w = vim.v.virtnum == 0, S.lnum_width
+  return numbered_gutter(GUTTER_STYLE[item.side or "context"], first,
+    numbered(first and old, w) .. " " .. numbered(first and new, w))
 end
 
 local PANE = { old = side_pane("old"), new = side_pane("new"), unified = UNIFIED }
@@ -546,6 +556,15 @@ end
 -- Rendering
 -- ---------------------------------------------------------------------------
 
+--- The extmark drawing the band of `item` in pane `p`.
+local function band_mark(p, item, hovered, id)
+  return {
+    id = id, line_hl_group = hovered and BAND_HOVER_HL or BAND_HL,
+    virt_text = PANE[p].band_virt(item, hovered), virt_text_pos = "overlay",
+    priority = hovered and PRIORITY_HOVER or PRIORITY_LINE_BG,
+  }
+end
+
 --- Tint the separator under the mouse pointer, in every pane.
 local function apply_hover(p)
   local buf = S.bufs[p]
@@ -553,11 +572,7 @@ local function apply_hover(p)
   vim.api.nvim_buf_clear_namespace(buf, NS_HOVER, 0, -1)
   local item = S.hover and S.layout and S.layout.items[S.hover]
   if not (item and item.sep) then return end
-  vim.api.nvim_buf_set_extmark(buf, NS_HOVER, S.hover - 1, 0, {
-    line_hl_group = PANE[p].hover_line_hl,
-    virt_text = PANE[p].band_virt(item, true), virt_text_pos = "overlay",
-    priority = PRIORITY_HOVER,
-  })
+  vim.api.nvim_buf_set_extmark(buf, NS_HOVER, S.hover - 1, 0, band_mark(p, item, true))
 end
 
 -- A fine diagonal hatch, drawn faintly: the gap where one side has no lines
@@ -574,15 +589,14 @@ local function decorate(p)
   vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
   local sep_marks = {}
   S.sep_marks[p] = sep_marks
-  local pane = PANE[p]
 
-  -- A run of changed rows takes two marks, whatever its length: the tint as
+  -- A run of changed rows takes one mark, whatever its length: the tint as
   -- a range rather than 'line_hl_group' (a line highlight is painted at a
   -- layer the word-level marks cannot reach, so it swallows them whatever
   -- their priority), reaching into the row after the run so 'hl_eol' carries
-  -- it to the edge of the pane; and the sign, which a mark shows on every row
-  -- it spans, so it ends on the run's last row. A unified pane's removed
-  -- lines and the added lines below them are two runs.
+  -- it to the edge of the pane. The gutter marks each changed row itself
+  -- (statuscol). A unified pane's removed lines and the added lines below
+  -- them are two runs.
   local run_start, run_side
   local function close_run(last)
     if not run_start then return end
@@ -590,12 +604,6 @@ local function decorate(p)
       end_row = last + 1, end_col = 0, hl_eol = true, priority = PRIORITY_LINE_BG,
       hl_group = run_side == "old" and "DiffNvimRemoved" or "DiffNvimAdded",
     })
-    if pane.signs then
-      vim.api.nvim_buf_set_extmark(buf, NS, run_start, 0, {
-        end_row = last, end_col = 0, sign_text = "▍", priority = PRIORITY_LINE_BG,
-        sign_hl_group = run_side == "old" and "DiffNvimGutterRemoved" or "DiffNvimGutterAdded",
-      })
-    end
     run_start, run_side = nil, nil
   end
 
@@ -607,11 +615,7 @@ local function decorate(p)
     if tint ~= run_side then close_run(r - 1) end
     if tint then run_start, run_side = run_start or r, tint end
     if not row then
-      sep_marks[r] = vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
-        line_hl_group = pane.band_hl,
-        virt_text = pane.band_virt(item), virt_text_pos = "overlay",
-        priority = PRIORITY_LINE_BG,
-      })
+      sep_marks[r] = vim.api.nvim_buf_set_extmark(buf, NS, r, 0, band_mark(p, item))
     elseif not side then
       vim.api.nvim_buf_set_extmark(buf, NS, r, 0, {
         line_hl_group = "DiffNvimFiller", priority = PRIORITY_LINE_BG,
@@ -628,11 +632,7 @@ local function decorate_separators(p)
   for r, id in pairs(S.sep_marks[p] or {}) do
     local item = S.layout.items[r + 1]
     if item and not item.row then
-      pcall(vim.api.nvim_buf_set_extmark, buf, NS, r, 0, {
-        id = id, line_hl_group = PANE[p].band_hl,
-        virt_text = PANE[p].band_virt(item), virt_text_pos = "overlay",
-        priority = PRIORITY_LINE_BG,
-      })
+      pcall(vim.api.nvim_buf_set_extmark, buf, NS, r, 0, band_mark(p, item, false, id))
     end
   end
 end
@@ -1274,11 +1274,13 @@ local function sync_sources(old, new)
   local function add(side, s)
     S.sources[side] = s
     table.insert(created, s)
-    -- Separator headings need the parse; redraw them once it lands.
+    -- Hunk headers name functions from the old side's parse: redraw the
+    -- panes drawing header text once it lands.
+    if side ~= "old" then return end
     s:on_ready(function()
-      if S.sources[side] ~= s or not S.layout then return end
+      if S.sources.old ~= s or not S.layout then return end
       for p in pairs(S.panes) do
-        if vim.tbl_contains(PANE[p].sides, side) and valid_buf(S.bufs[p]) then decorate_separators(p) end
+        if heads_bands(p) and valid_buf(S.bufs[p]) then decorate_separators(p) end
       end
     end)
   end
@@ -1504,7 +1506,7 @@ function M.hover(win, line)
   end
 end
 
---- A mouse click on row `line` of pane `win`: a "hidden lines" separator
+--- A mouse click on row `line` of pane `win`: a hunk header hiding lines
 --- expands one step, like `expand_context` on it.
 --- @return boolean handled
 function M.click(win, line)
@@ -1607,12 +1609,14 @@ end
 --- fillers) have no new line, so the nearest one below, then above, is used.
 local function new_line_near(idx)
   local items = S.layout.items
+  -- A hunk header under the cursor names the hunk below it, whatever it
+  -- hides above; one reached from a line is just where that line's gap ends.
+  local here = items[idx]
+  if here and here.hunk then return math.max(here.hunk.new_first, 1) end
   for _, step in ipairs({ 1, -1 }) do
     local i = idx
     while items[i] do
       local item = items[i]
-      -- A hunk header names the hunk below it, whatever it hides above.
-      if item.hunk then return math.max(item.hunk.new_first, 1) end
       if item.sep then return engine.separator_span(S.model, item.sep).new[1] end
       local row = row_of_item(item)
       if row and row.new then return row.new end

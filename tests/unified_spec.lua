@@ -18,6 +18,7 @@ local repo = H.repo({
   ["src/m.lua"] = H.text(m_lines()),
   ["src/o.lua"] = "return 1\n",
   ["src/heading.lua"] = H.text(m_lines()),
+  ["src/gap.lua"] = H.text(m_lines()),
   ["bin.dat"] = "a\0b\n",
 })
 local edited = m_lines()
@@ -32,6 +33,11 @@ H.write(repo, "fresh.lua", "local a = 1\nlocal b = 2\n")
 H.write(repo, "src/heading.lua", H.text(vim.list_extend(vim.list_slice(m_lines(), 1, 32),
   vim.list_extend({ "  local v33 = 330" }, vim.list_slice(m_lines(), 34, 60)))))
 H.write(repo, "bin.dat", "a\0c\n")
+-- gap.lua: line 10 deleted, and old line 40 changed further down.
+local gap = m_lines()
+table.remove(gap, 10)
+gap[39] = "  local v40 = 400"
+H.write(repo, "src/gap.lua", H.text(gap))
 
 vim.cmd("cd " .. repo)
 require("diff").setup({ layout = "unified", log_level = os.getenv("DIFF_LOG") or "warn" })
@@ -179,6 +185,80 @@ return {
     H.eq(S().mode, "unified")
     H.eq(cursor(pane()), item_for("old", 45))
     H.eq(#vim.api.nvim_tabpage_list_wins(0), 5, "sidebar×3 + header + one pane")
+  end },
+
+  { "the split view draws the same gutter, and one header across both panes", function()
+    dv.set_layout("split")
+    local ok, err = pcall(function()
+      local old, new = S().panes.old, S().panes.new
+      local function gutter_of(win, lnum)
+        return vim.api.nvim_eval_statusline(vim.wo[win].statuscolumn,
+          { winid = win, use_statuscol_lnum = lnum, highlights = true })
+      end
+      local function groups(ev)
+        local out = {}
+        for _, h in ipairs(ev.highlights) do out[h.group] = true end
+        return out
+      end
+      local function row_where(pred)
+        return find_item(function(it) return it.row and pred(S().model.rows[it.row]) end)
+      end
+      local w = S().lnum_width
+      local changed = row_where(function(r) return r.old == 10 end)
+      local ev = gutter_of(old, changed)
+      H.eq(ev.str, string.format("  %" .. w .. "s - ", "10"))
+      H.ok(groups(ev).DiffNvimRemovedNr and groups(ev).DiffNvimRemovedMarker, vim.inspect(ev.highlights))
+      ev = gutter_of(new, changed)
+      H.eq(ev.str, string.format("  %" .. w .. "s + ", "10"))
+      H.ok(groups(ev).DiffNvimAddedNr, vim.inspect(ev.highlights))
+      H.eq(gutter_of(new, row_where(function(r) return r.old == 12 end)).str,
+        string.format("  %" .. w .. "s   ", "13"), "context is numbered, unmarked")
+      -- A filler carries its band across the gutter.
+      local filler = row_where(function(r) return r.new == 11 end)
+      H.eq(gutter_of(old, filler).highlights[1].group, "DiffNvimFiller")
+      H.eq(vim.api.nvim_strwidth(gutter_of(old, filler).str), vim.api.nvim_strwidth(gutter_of(old, changed).str))
+
+      -- The header's text and expand mark are drawn in the left pane only.
+      local header = find_item(function(it) return it.hunk ~= nil end)
+      local function header_text(buf)
+        for _, m in ipairs(marks(buf, "diff_nvim_diff")) do
+          if m[2] == header - 1 and m[4].line_hl_group == "DiffNvimHunkHeader" then
+            local text = ""
+            for _, chunk in ipairs(m[4].virt_text or {}) do text = text .. chunk[1] end
+            return text
+          end
+        end
+      end
+      H.eq(header_text(S().bufs.old), "@@ -7,7 +7,8 @@ function M.first()")
+      H.eq(header_text(S().bufs.new), "")
+      H.ok(gutter_of(old, header).str:find("↕", 1, true))
+      H.ok(not gutter_of(new, header).str:find("↕", 1, true))
+      H.eq(gutter_of(new, header).highlights[1].group, "DiffNvimHunkHeader", "the band runs on through the right pane")
+
+      -- With the left pane closed, the right one draws the headers itself.
+      vim.api.nvim_win_close(old, true)
+      press("zM")
+      H.eq(header_text(S().bufs.new), "@@ -7,7 +7,8 @@ function M.first()")
+    end)
+    dv.set_layout("unified")
+    assert(ok, err)
+  end },
+
+  { "gf from a deleted line opens where it was, not at the next hunk", function()
+    open_file("src/gap.lua")
+    local cfg = require("diff.config").get()
+    local ctx = cfg.context_lines
+    cfg.context_lines = 0
+    press("zM")
+    local opened
+    local open_in_editor = sidebar.open_in_editor
+    sidebar.open_in_editor = function(_, line) opened = line end
+    vim.api.nvim_win_set_cursor(pane(), { item_for("old", 10), 0 })
+    dv.goto_file()
+    sidebar.open_in_editor, cfg.context_lines = open_in_editor, ctx
+    press("zM")
+    H.eq(opened, 10)
+    open_file("src/m.lua")
   end },
 
   { "the layout lasts for the session: other files open in it", function()

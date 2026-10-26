@@ -143,7 +143,32 @@ return {
     H.eq(engine.separator_span(m, seps2[1]).count, engine.separator_span(m, seps[1]).count,
       "the first gap must not change")
 
-    H.eq(#engine.layout(m, nil, {}).items, 100)
+    H.eq(#engine.layout(m, nil, {}).items, 101, "every row, under one header")
+  end },
+
+  { "split layout heads each run with the @@ range the unified one gives it", function()
+    local a = H.lines(60)
+    local b = H.lines(60, { [10] = "line ten", [40] = "line forty" })
+    table.insert(b, 11, "inserted")
+    table.remove(b, 26)
+    local m = compute(a, b)
+    local function headers(lay)
+      local out = {}
+      for _, it in ipairs(lay.items) do
+        if it.hunk then table.insert(out, engine.hunk_header(it.hunk)) end
+      end
+      return out
+    end
+    for _, ctx in ipairs({ 3, 0, nil }) do
+      local split = headers(engine.layout(m, ctx, {}))
+      H.ok(#split > 0, "headed")
+      H.eq(split, headers(engine.unified_layout(m, ctx, {})), "context " .. tostring(ctx))
+    end
+    local items = engine.layout(m, 3, {}).items
+    H.ok(items[1].sep and items[1].hunk, "the rows hidden above a run sit in its header")
+    H.ok(items[#items].sep and not items[#items].hunk, "rows hidden at the end have no header")
+    local first = engine.layout(compute(H.lines(5), H.lines(5, { [1] = "one" })), 3, {}).items[1]
+    H.ok(first.hunk and not first.sep, "a run from the first line is headed too")
   end },
 
   { "reveals survive recomputation after an unrelated edit", function()
@@ -250,7 +275,7 @@ return {
     -- headed: the header would take the same row.
     local joined = H.lines(20, { [5] = "five", [13] = "thirteen" })
     local text = unified_text(compute(H.lines(20), joined), 3)
-    H.eq(text[1], "@@ -1,16 +1,16 @@")
+    H.eq(text[1], "@@ -2,15 +2,15 @@", "a lone hidden line at the top collapses into the header")
     H.ok(vim.tbl_contains(text, " line 9"), "the line between the hunks is shown")
     -- A whole file added, or deleted, has an empty side numbered 0.
     H.eq(unified_text(compute({}, { "x", "y" }), 3), { "@@ -0,0 +1,2 @@", "+x", "+y" })

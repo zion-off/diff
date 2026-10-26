@@ -98,12 +98,12 @@ return {
     local win = pane("new")
     local gutter = vim.api.nvim_eval_statusline(vim.wo[win].statuscolumn,
       { winid = win, use_statuscol_lnum = cursor(win) }).str
-    H.eq(gutter:match("(%d+)%s*$"), "30", "gutter must show the file line number, got " .. vim.inspect(gutter))
+    H.eq(gutter:match("(%d+) [-+ ] $"), "30", "gutter must show the file line number, got " .. vim.inspect(gutter))
     -- A collapsed-context row carries its band across the gutter too.
     local sep = find_item(function(it) return it.sep end)
     local ev = vim.api.nvim_eval_statusline(vim.wo[win].statuscolumn,
       { winid = win, use_statuscol_lnum = sep, highlights = true })
-    H.eq(ev.highlights[1].group, "DiffNvimSeparator", vim.inspect(ev))
+    H.eq(ev.highlights[1].group, "DiffNvimHunkHeader", vim.inspect(ev))
     H.eq(vim.api.nvim_strwidth(ev.str), vim.api.nvim_strwidth(gutter), "the band spans the whole gutter")
   end },
 
@@ -122,7 +122,7 @@ return {
     local before = { S().header_win, pane("old"), pane("new") }
     open_file("b%.lua", "src/b.lua")
     H.eq({ S().header_win, pane("old"), pane("new") }, before)
-    H.eq(vim.api.nvim_buf_get_lines(S().bufs.new, 0, -1, false), { "return 2" })
+    H.eq(vim.api.nvim_buf_get_lines(S().bufs.new, 0, -1, false), { "", "return 2" })
   end },
 
   { "untracked files show a single pane; split comes back after", function()
@@ -321,7 +321,7 @@ return {
     H.wait(function() return S().model.added == added end, "live refresh back")
   end },
 
-  { "a run of changed rows takes one tint and one sign, shown on each of its rows", function()
+  { "a run of changed rows takes one tint, and the gutter marks each of its rows", function()
     open_file("a%.lua", "src/a.lua")
     local added = S().model.added
     local edited = vim.deepcopy(a_new)
@@ -339,17 +339,17 @@ return {
     end
     H.eq(#tints, 1, "one tint for the run")
     H.eq({ tints[1][2], tints[1][4].end_row }, { first, first + 3 }, "tint reaches into the row after the run")
-    H.eq(#signs, 1, "one sign mark for the run")
+    H.eq(#signs, 0, "the gutter marks changed rows, not signs")
 
-    vim.api.nvim_set_current_win(win)
-    vim.api.nvim_win_set_cursor(win, { first + 1, 0 })
-    vim.cmd("redraw")
-    local function sign_at(r)
-      local pos = vim.fn.screenpos(win, r + 1, 1)
-      return vim.fn.screenstring(pos.row, vim.fn.win_screenpos(win)[2])
+    local function marker_at(r)
+      local ev = vim.api.nvim_eval_statusline(vim.wo[win].statuscolumn,
+        { winid = win, use_statuscol_lnum = r + 1, highlights = true })
+      return ev.str:sub(-2, -2), ev.highlights[#ev.highlights].group
     end
-    H.eq({ sign_at(first), sign_at(first + 1), sign_at(first + 2) }, { "▍", "▍", "▍" })
-    H.ok(sign_at(first + 3) ~= "▍", "no sign on the row after the run")
+    for r = first, first + 2 do
+      H.eq({ marker_at(r) }, { "+", "DiffNvimAddedMarker" }, "row " .. r)
+    end
+    H.eq(marker_at(first + 3), " ", "no marker on the row after the run")
 
     H.write(repo, "src/a.lua", H.text(a_new))
     H.wait(function() return S().model.added == added end, "live refresh back")
@@ -421,7 +421,7 @@ return {
     H.ok(rows[4]:match("  %+1  M $") and rows[6]:match("%+1 %-1  M $"), rows[4] .. "\n" .. rows[6])
     cp.activate_line(panel_row("b%.lua", sidebar._commit_buf))
     H.wait(function() return S().source and S().source.kind == "commit" and S().layout end, "commit diff")
-    H.eq(vim.api.nvim_buf_get_lines(S().bufs.new, 0, -1, false), { "return 13" })
+    H.eq(vim.api.nvim_buf_get_lines(S().bufs.new, 0, -1, false), { "", "return 13" })
   end },
 
   { "selecting a branch checked out in another worktree shows that worktree's changes", function()
@@ -485,11 +485,15 @@ return {
     over_row(pane("new"), sep)
     H.wait(function() return #marks(S().bufs.old, "diff_nvim_hover") == 1 end, "separator tinted")
     H.eq(#marks(sidebar._commit_buf, cp_ns), 0)
+    -- The header's text is drawn in the left pane, the hint in the right.
     local virt = marks(S().bufs.new, "diff_nvim_hover")[1][4].virt_text
     H.ok(virt[#virt][1]:match("click to expand"), vim.inspect(virt))
+    for _, chunk in ipairs(marks(S().bufs.old, "diff_nvim_hover")[1][4].virt_text or {}) do
+      H.ok(not chunk[1]:match("click to expand"), "the hint is not repeated on the left")
+    end
     local gutter = vim.api.nvim_eval_statusline(vim.wo[pane("new")].statuscolumn,
       { winid = pane("new"), use_statuscol_lnum = sep, highlights = true })
-    H.eq(gutter.highlights[1].group, "DiffNvimSeparatorHover", "the gutter takes the hover tint too")
+    H.eq(gutter.highlights[1].group, "DiffNvimHunkHeaderHover", "the gutter takes the hover tint too")
     over_row(pane("new"), find_item(function(it) return not it.sep end))
     H.wait(function() return #marks(S().bufs.new, "diff_nvim_hover") == 0 end, "separator untinted")
 
@@ -575,7 +579,7 @@ return {
 
     open_file("topic%.lua", "topic.lua")
     H.eq(S().source.kind, "range")
-    H.eq(vim.api.nvim_buf_get_lines(S().bufs.new, 0, -1, false), { "return 'topic'" })
+    H.eq(vim.api.nvim_buf_get_lines(S().bufs.new, 0, -1, false), { "", "return 'topic'" })
     H.ok(vim.api.nvim_buf_get_lines(S().header_buf, 0, 1, false)[1]:match("vs " .. base))
 
     -- Previewing a branch shows that branch's changes: none, for the base itself.
@@ -614,7 +618,7 @@ return {
     H.write(repo, "topic.lua", "return 'topic v2'\n")
     H.git(repo, "commit", "-qm", "topic v2", "--", "topic.lua")
     H.wait(function()
-      return vim.deep_equal(vim.api.nvim_buf_get_lines(S().bufs.new, 0, -1, false), { "return 'topic v2'" })
+      return vim.deep_equal(vim.api.nvim_buf_get_lines(S().bufs.new, 0, -1, false), { "", "return 'topic v2'" })
     end, "range diff followed the commit")
     H.eq(S().source.kind, "range")
 
