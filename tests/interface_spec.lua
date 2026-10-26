@@ -722,6 +722,10 @@ return {
     mb.hover(1, vim.api.nvim_win_get_width(sidebar._bar_win) - 1)
     local tint = vim.api.nvim_buf_get_extmarks(sidebar._bar_buf, ns, 0, -1, { details = true })[1]
     H.eq({ tint[2], tint[3], tint[4].end_col }, { 0, 0, #bar()[1] }, "the whole cell is tinted")
+    local base_ns = vim.api.nvim_get_namespaces()["diff_nvim_mode_bar"]
+    for _, m in ipairs(vim.api.nvim_buf_get_extmarks(sidebar._bar_buf, base_ns, 0, -1, { details = true })) do
+      H.ok(m[4].priority < tint[4].priority, "the tint shows over the bar's own colours: " .. vim.inspect(m))
+    end
     mb.hover(nil)
 
     -- A click acts on what the button went down on, once it comes up; the

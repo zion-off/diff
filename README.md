@@ -400,6 +400,7 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimAddedNr` / `DiffNvimRemovedNr` | Line numbers of added / removed lines |
 | `DiffNvimAddedMarker` / `DiffNvimRemovedMarker` | `+` / `-` marker before added / removed lines |
 | `DiffNvimModeBranch` | Branch name in the mode bar |
+| `DiffNvimModeCellHover` | The mode bar's branch row under the mouse pointer |
 | `DiffNvimModeTag` | `(preview)` / `(worktree)` tag and `▾` in the mode bar |
 | `DiffNvimModeClose` | `✕` that returns to your branch |
 | `DiffNvimModeTab` | Inactive mode in the mode bar |

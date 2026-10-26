@@ -25,13 +25,18 @@ M.HEIGHT = 2
 
 local S = {
   buf = nil, win = nil,
-  segments = {}, -- { row, s, e (byte cols, end exclusive), c1, c2 (display cols, inclusive), action, inert }
+  segments = {}, -- { row, s, e (byte cols, end exclusive), c1, c2 (display cols, inclusive), action, inert, hover_hl }
   hover = nil,   -- segment under the mouse pointer
   pointer = nil, -- { line, col } of the pointer over the bar
   info = nil,    -- what the last render() was given
 }
 
 local NS_CURSOR = vim.api.nvim_create_namespace("diff_nvim_mode_bar_cursor")
+
+-- The bar's own colours sit below the hover tint (300) and the keyboard
+-- cursor (250): drawn at the default priority, a row with a background of
+-- its own would hide both.
+local PRIORITY_BASE = 100
 
 local function valid()
   return S.buf and vim.api.nvim_buf_is_valid(S.buf) and S.win and vim.api.nvim_win_is_valid(S.win)
@@ -41,9 +46,10 @@ end
 -- Render
 -- ---------------------------------------------------------------------------
 
---- Lay out one row from parts { text, hl, action?, inert? }; returns the
---- line, its highlights and its clickable segments. Adjacent parts with the
---- same action are one segment, tinted and clicked as a whole.
+--- Lay out one row from parts { text, hl, action?, inert?, hover_hl? };
+--- returns the line, its highlights and its clickable segments. Adjacent
+--- parts with the same action are one segment, tinted and clicked as a
+--- whole (in `hover_hl`, else DiffNvimHover).
 local function row_from(parts, row)
   local line, hl, segs = "", {}, {}
   for _, p in ipairs(parts) do
@@ -56,7 +62,7 @@ local function row_from(parts, row)
         last.e, last.c2 = #line, vim.api.nvim_strwidth(line)
       else
         table.insert(segs, { row = row, s = s, e = #line, c1 = c1, c2 = vim.api.nvim_strwidth(line),
-          action = p[3], inert = p[4] })
+          action = p[3], inert = p[4], hover_hl = p[5] })
       end
     end
   end
@@ -92,14 +98,16 @@ local function build(width, info)
   local pad = math.max(1, cell_w - w(left) - w(right))
   local pick = a.pick_branch
   local parts1 = {
-    { "⎇ " .. name, "DiffNvimModeBranch", pick },
+    -- The list hover is measured from Normal and vanishes on the cell's
+    -- raised surface, so the cell has a tint of its own.
+    { "⎇ " .. name, "DiffNvimModeBranch", pick, nil, "DiffNvimModeCellHover" },
     { tag, "DiffNvimModeTag", pick },
     { " ▾", "DiffNvimModeTag", pick },
     { base, "DiffNvimModeTag", pick },
     { string.rep(" ", pad), "DiffNvimModeCell", pick },
     { right, "DiffNvimModeTag", pick },
   }
-  if info.away then table.insert(parts1, { close, "DiffNvimModeClose", a.go_home }) end
+  if info.away then table.insert(parts1, { close, "DiffNvimModeClose", a.go_home, nil, "DiffNvimModeCellHover" }) end
   local l1, hl1, seg1 = row_from(parts1, 0)
 
   -- Row 2: the file panel modes, a click target each with a column of
@@ -129,7 +137,7 @@ local function apply_hover()
   local seg = S.hover
   if not seg or seg.inert then return end
   pcall(vim.api.nvim_buf_set_extmark, S.buf, NS_HOVER, seg.row, seg.s, {
-    end_col = seg.e, hl_group = "DiffNvimHover", priority = 300,
+    end_col = seg.e, hl_group = seg.hover_hl or "DiffNvimHover", priority = 300,
   })
 end
 
@@ -172,7 +180,9 @@ function M.render(info)
   vim.api.nvim_buf_set_lines(S.buf, 0, -1, false, lines)
   vim.bo[S.buf].modifiable = false
   for _, h in ipairs(hl) do
-    pcall(vim.api.nvim_buf_add_highlight, S.buf, NS, h[2], h[1], h[3], h[4])
+    pcall(vim.api.nvim_buf_set_extmark, S.buf, NS, h[1], h[3], {
+      end_col = h[4], hl_group = h[2], priority = PRIORITY_BASE,
+    })
   end
   -- Never scrolled: both rows always in view.
   vim.api.nvim_win_call(S.win, function() vim.fn.winrestview({ topline = 1, leftcol = 0 }) end)

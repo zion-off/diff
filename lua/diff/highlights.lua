@@ -94,7 +94,7 @@ local function surfaces(p)
     return {
       header_bg = p.filler_bg, filler_bg = p.filler_bg,
       hover_bg = p.hover_bg,
-      active_bg = p.hover_bg,
+      active_bg = p.hover_bg, cell_hover_bg = p.hover_bg,
       accent = p.ref_head, title_fg = p.title_fg, dim_fg = p.separator_fg,
       filler_fg = p.filler_fg, hunk_bg = p.hunk_bg, hunk_hover_bg = p.hunk_hover_bg,
     }, nil
@@ -124,6 +124,9 @@ local function surfaces(p)
     dim_fg       = blend(fg, bg, 0.55),
     -- The filler hatch: just visible on its band, never louder than text.
     filler_fg    = blend(bg, fg, 0.16),
+    -- The mode bar's branch cell under the pointer: a step from its own
+    -- raised surface, where the list hover would not show.
+    cell_hover_bg = blend(bg, fg, 0.17),
     hunk_bg       = blend(bg, info, 0.12),
     hunk_hover_bg = blend(bg, info, 0.22),
   }, bg
@@ -259,6 +262,7 @@ local function build_defaults()
     DiffNvimModeCell        = { bg = s.header_bg },
     DiffNvimModeBranch      = { fg = text_fg, bg = s.header_bg, bold = true },
     DiffNvimModeTag         = { fg = s.dim_fg, bg = s.header_bg },
+    DiffNvimModeCellHover   = { bg = s.cell_hover_bg },
     DiffNvimModeClose       = { fg = removed, bg = s.header_bg },
     -- The modes under it: plain text, the active one underlined in the
     -- accent colour, a step below the cell rather than a block competing
