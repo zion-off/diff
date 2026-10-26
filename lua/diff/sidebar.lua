@@ -1042,12 +1042,18 @@ local function go_home()
 end
 
 local function render_mode_bar()
+  -- The upstream comes with the working tree's status, which is read only
+  -- while the panels show your own branch's changes.
+  local upstream = not (M._branch_mode or M._preview_branch) and file_panel.upstream() or nil
   mode_bar.render({
     branch = M._preview_branch or M._head_name or "detached HEAD",
     preview = M._preview_branch ~= nil,
     worktree = away_from_home(),
     away = M._preview_branch ~= nil or away_from_home(),
     branch_mode = M._branch_mode,
+    ahead = upstream and upstream.ahead,
+    behind = upstream and upstream.behind,
+    base = M._branch_mode and file_panel.branch_base() or nil,
     actions = {
       pick_branch  = function() M.pick_preview_branch() end,
       go_home      = go_home,
@@ -1101,7 +1107,11 @@ function M.refresh(opts)
     M.redress_panels()
   end
   refreshing = refreshing + 1
-  file_panel.refresh(M._preview_branch, M._branch_mode, done)
+  -- The bar shows what the file panel learns: the upstream, the base branch.
+  file_panel.refresh(M._preview_branch, M._branch_mode, function()
+    if epoch == refresh_epoch then render_mode_bar() end
+    done()
+  end)
   if scope == "all" and not M._branch_mode then
     refreshing = refreshing + 1
     commit_panel.refresh(M._preview_branch, done)

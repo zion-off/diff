@@ -23,7 +23,6 @@ local DARK = {
   separator_fg    = "#606070",
   hover_bg        = "#232a3d",
   edge_hover      = "#5f87d7",
-  tab_active_bg   = "#2e3650",
   gutter_added    = "#3a8c3a",
   gutter_removed  = "#8c3a3a",
   gutter_changed  = "#8c7a3a",
@@ -48,7 +47,6 @@ local LIGHT = {
   separator_fg    = "#909099",
   hover_bg        = "#e3eaf7",
   edge_hover      = "#3a6fc4",
-  tab_active_bg   = "#d5deef",
   gutter_added    = "#2a7a2a",
   gutter_removed  = "#9a2a2a",
   gutter_changed  = "#8a6a1a",
@@ -96,7 +94,7 @@ local function surfaces(p)
     return {
       header_bg = p.filler_bg, filler_bg = p.filler_bg,
       hover_bg = p.hover_bg,
-      active_bg = p.hover_bg, tab_active_bg = p.tab_active_bg,
+      active_bg = p.hover_bg,
       accent = p.ref_head, title_fg = p.title_fg, dim_fg = p.separator_fg,
       filler_fg = p.filler_fg, hunk_bg = p.hunk_bg, hunk_hover_bg = p.hunk_hover_bg,
     }, nil
@@ -120,7 +118,6 @@ local function surfaces(p)
     filler_bg    = blend(bg, fg, 0.04),
     hover_bg     = select_tint(0.35, 0.14),
     active_bg    = select_tint(0.55, 0.20),
-    tab_active_bg = select_tint(0.65, 0.22),
     accent       = string.format("#%06x", accent),
     -- Text tiers: secondary chrome text, and dim text that recedes further.
     title_fg     = blend(fg, bg, 0.25),
@@ -256,11 +253,18 @@ local function build_defaults()
     DiffNvimEdgeHover       = { fg = p.edge_hover, bold = true },
     DiffNvimEdgeHoverStatus = { bg = p.edge_hover },
     -- Mode bar above the sidebar
-    DiffNvimModeBranch      = text_fg and { fg = text_fg, bold = true } or { link = "Normal" },
-    DiffNvimModeTag         = { fg = s.dim_fg },
-    DiffNvimModeClose       = { fg = removed },
+    -- The branch row is a header cell on the raised surface the diff view's
+    -- file header uses, the two reading as one bar across the top; the
+    -- branch name is what leads in it.
+    DiffNvimModeCell        = { bg = s.header_bg },
+    DiffNvimModeBranch      = { fg = text_fg, bg = s.header_bg, bold = true },
+    DiffNvimModeTag         = { fg = s.dim_fg, bg = s.header_bg },
+    DiffNvimModeClose       = { fg = removed, bg = s.header_bg },
+    -- The modes under it: plain text, the active one underlined in the
+    -- accent colour, a step below the cell rather than a block competing
+    -- with it
     DiffNvimModeTab         = { fg = s.dim_fg },
-    DiffNvimModeTabActive   = { bg = s.tab_active_bg, bold = true },
+    DiffNvimModeTabActive   = { fg = text_fg, underline = true, sp = s.accent },
     -- Mode bar item under the cursor, while the bar has keyboard focus
     DiffNvimModeCursor      = { link = "CursorLine" },
 

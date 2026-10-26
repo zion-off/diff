@@ -259,16 +259,20 @@ Hunk staging uses zero-context patches. A change directly next to a final line w
 A two-row strip at the top of the sidebar keeps the interface's modes in view:
 
 ```
- ⎇ feature/x                          ▾
-  Changes    Branch changes
+⎇ feature/x ▾                     ↑2 ↓1
+  Changes   Branch changes
 ```
 
-- The first row is the branch the panels show. Click it (or press `<CR>` on it)
-  to open the branch picker, the same as `<leader>gb`. While another branch is
-  previewed, or another worktree shown, it is tagged `(preview)` /
-  `(worktree)` and a `✕` takes you back to your own branch.
+- The first row is the branch the panels show, as one header cell: click
+  anywhere on it (or press `<CR>` on it) to open the branch picker, the same as
+  `<leader>gb`. On the right it shows how far the branch is ahead of (`↑`) and
+  behind (`↓`) its upstream, read with the working-tree status at no extra
+  cost; in branch mode it shows the base the branch is compared with
+  (`→ main`) instead. While another branch is previewed, or another worktree
+  shown, it is tagged `(preview)` / `(worktree)` and a `✕` takes you back to
+  your own branch.
 - The second row switches the file panel between your working-tree changes and
-  the branch's changes, the same as `<leader>gB`.
+  the branch's changes, the same as `<leader>gB`. The active one is underlined.
 
 ## Branch Changes
 

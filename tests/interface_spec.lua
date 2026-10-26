@@ -718,6 +718,12 @@ return {
     H.wait(function() return #vim.api.nvim_buf_get_extmarks(sidebar._bar_buf, ns, 0, -1, {}) == 1 end, "item tinted")
     vim.fn.getmousepos = real_getmousepos
 
+    -- The branch row is one target: the pointer anywhere on it tints all of it.
+    mb.hover(1, vim.api.nvim_win_get_width(sidebar._bar_win) - 1)
+    local tint = vim.api.nvim_buf_get_extmarks(sidebar._bar_buf, ns, 0, -1, { details = true })[1]
+    H.eq({ tint[2], tint[3], tint[4].end_col }, { 0, 0, #bar()[1] }, "the whole cell is tinted")
+    mb.hover(nil)
+
     -- A click acts on what the button went down on, once it comes up; the
     -- pointer is read as each key arrives (a stand-in walks `path`).
     local opened = 0

@@ -440,6 +440,17 @@ function M.setup(buf, win, repo_root)
   if S.status or S.preview or S.branch then M.render() end
 end
 
+--- How the working tree's branch stands against its upstream, from the last
+--- status read ({ upstream, ahead, behind }), or nil.
+function M.upstream()
+  return S.status and S.status.upstream or nil
+end
+
+--- The base branch the branch-mode list compares against, once known.
+function M.branch_base()
+  return S.branch and S.branch.base or nil
+end
+
 --- Look the base branch up again on the next branch-mode refresh.
 function M.forget_base()
   S.base = nil

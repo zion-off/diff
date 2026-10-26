@@ -23,6 +23,21 @@ return {
     H.ok(info.git_dir:match("/%.git/worktrees/"), "worktree git dir: " .. info.git_dir)
   end },
 
+  { "status reads how the branch stands against its upstream", function()
+    local remote = vim.fn.resolve(vim.fn.tempname())
+    H.sh({ "git", "init", "-q", "--bare", remote })
+    local repo = H.repo({ ["a.txt"] = "a\n" })
+    H.git(repo, "remote", "add", "origin", remote)
+    H.git(repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/feature.v1")
+    H.git(repo, "branch", "-q", "-u", "origin/feature.v1")
+    H.write(repo, "a.txt", "b\n")
+    H.git(repo, "commit", "-qam", "ahead")
+    local st = await(function(cb) git.get_status(repo, cb) end)
+    H.eq(st.upstream, { upstream = "origin/feature.v1", ahead = 1, behind = 0 })
+    H.eq(#st.staged + #st.unstaged, 0, "the branch line is not a file")
+    H.eq(await(function(cb) git.get_status(H.repo({}), cb) end).upstream, nil, "no upstream")
+  end },
+
   { "status never rewrites the index", function()
     local repo = H.repo({ ["a.txt"] = "a\n", ["b.txt"] = "b\n" })
     local index = repo .. "/.git/index"

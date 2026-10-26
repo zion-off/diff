@@ -209,11 +209,28 @@ local function parse_porcelain_line(line)
   return x, y, path, old_path
 end
 
---- Get the working-tree / index status.
+--- The branch line `git status -b --porcelain` starts with, as
+--- { upstream, ahead, behind }; nil without an upstream (none set, gone, or
+--- HEAD detached). Branch names may hold dots, so the upstream follows the
+--- first "..." after the name.
+---   ## main...origin/main [ahead 1, behind 2]
+local function parse_branch_line(line)
+  if line:find("[gone]", 1, true) then return nil end
+  local upstream = line:match("^## .-%.%.%.(%S+)")
+  if not upstream then return nil end
+  return {
+    upstream = upstream,
+    ahead    = tonumber(line:match("ahead (%d+)")) or 0,
+    behind   = tonumber(line:match("behind (%d+)")) or 0,
+  }
+end
+
+--- Get the working-tree / index status, and how the branch stands against
+--- its upstream (read in the same process).
 --- @param root     string
---- @param callback fun(status: {staged: table[], unstaged: table[]}, err: string|nil)
+--- @param callback fun(status: {staged: table[], unstaged: table[], upstream: table|nil}, err: string|nil)
 function M.get_status(root, callback)
-  M.run({ "status", "--porcelain", "-u" }, root, function(lines, stderr, code)
+  M.run({ "status", "--porcelain", "-b", "-u" }, root, function(lines, stderr, code)
     if code ~= 0 then
       callback({ staged = {}, unstaged = {} }, stderr)
       return
@@ -221,8 +238,13 @@ function M.get_status(root, callback)
 
     local staged   = {}
     local unstaged = {}
+    local upstream
 
     for _, line in ipairs(lines) do
+      if line:sub(1, 3) == "## " then
+        upstream = parse_branch_line(line)
+        goto continue
+      end
       local x, y, path, old_path = parse_porcelain_line(line)
       if not x then goto continue end
 
@@ -247,7 +269,7 @@ function M.get_status(root, callback)
       ::continue::
     end
 
-    callback({ staged = staged, unstaged = unstaged }, nil)
+    callback({ staged = staged, unstaged = unstaged, upstream = upstream }, nil)
   end)
 end
 

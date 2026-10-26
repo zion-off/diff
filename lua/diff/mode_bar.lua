@@ -1,11 +1,16 @@
 --- diff.nvim — mode bar: a two-row strip above the sidebar panels that keeps
 --- the interface's modes in view and in reach of the mouse.
 ---
----   ⎇ feature/x                      ▾      branch shown; opens the picker
----    Changes   Branch changes                 file panel mode
+---   ⎇ feature/x ▾                  ↑2 ↓1     branch shown: one header cell,
+---                                             opening the picker anywhere
+---     Changes   Branch changes                file panel mode, the active
+---     ‾‾‾‾‾‾‾                                 one underlined
 ---
---- While another branch is previewed (or another worktree shown) the first
---- row is tagged and gains a ✕ that returns to the home branch.
+--- The cell names how the branch stands against its upstream, or in branch
+--- mode the base it is compared with (→ main). While another branch is
+--- previewed (or another worktree shown) it is tagged, and a ✕ beside it
+--- returns to the home branch. Text in both rows starts in the column the
+--- panels' text does.
 ---
 --- The bar knows nothing about git or the panels: render() is given what to
 --- show, and each clickable segment carries the action the sidebar supplied.
@@ -36,8 +41,9 @@ end
 -- Render
 -- ---------------------------------------------------------------------------
 
---- Lay out one row from parts { text, hl, action? }; returns the line, its
---- highlights and its clickable segments.
+--- Lay out one row from parts { text, hl, action?, inert? }; returns the
+--- line, its highlights and its clickable segments. Adjacent parts with the
+--- same action are one segment, tinted and clicked as a whole.
 local function row_from(parts, row)
   local line, hl, segs = "", {}, {}
   for _, p in ipairs(parts) do
@@ -45,44 +51,74 @@ local function row_from(parts, row)
     line = line .. p[1]
     if p[2] then table.insert(hl, { row, p[2], s, #line }) end
     if p[3] then
-      table.insert(segs, { row = row, s = s, e = #line, c1 = c1, c2 = vim.api.nvim_strwidth(line),
-        action = p[3], inert = p[4] })
+      local last = segs[#segs]
+      if last and last.action == p[3] and last.e == s then
+        last.e, last.c2 = #line, vim.api.nvim_strwidth(line)
+      else
+        table.insert(segs, { row = row, s = s, e = #line, c1 = c1, c2 = vim.api.nvim_strwidth(line),
+          action = p[3], inert = p[4] })
+      end
     end
   end
   return line, hl, segs
 end
 
+--- "↑2 ↓1": commits ahead of and behind the upstream; "" when level or unknown.
+local function sync_text(ahead, behind)
+  local parts = {}
+  if ahead and ahead > 0 then table.insert(parts, "↑" .. ahead) end
+  if behind and behind > 0 then table.insert(parts, "↓" .. behind) end
+  return table.concat(parts, " ")
+end
+
 local function build(width, info)
   local a = info.actions
-  -- Row 1: the branch, a tag when it is not the home branch, ▾ and maybe ✕.
+  local w = vim.api.nvim_strwidth
+
+  -- Row 1: the branch as one header cell, a ✕ beside it when away from home.
+  local close = info.away and " ✕ " or ""
+  local cell_w = width - w(close)
   local tag = info.preview and " (preview)" or (info.worktree and " (worktree)" or "")
-  local tail = info.away and " ✕ " or ""
-  -- Leave at least one column of padding before ▾.
-  local name_w = math.max(4, width - 3 - vim.api.nvim_strwidth(tag) - 3 - vim.api.nvim_strwidth(tail))
-  local name = util.trunc(info.branch or "…", name_w)
-  local pad = math.max(1, width - 3 - vim.api.nvim_strwidth(name .. tag) - 2 - vim.api.nvim_strwidth(tail))
+  local base = info.base and (" → " .. info.base) or ""
+  local sync = sync_text(info.ahead, info.behind)
+  local right = sync ~= "" and (sync .. " ") or ""
+  local function room() return cell_w - w("⎇ " .. tag .. " ▾" .. base .. right) - 1 end
+  -- A narrow sidebar gives up the base, then the sync counts, before the
+  -- name shrinks below a few characters.
+  if room() < 4 then base = "" end
+  if room() < 4 then right = "" end
+  local name = util.trunc(info.branch or "…", math.max(4, room()))
+  local left = "⎇ " .. name .. tag .. " ▾" .. base
+  local pad = math.max(1, cell_w - w(left) - w(right))
+  local pick = a.pick_branch
   local parts1 = {
-    { " ⎇ " .. name, "DiffNvimModeBranch", a.pick_branch },
-    { tag, "DiffNvimModeTag", a.pick_branch },
-    { string.rep(" ", pad) .. "▾ ", "DiffNvimModeTag", a.pick_branch },
+    { "⎇ " .. name, "DiffNvimModeBranch", pick },
+    { tag, "DiffNvimModeTag", pick },
+    { " ▾", "DiffNvimModeTag", pick },
+    { base, "DiffNvimModeTag", pick },
+    { string.rep(" ", pad), "DiffNvimModeCell", pick },
+    { right, "DiffNvimModeTag", pick },
   }
-  if info.away then table.insert(parts1, { tail, "DiffNvimModeClose", a.go_home }) end
+  if info.away then table.insert(parts1, { close, "DiffNvimModeClose", a.go_home }) end
   local l1, hl1, seg1 = row_from(parts1, 0)
 
-  -- Row 2: the file panel modes. The active one does nothing when clicked
-  -- (an inert segment, so <CR> on it does not fall through to the other).
+  -- Row 2: the file panel modes, a click target each with a column of
+  -- padding either side. The active one does nothing when clicked (an inert
+  -- segment, so <CR> on it does not fall through to the other).
+  local parts2 = { { " " } }
   local function tab(label, active, action)
-    return { " " .. label .. " ", active and "DiffNvimModeTabActive" or "DiffNvimModeTab",
-      active and function() end or action, active }
+    action = active and function() end or action
+    vim.list_extend(parts2, {
+      { " ", nil, action, active },
+      { label, active and "DiffNvimModeTabActive" or "DiffNvimModeTab", action, active },
+      { " ", nil, action, active },
+    })
   end
   -- " Changes " and " Branch changes " with their gaps take 28 columns.
-  local branch_label = width >= 28 and "Branch changes" or "Branch"
-  local l2, hl2, seg2 = row_from({
-    { " " },
-    tab("Changes", not info.branch_mode, a.show_changes),
-    { "  " },
-    tab(branch_label, info.branch_mode, a.show_branch),
-  }, 1)
+  tab("Changes", not info.branch_mode, a.show_changes)
+  table.insert(parts2, { " " })
+  tab(width >= 28 and "Branch changes" or "Branch", info.branch_mode, a.show_branch)
+  local l2, hl2, seg2 = row_from(parts2, 1)
 
   return { l1, l2 }, vim.list_extend(hl1, hl2), vim.list_extend(seg1, seg2)
 end
