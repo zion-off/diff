@@ -113,20 +113,35 @@ end
 -- reveals the lines it hides), even when another window had focus.
 -- vim.on_key observes the click without mapping <LeftMouse>, so Neovim's own
 -- handling (focus, cursor placement, separator drag-resize) and any user
--- mapping of the key are untouched. The row is read after Neovim has
--- processed the click.
-local LEFT_MOUSE = normalize_lhs("<LeftMouse>")
-local LEFT_DRAG  = normalize_lhs("<LeftDrag>")
+-- mapping of the key are untouched.
+--
+-- A click works as a button does: it acts on what was under the pointer
+-- when the button went down, once the button comes up, unless the pointer
+-- left that item in between (a drag). Each part of that is load-bearing:
+--   - The item is read in on_key at the press. Neovim updates the pointer
+--     position as it reads input, ahead of the keys being handled, so by a
+--     scheduled callback (or even at the release, when the release and the
+--     pointer moves after it arrive together) it may be somewhere else.
+--   - The action runs after the release. Neovim reads the release only once
+--     it is done with the press, so the press's own focus change can no
+--     longer land after the action (it did whenever a WinEnter or BufEnter
+--     handler processed events, closing a picker the click had opened).
+--   - Drifting a cell within the item is still a click, and a double or
+--     triple click is a click too.
+local function mouse_keys(name)
+  local out = {}
+  for _, prefix in ipairs({ "", "2-", "3-", "4-" }) do
+    out[normalize_lhs("<" .. prefix .. name .. ">")] = true
+  end
+  return out
+end
+local PRESS      = mouse_keys("LeftMouse")
+local DRAG       = mouse_keys("LeftDrag")
+local RELEASE    = mouse_keys("LeftRelease")
 local MOUSE_MOVE = normalize_lhs("<MouseMove>")
 
--- Set once the pointer moves with the button held. The click is read after
--- the fact, so by then a drag (resizing the panels, say) may have carried the
--- pointer onto a row; that row was never clicked.
-local dragged = false
-
--- The window focused before the latest click: Neovim focuses whatever is
--- clicked, and a click on the mode bar should leave focus where it was.
-local focus_before_click
+-- What the button went down on, until it comes up (see click_target).
+local pressed_on
 
 --- The buffer line under the pointer, or nil. getmousepos() reports the last
 --- line for the empty rows below it, which nothing should react to.
@@ -380,48 +395,60 @@ local function sync_mousemove()
   end
 end
 
+--- What a click at `mp` (a getmousepos()) acts on: a window and buffer
+--- line, and on the mode bar the item at the column. nil on a separator or
+--- status line (line 0: those are Neovim's, for resizing) and below the text.
+local function click_target(mp)
+  local line = line_under_mouse(mp)
+  if not line then return nil end
+  local item = mp.winid == M._bar_win and mode_bar.item_at(line, mp.wincol) or nil
+  return { winid = mp.winid, line = line, col = mp.wincol, item = item }
+end
+
+local function same_target(a, b)
+  return b ~= nil and a.winid == b.winid and a.line == b.line and a.item == b.item
+end
+
+--- Carry out a click on `t`.
+local function click(t)
+  if not (M.is_open() and is_valid_win(t.winid)) then return end
+  if t.winid == M._bar_win then
+    -- Focus goes back where it was; an item may then open the picker.
+    local back = t.focus ~= M._bar_win and t.focus or M._file_win
+    if is_valid_win(back) then vim.api.nvim_set_current_win(back) end
+    log.trace("click on the mode bar at %d:%d", t.line, t.col)
+    mode_bar.click(t.line, t.col)
+    return
+  end
+  local panel = t.winid == M._commit_win and commit_panel or t.winid == M._file_win and file_panel or nil
+  if not panel then
+    require("diff.diff_view").click(t.winid, t.line)
+    return
+  end
+  log.trace("click on %s row %d", panel == file_panel and "file panel" or "commit panel", t.line)
+  pcall(vim.api.nvim_win_set_cursor, t.winid, { t.line, 0 })
+  local ok, err = pcall(panel.activate_line, t.line)
+  if not ok then log.warn("click activation failed: %s", tostring(err)) end
+end
+
 local function on_mouse_key(key)
   if key == MOUSE_MOVE then
     on_mouse_move()
-    return
+  elseif PRESS[key] then
+    -- on_key runs before Neovim handles the press: the pointer is where the
+    -- button went down, and focus is still where it was.
+    pressed_on = click_target(vim.fn.getmousepos())
+    if pressed_on then pressed_on.focus = vim.api.nvim_get_current_win() end
+  elseif DRAG[key] then
+    if pressed_on and not same_target(pressed_on, click_target(vim.fn.getmousepos())) then
+      log.trace("pointer left the pressed item: a drag, not a click")
+      pressed_on = nil
+    end
+  elseif RELEASE[key] then
+    local t = pressed_on
+    pressed_on = nil
+    if t then vim.schedule(function() click(t) end) end
   end
-  if key == LEFT_DRAG then
-    dragged = true
-    return
-  end
-  if key ~= LEFT_MOUSE then return end
-  dragged = false
-  -- on_key runs before Neovim handles the click.
-  focus_before_click = vim.api.nvim_get_current_win()
-  vim.schedule(function()
-    if dragged then return end
-    local mp = vim.fn.getmousepos()
-    if mp.winid == M._bar_win then
-      -- Focus goes back where it was; an item may then open the picker.
-      local back = focus_before_click ~= M._bar_win and focus_before_click or M._file_win
-      if is_valid_win(back) then vim.api.nvim_set_current_win(back) end
-      local line = line_under_mouse(mp)
-      if line then mode_bar.click(line, mp.wincol) end
-      return
-    end
-    local target
-    if mp.winid == M._commit_win then
-      target = commit_panel
-    elseif mp.winid == M._file_win then
-      target = file_panel
-    end
-    if not target and mp.line >= 1 and mp.winid ~= 0 then
-      require("diff.diff_view").click(mp.winid, mp.line)
-      return
-    end
-    -- line is 0 on a separator or status line: leave those to Neovim.
-    if target and mp.line >= 1 and is_valid_win(mp.winid) then
-      log.trace("click on %s row %d", target == file_panel and "file panel" or "commit panel", mp.line)
-      pcall(vim.api.nvim_win_set_cursor, mp.winid, { mp.line, 0 })
-      local ok, err = pcall(target.activate_line, mp.line)
-      if not ok then log.warn("click activation failed: %s", tostring(err)) end
-    end
-  end)
 end
 
 -- ---------------------------------------------------------------------------

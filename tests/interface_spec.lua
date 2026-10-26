@@ -718,6 +718,37 @@ return {
     H.wait(function() return #vim.api.nvim_buf_get_extmarks(sidebar._bar_buf, ns, 0, -1, {}) == 1 end, "item tinted")
     vim.fn.getmousepos = real_getmousepos
 
+    -- A click acts on what the button went down on, once it comes up; the
+    -- pointer is read as each key arrives (a stand-in walks `path`).
+    local opened = 0
+    local pick = sidebar.pick_preview_branch
+    sidebar.pick_preview_branch = function() opened = opened + 1 end
+    local path = {}
+    vim.fn.getmousepos = function()
+      local at = table.remove(path, 1) or { 1, 5 }
+      return { winid = sidebar._bar_win, line = at[1], winrow = at[1], wincol = at[2],
+        screenrow = vim.fn.screenpos(sidebar._bar_win, at[1], 1).row }
+    end
+    path = { { 1, 5 } }
+    press("<LeftMouse>")
+    vim.wait(50)
+    H.eq(opened, 0, "nothing happens on the press")
+    path = { { 2, 5 } }
+    press("<LeftRelease>")
+    H.wait(function() return opened == 1 end, "the release acts on the pressed item, wherever the pointer is")
+    path = { { 1, 5 }, { 1, 6 }, { 1, 6 } }
+    press("<LeftMouse><LeftDrag><LeftRelease>")
+    H.wait(function() return opened == 2 end, "drifting within the item is still a click")
+    path = { { 1, 5 }, { 2, 5 }, { 2, 5 } }
+    press("<LeftMouse><LeftDrag><LeftRelease>")
+    vim.wait(50)
+    H.eq(opened, 2, "leaving the item is a drag, not a click")
+    path = { { 1, 5 }, { 1, 5 } }
+    press("<2-LeftMouse><2-LeftRelease>")
+    H.wait(function() return opened == 3 end, "a double click is a click")
+    vim.fn.getmousepos, sidebar.pick_preview_branch = real_getmousepos, pick
+    vim.api.nvim_set_current_win(sidebar._file_win)
+
     H.ok(mb.click(2, col_of(2, "Branch changes")))
     H.wait(function() return pcall(panel_row, "Branch Changes vs") end, "branch mode")
     H.eq(mb.click(2, col_of(2, "Branch changes")), false, "the active mode is not a button")

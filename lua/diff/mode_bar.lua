@@ -157,6 +157,14 @@ function M.hover(line, col)
   apply_hover()
 end
 
+--- A key naming the item at row `line`, column `col` (both 1-based), or nil
+--- between items. It survives a redraw that keeps the item in place, so a
+--- press and its release can be matched to the same item.
+function M.item_at(line, col)
+  local seg = segment_at(line, col)
+  return seg and (seg.row .. ":" .. seg.c1) or nil
+end
+
 --- A click at row `line`, column `col`. Returns whether it acted (false on
 --- padding or the active mode).
 function M.click(line, col)
