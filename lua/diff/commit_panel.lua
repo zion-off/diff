@@ -95,9 +95,16 @@ local function build(width)
 
     local meta = META_INDENT .. hash_str
     local hash_end = #meta
-    local author = util.trunc(commit.author or "", math.max(8, math.floor(width / 3)))
-    if author ~= "" then meta = meta .. " · " .. author end
-    if (commit.time or "") ~= "" then meta = meta .. " · " .. commit.time end
+    -- The author gives way first: what is left of the row after the hash and
+    -- the age, so the row never wraps its last words into a row of its own.
+    local sep = " · "
+    local age = (commit.time or "") ~= "" and (sep .. commit.time) or ""
+    if vim.api.nvim_strwidth(meta .. age) > width then age = "" end
+    local author_room = math.min(math.max(8, math.floor(width / 3)),
+      width - vim.api.nvim_strwidth(meta .. age .. sep))
+    local author = author_room >= 4 and util.trunc(commit.author or "", author_room) or ""
+    if author ~= "" then meta = meta .. sep .. author end
+    meta = meta .. age
     local meta_end = #meta
     local pills = {}
     for _, ref in ipairs(commit.refs or {}) do

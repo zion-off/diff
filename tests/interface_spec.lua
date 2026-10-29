@@ -400,6 +400,21 @@ return {
     sidebar.refresh = orig
   end },
 
+  { "a commit's metadata row fits the panel at any width, shedding the author first", function()
+    local win = sidebar._commit_win
+    local width = vim.api.nvim_win_get_width(win)
+    for _, w in ipairs({ 40, 30, 24, 20 }) do
+      vim.api.nvim_win_set_width(win, w)
+      cp.render()
+      for i, line in ipairs(vim.api.nvim_buf_get_lines(sidebar._commit_buf, 0, -1, false)) do
+        H.ok(vim.api.nvim_strwidth(line) <= vim.api.nvim_win_get_width(win),
+          "row " .. i .. " is wider than the panel at " .. w .. ": " .. line)
+      end
+    end
+    vim.api.nvim_win_set_width(win, width)
+    cp.render()
+  end },
+
   { "expanding a commit uses two processes; its files open as diffs", function()
     local calls = H.count_git(function()
       cp.activate_line(1)
