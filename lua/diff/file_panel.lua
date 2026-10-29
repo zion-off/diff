@@ -87,7 +87,7 @@ local function build(width)
     local dir_path = prefix .. display
     local key = section .. ":" .. dir_path
     local is_collapsed = S.collapsed_dirs[key] or false
-    local indent = string.rep("  ", depth + 1)
+    local indent = "  " .. util.tree_indent(depth)
     -- Reserve a column for "/" and one for the collapsed marker "…".
     local name = util.trunc_middle(display, math.max(1, width - #indent - 2))
     local line = indent .. name .. "/" .. (is_collapsed and "…" or "")
@@ -106,7 +106,7 @@ local function build(width)
     end
     local f = node.file
     local stat, add_range, del_range = util.diffstat(f.stat)
-    local line, cols = util.file_row(width, string.rep("  ", depth + 1), node.name, stat, stat_w,
+    local line, cols = util.file_row(width, "  " .. util.tree_indent(depth), node.name, stat, stat_w,
       util.STATUS_BADGE[f.status] or "·")
     local r = push(line, { type = "file", key = file_key(section, f.path), section = section, file = f })
     table.insert(hl, { r, util.file_name_hl(f.status), cols.name[1], cols.name[2] })
@@ -120,12 +120,14 @@ local function build(width)
 
   local function render_section(section, label)
     local files = section_files(section)
-    local chevron = S.collapsed[section] and "▸ " or "▾ "
-    local count = "(" .. #files .. ")"
+    local chevron = S.collapsed[section] and util.CHEVRON.closed or util.CHEVRON.open
+    local count = tostring(#files)
     -- Fitted to the panel: a long base branch name would otherwise wrap the
-    -- heading onto a second row.
-    local title = util.trunc(label, math.max(4, width - vim.api.nvim_strwidth(chevron) - #count - 2)) .. " "
-    local r = push(chevron .. title .. count,
+    -- heading onto a second row. The count sits one column in from the
+    -- edge, where the file rows' status letters do.
+    local title = util.trunc(label, math.max(4, width - vim.api.nvim_strwidth(chevron) - #count - 3))
+    local pad = math.max(1, width - vim.api.nvim_strwidth(chevron .. title) - #count - 1)
+    local r = push(chevron .. title .. string.rep(" ", pad) .. count .. " ",
       { type = "header", key = "header:" .. section, section = section })
     table.insert(hl, { r, "DiffNvimChevron", 0, #chevron })
     table.insert(hl, { r, "DiffNvimSectionHeader", #chevron, #chevron + #title })

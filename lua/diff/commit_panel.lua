@@ -66,7 +66,7 @@ end
 -- ---------------------------------------------------------------------------
 
 -- The disclosure marker leading each commit, as the file panel's sections.
-local CHEVRON = { open = "▾ ", closed = "▸ " }
+local CHEVRON = util.CHEVRON
 
 --- A commit is two rows: the subject, which is what the reader scans for,
 --- given all the width the marker leaves; and under it, dimmed, the hash,
@@ -123,7 +123,7 @@ local function build(width)
       local render_node
       local function render_dir(node, depth)
         local display, cur = util.compact_dir_chain(node)
-        local pad = META_INDENT .. string.rep("  ", depth)
+        local pad = META_INDENT .. util.tree_indent(depth)
         local name = util.trunc_middle(display, math.max(1, width - #pad - 1))
         local r = push(pad .. name .. "/", { type = "commit_dir", commit = commit })
         table.insert(hl, { r, "DiffNvimDirName", #pad, #pad + #name + 1 })
@@ -133,7 +133,7 @@ local function build(width)
         if not node.file then return render_dir(node, depth) end
         local f = node.file
         local stat, add_range, del_range = util.diffstat(f.stat)
-        local line, cols = util.file_row(width, META_INDENT .. string.rep("  ", depth), node.name, stat, stat_w,
+        local line, cols = util.file_row(width, META_INDENT .. util.tree_indent(depth), node.name, stat, stat_w,
           util.STATUS_BADGE[f.status] or "·")
         local r = push(line, { type = "commit_file", key = file_key(commit.hash, f.path), commit = commit, file = f })
         table.insert(hl, { r, util.file_name_hl(f.status), cols.name[1], cols.name[2] })

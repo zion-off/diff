@@ -81,8 +81,8 @@ return {
         vim.api.nvim_buf_get_lines(sidebar._file_buf, 0, 1, false)[1]:match("Staged") end, "panels")
     end)
     local text = table.concat(vim.api.nvim_buf_get_lines(sidebar._file_buf, 0, -1, false), "\n")
-    H.ok(text:match("Staged Changes %(1%)"), text)
-    H.ok(text:match("Changes %(4%)"), text)
+    H.ok(text:match("Staged Changes%s+1%s"), text)
+    H.ok(text:match("Changes%s+4%s"), text)
     H.ok(#calls <= 6, "open spawned " .. #calls .. " git processes: " .. vim.inspect(calls))
   end },
 
@@ -216,7 +216,7 @@ return {
 
   { "u unstages a hunk from the staged diff", function()
     H.wait(function()
-      return vim.api.nvim_buf_get_lines(sidebar._file_buf, 0, 1, false)[1]:match("Staged Changes %(2%)")
+      return vim.api.nvim_buf_get_lines(sidebar._file_buf, 0, 1, false)[1]:match("Staged Changes%s+2%s")
     end, "a.lua listed as staged")
     fp.activate_line(panel_row("a%.lua")) -- first match is in the staged section
     H.wait(function() return S().source and S().source.staged and S().layout end, "staged diff")
@@ -228,7 +228,7 @@ return {
 
   { "the file panel keeps its place: collapse needs no git, staging moves to the next file", function()
     H.wait(function()
-      return vim.api.nvim_buf_get_lines(sidebar._file_buf, 0, 1, false)[1]:match("Staged Changes %(1%)")
+      return vim.api.nvim_buf_get_lines(sidebar._file_buf, 0, 1, false)[1]:match("Staged Changes%s+1%s")
     end, "panel caught up")
     vim.api.nvim_set_current_win(sidebar._file_win)
     vim.wait(500) -- let the watcher-driven refresh from the previous test land
@@ -247,7 +247,7 @@ return {
     end, "cursor should move to the next unstaged file (b.lua)")
     H.git(repo, "reset", "-q", "--", "src/a.lua")
     H.wait(function()
-      return vim.api.nvim_buf_get_lines(sidebar._file_buf, 0, 1, false)[1]:match("Staged Changes %(1%)")
+      return vim.api.nvim_buf_get_lines(sidebar._file_buf, 0, 1, false)[1]:match("Staged Changes%s+1%s")
     end, "panel picks up the reset")
   end },
 
@@ -409,12 +409,12 @@ return {
     -- Subject first, the hash with the metadata under it, then straight to
     -- the files: the message is the tooltip's, not repeated inline.
     local rows = vim.api.nvim_buf_get_lines(sidebar._commit_buf, 0, -1, false)
-    H.ok(rows[1]:match("^▾ watched commit"), rows[1])
+    H.ok(rows[1]:match("^⌄ watched commit"), rows[1])
     H.ok(rows[2]:match("^  %x+ · test · "), rows[2])
     H.eq(rows[3], "  docs/", vim.inspect(rows))
     H.eq(panel_row("b%.lua", sidebar._commit_buf), 6, vim.inspect(rows))
     H.eq(rows[7], "", "a blank row closes the expanded commit")
-    H.ok(rows[8]:match("^▸ initial"), rows[8])
+    H.ok(rows[8]:match("^› initial"), rows[8])
     -- Stats right-aligned in one column, badges in the last, as in the file panel.
     local width = vim.api.nvim_win_get_width(sidebar._commit_win)
     for _, i in ipairs({ 4, 6 }) do H.eq(vim.api.nvim_strwidth(rows[i]), width, rows[i]) end
@@ -564,13 +564,13 @@ return {
     vim.api.nvim_set_current_win(sidebar._file_win)
     press("<leader>gB")
     H.wait(function() return pcall(panel_row, "topic%.lua") end, "branch changes listed")
-    H.ok(panel_row("Branch Changes vs " .. base .. " %(1%)"))
+    H.ok(panel_row("Branch Changes vs " .. base .. "%s+1%s*$"))
     -- A heading too long for the panel is cut, not wrapped onto a second row.
     local width = vim.api.nvim_win_get_width(sidebar._file_win)
     vim.api.nvim_win_set_width(sidebar._file_win, 22)
     fp.render()
     local heading = vim.api.nvim_buf_get_lines(sidebar._file_buf, 0, 1, false)[1]
-    H.ok(vim.api.nvim_strwidth(heading) < 22 and heading:match("…%s%(1%)$"), heading)
+    H.ok(vim.api.nvim_strwidth(heading) <= 22 and heading:match("…%s+1%s$"), heading)
     vim.api.nvim_win_set_width(sidebar._file_win, width)
     fp.render()
     H.ok(not pcall(panel_row, "Staged"), "status sections should be gone")
@@ -584,7 +584,7 @@ return {
 
     -- Previewing a branch shows that branch's changes: none, for the base itself.
     sidebar.set_preview_branch(base)
-    H.wait(function() return pcall(panel_row, "Branch Changes vs .*%(0%)") end, "preview's branch changes")
+    H.wait(function() return pcall(panel_row, "Branch Changes vs .*%s0%s") end, "preview's branch changes")
     H.ok(panel_row("No changes since the branch left"), "an empty branch says so")
     sidebar.set_preview_branch(nil)
     H.wait(function() return pcall(panel_row, "topic%.lua") end, "HEAD's branch changes again")

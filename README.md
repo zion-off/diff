@@ -364,7 +364,7 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimAddedWord` | Word-level added token |
 | `DiffNvimRemovedWord` | Word-level removed token |
 | `DiffNvimSectionHeader` | "Staged Changes" / "Changes" headers |
-| `DiffNvimChevron` | `▾` / `▸` before a section or a commit |
+| `DiffNvimChevron` | `⌄` / `›` before a section or a commit |
 | `DiffNvimFileName` | File name in a panel |
 | `DiffNvimAddedFile` | Added or untracked file name |
 | `DiffNvimDeletedFile` | Deleted file name |

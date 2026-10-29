@@ -177,6 +177,14 @@ function M.diffstat(st)
   return text, add_range, del_range
 end
 
+--- Disclosure markers before a section or a commit.
+M.CHEVRON = { open = "⌄ ", closed = "› " }
+
+--- Indent of a tree row `depth` levels below the first.
+function M.tree_indent(depth)
+  return string.rep("   ", depth)
+end
+
 --- Lay out a file row `width` columns wide: `indent`, the name (cut in the
 --- middle to fit), then at the right the diffstat right-aligned in a column
 --- `stat_w` wide and the status letter, one column in from the edge so it
