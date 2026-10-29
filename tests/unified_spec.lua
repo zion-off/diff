@@ -126,7 +126,7 @@ return {
     H.eq(headers[2], "@@ -42,7 +43,6 @@ function M.second()")
   end },
 
-  { "the gutter numbers each side as GitHub does: old, new, then +/-", function()
+  { "the gutter numbers each side as GitHub does: old, new, then the row's tint", function()
     local w = S().lnum_width
     local function expect(lnum, old, new, marker, group)
       local ev = gutter(lnum, true)
@@ -136,12 +136,12 @@ return {
       for _, h in ipairs(ev.highlights) do groups[h.group] = true end
       H.ok(groups[group], group .. " in " .. vim.inspect(ev.highlights))
     end
-    expect(item_for("old", 10), "10", "", "-", "DiffNvimRemovedNr")
-    expect(item_for("new", 10), "", "10", "+", "DiffNvimAddedNr")
-    expect(item_for("new", 11), "", "11", "+", "DiffNvimAddedMarker")
+    expect(item_for("old", 10), "10", "", " ", "DiffNvimRemovedNr")
+    expect(item_for("new", 10), "", "10", " ", "DiffNvimAddedNr")
+    expect(item_for("new", 11), "", "11", " ", "DiffNvimAddedMarker")
     -- Context below an insertion: the two numbers differ.
     expect(item_for("new", 12), "11", "12", " ", "LineNr")
-    expect(item_for("old", 45), "45", "", "-", "DiffNvimRemovedMarker")
+    expect(item_for("old", 45), "45", "", " ", "DiffNvimRemovedMarker")
 
     local width = vim.api.nvim_strwidth(gutter(1).str)
     H.eq(vim.fn.getwininfo(pane())[1].textoff, width, "the drawn gutter is as wide as 'numberwidth' was pinned")
@@ -206,10 +206,10 @@ return {
       local w = S().lnum_width
       local changed = row_where(function(r) return r.old == 10 end)
       local ev = gutter_of(old, changed)
-      H.eq(ev.str, string.format("  %" .. w .. "s - ", "10"))
+      H.eq(ev.str, string.format("  %" .. w .. "s   ", "10"))
       H.ok(groups(ev).DiffNvimRemovedNr and groups(ev).DiffNvimRemovedMarker, vim.inspect(ev.highlights))
       ev = gutter_of(new, changed)
-      H.eq(ev.str, string.format("  %" .. w .. "s + ", "10"))
+      H.eq(ev.str, string.format("  %" .. w .. "s   ", "10"))
       H.ok(groups(ev).DiffNvimAddedNr, vim.inspect(ev.highlights))
       H.eq(gutter_of(new, row_where(function(r) return r.old == 12 end)).str,
         string.format("  %" .. w .. "s   ", "13"), "context is numbered, unmarked")

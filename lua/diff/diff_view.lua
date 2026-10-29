@@ -124,22 +124,22 @@ end
 -- shows, and the gutter. A side pane ("old" or "new") shows one side, with
 -- fillers where it has no line; the unified pane shows both, each changed
 -- line on a row of its own. Both draw GitHub's gutter (line numbers tinted
--- with the row, then a +/- marker) and head each run of rows with its @@
+-- with the row, then padding in the row's tint) and head each run of rows with its @@
 -- range. The functions take a layout item and its model row (nil for a band).
 -- ---------------------------------------------------------------------------
 
 -- Cells of the sign column ('signcolumn' "yes:1").
 local SIGN_WIDTH = 2
--- Cells of the +/- marker set before the code, and a space.
+-- Cells of tinted padding set before the code.
 local MARKER_WIDTH = 2
 
 local BAND_HL = "DiffNvimHunkHeader"
 local BAND_HOVER_HL = "DiffNvimHunkHeaderHover"
 
 local GUTTER_STYLE = {
-  old = { nr = "DiffNvimRemovedNr", marker_hl = "DiffNvimRemovedMarker", marker = "-" },
-  new = { nr = "DiffNvimAddedNr",   marker_hl = "DiffNvimAddedMarker",   marker = "+" },
-  context = { nr = "LineNr", marker_hl = "LineNr", marker = " " },
+  old = { nr = "DiffNvimRemovedNr", marker_hl = "DiffNvimRemovedMarker" },
+  new = { nr = "DiffNvimAddedNr",   marker_hl = "DiffNvimAddedMarker" },
+  context = { nr = "LineNr", marker_hl = "LineNr" },
 }
 
 local function numbered(n, width)
@@ -202,12 +202,12 @@ local function band_gutter(p, item, lnum, numbers)
     .. string.rep(" ", 1 + MARKER_WIDTH)
 end
 
---- A row's line numbers (`numbers`, laid out), then its marker, in `style`.
---- A wrapped line's continuation (not `first`) keeps the tint without the
---- marker; its numbers are left blank by the caller.
-local function numbered_gutter(style, first, numbers)
+--- A row's line numbers (`numbers`, laid out), then padding in the row's
+--- tint, in `style`. A wrapped line's continuation has its numbers left blank
+--- by the caller.
+local function numbered_gutter(style, numbers)
   return "%s%#" .. style.nr .. "#" .. numbers .. " "
-    .. "%#" .. style.marker_hl .. "#" .. (first and style.marker or " ") .. " "
+    .. "%#" .. style.marker_hl .. "#" .. string.rep(" ", MARKER_WIDTH)
 end
 
 local function side_pane(side)
@@ -248,7 +248,7 @@ local function side_pane(side)
     if row and not row[side] then return "%#DiffNvimFiller#" .. string.rep(" ", pane.gutter_width()) end
     local first = vim.v.virtnum == 0
     local style = GUTTER_STYLE[row and row.change and side or "context"]
-    return numbered_gutter(style, first, numbered(first and row and row[side], S.lnum_width))
+    return numbered_gutter(style, numbered(first and row and row[side], S.lnum_width))
   end
 
   return pane
@@ -290,7 +290,7 @@ function UNIFIED.gutter(item, row, lnum)
   if not row then return "%s%#LineNr#" .. string.rep(" ", UNIFIED.gutter_width() - SIGN_WIDTH) end
   local old, new = UNIFIED.lines_at(item, row)
   local first, w = vim.v.virtnum == 0, S.lnum_width
-  return numbered_gutter(GUTTER_STYLE[item.side or "context"], first,
+  return numbered_gutter(GUTTER_STYLE[item.side or "context"],
     numbered(first and old, w) .. " " .. numbered(first and new, w))
 end
 

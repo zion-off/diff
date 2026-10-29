@@ -347,9 +347,9 @@ return {
       return ev.str:sub(-2, -2), ev.highlights[#ev.highlights].group
     end
     for r = first, first + 2 do
-      H.eq({ marker_at(r) }, { "+", "DiffNvimAddedMarker" }, "row " .. r)
+      H.eq({ marker_at(r) }, { " ", "DiffNvimAddedMarker" }, "row " .. r)
     end
-    H.eq(marker_at(first + 3), " ", "no marker on the row after the run")
+    H.eq(select(2, marker_at(first + 3)), "LineNr", "no tint on the row after the run")
 
     H.write(repo, "src/a.lua", H.text(a_new))
     H.wait(function() return S().model.added == added end, "live refresh back")

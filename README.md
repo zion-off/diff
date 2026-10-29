@@ -25,7 +25,7 @@ A NeoVim plugin that replicates the Git source-control UX of VSCode's SCM sideba
 | **Real line numbers** | The gutter shows file line numbers, not pane row numbers |
 | **Scroll sync** | Split panes stay locked together, whether you scroll with the keyboard, the mouse wheel over either pane, or with `smoothscroll` on |
 | **Line wrapping** | Long lines wrap at word boundaries, GitHub-style; the shorter side of each row is padded so both panes stay row-aligned (split view needs Neovim ≥ 0.10) |
-| **Gutter indicators** | As on GitHub: changed lines' numbers on a stronger tint, then a `-` / `+` marker before the code |
+| **Gutter indicators** | Changed lines' numbers on a stronger tint, then a cell of the row's tint before the code |
 | **Hunk staging** | Stage or unstage the change under the cursor straight from the diff |
 | **Live updates** | Panels follow `git` activity from anywhere (CLI, other tools); the open diff follows edits on disk, keeping your place |
 | **Fast navigation** | `]f` / `[f` move between files, `gf` jumps to the real file at the same line |
@@ -398,7 +398,7 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimHunkHeaderDecl` | Function name after a hunk header |
 | `DiffNvimHunkHeaderHover` / `DiffNvimHunkHeaderDeclHover` | Hunk header under the mouse pointer (click to expand) |
 | `DiffNvimAddedNr` / `DiffNvimRemovedNr` | Line numbers of added / removed lines |
-| `DiffNvimAddedMarker` / `DiffNvimRemovedMarker` | `+` / `-` marker before added / removed lines |
+| `DiffNvimAddedMarker` / `DiffNvimRemovedMarker` | Padding between the line numbers and the code, in the row's tint |
 | `DiffNvimModeBranch` | Branch name in the mode bar |
 | `DiffNvimModeCell` / `DiffNvimModeCellHover` | The branch row of the mode bar (under the mouse pointer) |
 | `DiffNvimModeTag` | `⌃⌄` and the upstream counts in the branch row |
