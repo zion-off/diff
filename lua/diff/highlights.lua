@@ -59,7 +59,8 @@ local LIGHT = {
 -- ---------------------------------------------------------------------------
 -- Deriving chrome colours from the colorscheme
 --
--- The diff tints above are hand-picked and stay fixed. The plugin's *chrome*
+-- The diff tints above are only the fallback for a theme with no background;
+-- otherwise they are derived from Normal like the rest. The plugin's *chrome*
 -- — header bar, filler bands, hunk headers, hover and the active-file
 -- mark — must instead sit a measured step away from whatever Normal is, or it
 -- lands at the wrong weight on every theme but the one it was tuned for.
@@ -92,7 +93,7 @@ local function surfaces(p)
   local bg, fg = hl_attr("Normal", "bg"), hl_attr("Normal", "fg")
   if not bg or not fg then
     return {
-      header_bg = p.filler_bg, filler_bg = p.filler_bg,
+      header_bg = p.hover_bg, filler_bg = p.filler_bg,
       hover_bg = p.hover_bg,
       active_bg = p.hover_bg,
       track_bg = p.filler_bg, segment_bg = p.hover_bg, away_bg = p.hover_bg,
@@ -115,8 +116,12 @@ local function surfaces(p)
   -- Hunk headers are tinted towards the theme's informational blue, as
   -- GitHub's are towards its own.
   local info = hl_attr("DiagnosticInfo", "fg") or accent
+  -- The mode bar and the diff header use two surface levels and no others:
+  -- raised (the branch row, the file header, the selected half of the
+  -- control) and sunken (the control's track).
+  local raised, sunken = blend(bg, fg, 0.10), blend(bg, fg, 0.045)
   return {
-    header_bg    = blend(bg, fg, 0.10),
+    header_bg    = raised,
     filler_bg    = blend(bg, fg, 0.04),
     hover_bg     = select_tint(0.35, 0.14),
     active_bg    = select_tint(0.55, 0.20),
@@ -129,8 +134,8 @@ local function surfaces(p)
     -- The mode bar's segmented control: a track a step above Normal, its
     -- selected half raised to the header's level; and the tint of a mode
     -- you are visiting (another branch, another worktree).
-    track_bg     = blend(bg, fg, 0.045),
-    segment_bg   = blend(bg, fg, 0.10),
+    track_bg     = sunken,
+    segment_bg   = raised,
     away_bg      = blend(bg, accent, 0.20),
     -- Their hover tints, each a step from its own surface: the list hover
     -- is measured from Normal and vanishes on a raised one. The track's
@@ -141,6 +146,30 @@ local function surfaces(p)
     hunk_bg       = blend(bg, info, 0.12),
     hunk_hover_bg = blend(bg, info, 0.22),
   }, bg
+end
+
+local function as_int(color)
+  return type(color) == "number" and color or tonumber(color:sub(2), 16)
+end
+
+--- Diff tints measured from Normal: the line's, its line numbers' and the
+--- changed words', each the given share of the way from the background to the
+--- theme's add / remove colour. Falls back to the static palette when Normal
+--- carries no background.
+local function diff_tints(p, bg, added, removed)
+  if not bg then
+    return {
+      added_bg = p.added_bg, removed_bg = p.removed_bg,
+      added_nr_bg = p.added_nr_bg, removed_nr_bg = p.removed_nr_bg,
+      added_word_bg = p.added_word_bg, removed_word_bg = p.removed_word_bg,
+    }
+  end
+  local a, r = as_int(added), as_int(removed)
+  return {
+    added_bg = blend(bg, a, 0.11), removed_bg = blend(bg, r, 0.11),
+    added_nr_bg = blend(bg, a, 0.19), removed_nr_bg = blend(bg, r, 0.19),
+    added_word_bg = blend(bg, a, 0.34), removed_word_bg = blend(bg, r, 0.34),
+  }
 end
 
 --- The first foreground colour defined among `groups`.
@@ -162,7 +191,7 @@ end
 
 -- Default highlight definitions: group name -> nvim_set_hl opts.
 -- DiffNvimAdded/Removed use explicit bg values (never link to DiffAdd/DiffDelete)
--- so they remain muted regardless of colorscheme. Re-built on ColorScheme autocmd.
+-- so they stay muted on any colorscheme. Re-built on ColorScheme autocmd.
 local function build_defaults()
   local p = vim.o.background == "light" and LIGHT or DARK
   local s, bg = surfaces(p)
@@ -177,11 +206,12 @@ local function build_defaults()
   local renamed = first_fg("Special", "Identifier") or changed
   local text_fg = hl_attr("Normal", "fg")
   local nr_fg = hl_attr("LineNr", "fg") or s.dim_fg
+  local t = diff_tints(p, bg, added, removed)
   return {
     -- Diff line backgrounds (PRIORITY_LINE_BG=50: below tree-sitter ~100)
     -- Explicit bg; fg=NONE so tree-sitter foreground colours show through.
-    DiffNvimAdded           = { bg = p.added_bg,   fg = "NONE" },
-    DiffNvimRemoved         = { bg = p.removed_bg,  fg = "NONE" },
+    DiffNvimAdded           = { bg = t.added_bg,   fg = "NONE" },
+    DiffNvimRemoved         = { bg = t.removed_bg,  fg = "NONE" },
     DiffNvimFiller          = { bg = s.filler_bg },
     -- The filler's glyphs are drawn as an overlay, which replaces the cell
     -- highlight outright: the band's colour has to ride on them, or the row
@@ -191,16 +221,16 @@ local function build_defaults()
     -- Word-level highlights (PRIORITY_WORD_HL=150: above tree-sitter ~100)
     -- More saturated than line bg so changed tokens stand out, fg=NONE so
     -- tree-sitter colours still show for context.
-    DiffNvimAddedWord       = { bg = p.added_word_bg,    fg = "NONE" },
-    DiffNvimRemovedWord     = { bg = p.removed_word_bg,  fg = "NONE" },
+    DiffNvimAddedWord       = { bg = t.added_word_bg,    fg = "NONE" },
+    DiffNvimRemovedWord     = { bg = t.removed_word_bg,  fg = "NONE" },
 
     -- Diff gutter, after GitHub's: line numbers on a stronger tint than the
-    -- line, and the +/- marker on the line's own tint so the band runs
-    -- unbroken from the marker into the code
-    DiffNvimAddedNr         = { fg = nr_fg, bg = p.added_nr_bg },
-    DiffNvimRemovedNr       = { fg = nr_fg, bg = p.removed_nr_bg },
-    DiffNvimAddedMarker     = { fg = p.gutter_added,   bg = p.added_bg },
-    DiffNvimRemovedMarker   = { fg = p.gutter_removed, bg = p.removed_bg },
+    -- line, and the padding after them on the line's own tint so the band runs
+    -- unbroken from the numbers into the code
+    DiffNvimAddedNr         = { fg = nr_fg, bg = t.added_nr_bg },
+    DiffNvimRemovedNr       = { fg = nr_fg, bg = t.removed_nr_bg },
+    DiffNvimAddedMarker     = { fg = p.gutter_added,   bg = t.added_bg },
+    DiffNvimRemovedMarker   = { fg = p.gutter_removed, bg = t.removed_bg },
     -- Hunk headers ("@@ -12,7 +12,9 @@ function …") and the declaration
     -- after them; hovered when they expand on a click
     DiffNvimHunkHeader          = { fg = s.dim_fg, bg = s.hunk_bg },
