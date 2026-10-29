@@ -131,9 +131,28 @@ end
 -- compute
 -- ---------------------------------------------------------------------------
 
+--- Join ranges separated by nothing but whitespace, so a changed phrase is
+--- one mark rather than a string of words with unmarked gaps between them.
+--- @param ranges table[]  ordered { start_col, end_col }
+--- @param line   string   the text the ranges index
+--- @return table[]
+local function merge_adjacent(ranges, line)
+  local out = {}
+  for _, r in ipairs(ranges) do
+    local last = out[#out]
+    if last and line:sub(last.end_col + 1, r.start_col):match("^%s*$") then
+      last.end_col = r.end_col
+    else
+      out[#out + 1] = { start_col = r.start_col, end_col = r.end_col }
+    end
+  end
+  return out
+end
+
 --- Compute word-level diff between two strings.
 --- Returns two lists of {start_col, end_col} (0-indexed byte offsets) marking
---- the non-whitespace tokens that differ on each side.
+--- the non-whitespace tokens that differ on each side; changed tokens with
+--- only whitespace between them form one range.
 ---
 --- @param  old_line string
 --- @param  new_line string
@@ -179,7 +198,7 @@ function M.compute(old_line, new_line)
     end
   end
 
-  return old_ranges, new_ranges
+  return merge_adjacent(old_ranges, old_line), merge_adjacent(new_ranges, new_line)
 end
 
 return M

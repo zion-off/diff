@@ -307,4 +307,13 @@ return {
     H.eq(#same, 30)
     H.ok(not same[1].hunk)
   end },
+
+  { "word diff marks a changed phrase as one range, not word by word", function()
+    local word_diff = require("diff.word_diff")
+    local old, new = word_diff.compute("call(alpha beta, 1)", "call(gamma delta, 1)")
+    H.eq(old, { { start_col = 5, end_col = 15 } })
+    H.eq(new, { { start_col = 5, end_col = 16 } })
+    old = word_diff.compute("a = 1", "a = 2")
+    H.eq(old, { { start_col = 4, end_col = 5 } }, "separate changes stay separate")
+  end },
 }
