@@ -205,14 +205,24 @@ local function window_boxes(tab)
   return boxes
 end
 
---- The separator glyphs in effect for `win` ('fillchars' or its defaults).
-local function fill_chars(win)
+--- The separator glyphs the hover highlight draws: the reader's global
+--- 'fillchars' or its defaults. The plugin's own windows draw their
+--- separators blank, so the highlight is the only line on screen, and only
+--- while the edge can be dragged.
+local function fill_chars()
   local fc = { vert = "│", horiz = "─", vertleft = "┤", vertright = "├", verthoriz = "┼" }
-  local opt = vim.api.nvim_get_option_value("fillchars", { win = win })
+  local opt = vim.go.fillchars
   for key, ch in opt:gmatch("(%w+):([^,]+)") do
     if fc[key] then fc[key] = ch end
   end
   return fc
+end
+
+--- Whether the horizontal separator under `win` is drawn: the plugin's own
+--- windows draw theirs blank, so nothing meets the edge there.
+local function draws_separator(win)
+  local opt = vim.api.nvim_get_option_value("fillchars", { win = win })
+  return opt:match("%f[%w]horiz:([^,]+)") ~= " "
 end
 
 --- Screen area (0-based editor cells) and lines of glyphs for `win`'s edge,
@@ -221,7 +231,7 @@ end
 --- commit panels), which all resize together when it is dragged. Where a
 --- horizontal separator meets it (global status line), the junction glyph.
 local function edge_shape(win, kind)
-  local fc = fill_chars(win)
+  local fc = fill_chars()
   local boxes = window_boxes(vim.api.nvim_win_get_tabpage(win))
   local b
   for _, bw in ipairs(boxes) do if bw.win == win then b = bw end end
@@ -254,8 +264,10 @@ local function edge_shape(win, kind)
   if vim.o.laststatus == 3 then
     for _, bw in ipairs(boxes) do
       local sep_row = bw.row + bw.height
-      if bw.col + bw.width == x then left[sep_row] = true end
-      if bw.col == x + 1 then right[sep_row] = true end
+      if draws_separator(bw.win) then
+        if bw.col + bw.width == x then left[sep_row] = true end
+        if bw.col == x + 1 then right[sep_row] = true end
+      end
     end
   end
   local lines = {}
@@ -308,7 +320,7 @@ local function highlight_edge(win, kind)
     tinted_status = { win = win, saved = saved }
     vim.wo[win].winhighlight = (saved ~= "" and saved .. "," or "")
       .. "StatusLine:DiffNvimEdgeHoverStatus,StatusLineNC:DiffNvimEdgeHoverStatus,"
-      .. "DiffNvimRule:DiffNvimEdgeHoverStatus"
+      .. "DiffNvimGap:DiffNvimEdgeHoverStatus"
     edge = { win = win, kind = kind }
     return
   end
@@ -589,7 +601,7 @@ end
 --- Only the commit panel carries a heading. The mode bar heads the sidebar
 --- and already names the file panel's mode right above it; the file panel's
 --- own sections are titled inside it.
-local function set_panel_win_opts(win, heading, spacer)
+local function set_panel_win_opts(win, heading)
   for k, v in pairs({
     number = false, relativenumber = false, wrap = true, linebreak = false,
     signcolumn = "no", foldcolumn = "0", statuscolumn = "", cursorline = false,
@@ -597,7 +609,7 @@ local function set_panel_win_opts(win, heading, spacer)
   }) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
-  chrome.dress(win, { label = heading, right = heading and preview_label() or nil, spacer = spacer })
+  chrome.dress(win, { label = heading, right = heading and preview_label() or nil })
 end
 
 --- Only the window with focus marks a row. Two panels both drawing a cursor
@@ -635,9 +647,8 @@ M.sync_cursorline = sync_cursorline
 --- Re-apply the panel chrome, so a branch preview is named — and stops
 --- being named when it ends — without rebuilding the panels.
 function M.redress_panels()
-  -- The mode bar is set off from the panels by space, not a rule.
-  for _, panel in ipairs({ { M._file_win }, { M._commit_win, "Commits" }, { M._bar_win, nil, true } }) do
-    if is_valid_win(panel[1]) then set_panel_win_opts(panel[1], panel[2], panel[3]) end
+  for _, panel in ipairs({ { M._file_win }, { M._commit_win, "Commits" }, { M._bar_win } }) do
+    if is_valid_win(panel[1]) then set_panel_win_opts(panel[1], panel[2]) end
   end
 end
 
@@ -688,7 +699,7 @@ local function create_mode_bar()
   M._bar_win = vim.api.nvim_get_current_win()
   M._bar_buf = make_panel_buf("mode-bar", "diff.nvim")
   vim.api.nvim_win_set_buf(M._bar_win, M._bar_buf)
-  set_panel_win_opts(M._bar_win, nil, true)
+  set_panel_win_opts(M._bar_win)
   -- Unwrapped, so a narrow sidebar clips its rows instead of wrapping them
   -- out of its two-row window.
   for k, v in pairs({ winfixheight = true, cursorline = false, wrap = false }) do
@@ -751,8 +762,7 @@ function M.show_placeholder(win)
                       scrollbind = false, cursorbind = false }) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
-  -- Nothing is open, so there is nothing to label. An empty status line draws
-  -- as a plain rule, which is quieter than naming a pane that holds no file.
+  -- Nothing is open, so there is nothing to label.
   chrome.dress(win, {})
   M.render_placeholder(win)
 end

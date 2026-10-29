@@ -386,14 +386,15 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimNoteText` | Note body text |
 | `DiffNvimActiveFile` | Panel row of the file shown in the diff view |
 | `DiffNvimHover` | Clickable row under the mouse pointer |
-| `DiffNvimEdgeHover` | Draggable window separator under the mouse pointer |
+| `DiffNvimEdgeHover` | Draggable window separator under the mouse pointer (drawn only while hovered) |
 | `DiffNvimEdgeHoverStatus` | Status line between panels under the mouse pointer (when it is the draggable edge) |
 | `DiffNvimHeader` | Filename bar above the diff |
 | `DiffNvimHeaderName` | File name in the header |
 | `DiffNvimHeaderLabel` | Directory and notes in the header |
 | `DiffNvimPanelTitle` | Panel heading ("Commits", "Notes") |
 | `DiffNvimPanelTitleDim` | Secondary text at the end of a panel heading |
-| `DiffNvimRule` | Divider drawn as the status line of the plugin's windows |
+| `DiffNvimRule` | Rule under the diff header (other dividers are blank and no longer use this group) |
+| `DiffNvimGap` | Blank status line (a gap) under the plugin's windows |
 | `DiffNvimHunkHeader` | `@@ -12,7 +12,9 @@` hunk header |
 | `DiffNvimHunkHeaderDecl` | Function name after a hunk header |
 | `DiffNvimHunkHeaderHover` / `DiffNvimHunkHeaderDeclHover` | Hunk header under the mouse pointer (click to expand) |

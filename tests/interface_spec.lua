@@ -532,7 +532,7 @@ return {
     H.wait(function() return vim.wo[fw].winhighlight == own end, "status line restored")
 
     -- With a global status line it is a separator line, painted like the
-    -- vertical edge, and the junction where the two meet keeps its glyph.
+    -- vertical edge; a blank separator leaves no junction in it.
     vim.o.laststatus = 3
     vim.cmd("redraw")
     fh = vim.api.nvim_win_get_height(fw)
@@ -542,7 +542,7 @@ return {
     point({ winid = fw, wincol = width + 1 })
     H.wait(function() return edge() and edge().width == 1 end, "vertical edge")
     local glyphs = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(sidebar._edge_float()), 0, -1, false)
-    H.eq(glyphs[fpos[1] + fh - bpos[1] + 1], "┤", vim.inspect(glyphs))
+    H.eq(glyphs[fpos[1] + fh - bpos[1] + 1], "│", "no junction with a blank separator: " .. vim.inspect(glyphs))
     vim.o.laststatus = 2
     vim.cmd("redraw")
 
@@ -652,8 +652,7 @@ return {
       H.eq(stl(win), " ", tostring(kind) .. " fillchars: " .. vim.wo[win].fillchars)
     end
     laststatus(2)
-    H.eq(stl(sidebar._file_win), "─", "a rule again under per-window status lines")
-    H.eq(stl(sidebar._bar_win), " ", "the mode bar is set off by space, not a rule")
+    H.eq(stl(sidebar._file_win), " ", "blank under per-window status lines")
     open_file("a%.lua", "src/a.lua")
   end },
 
@@ -665,7 +664,7 @@ return {
       H.ok(vim.wo[sidebar._commit_win].winbar:match("  Commits%%="), vim.wo[sidebar._commit_win].winbar)
       H.eq(vim.wo[sidebar._file_win].winbar, "", "the mode bar already names the file panel")
       for _, win in ipairs({ sidebar._file_win, sidebar._commit_win, pane("old"), pane("new") }) do
-        H.eq(vim.wo[win].statusline, ls == 3 and "" or "%#DiffNvimRule#", "status line of " .. win)
+        H.eq(vim.wo[win].statusline, ls == 3 and "" or "%#DiffNvimGap#", "status line of " .. win)
       end
     end
     vim.o.laststatus = 2

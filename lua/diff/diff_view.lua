@@ -415,7 +415,7 @@ local function pane_opts(win, bound)
     cursorbind     = bound,
     diff           = false,
   })
-  chrome.dress(win, { fillchars = { eob = " " } })
+  chrome.dress(win, { under_rule = true })
 end
 
 local function header_opts(win)
@@ -425,7 +425,7 @@ local function header_opts(win)
     winfixheight = true,
     winhighlight = "Normal:DiffNvimHeader,NormalNC:DiffNvimHeader,EndOfLine:DiffNvimHeader",
   })
-  chrome.dress(win, {})
+  chrome.dress(win, { rule = true })
 end
 
 local function scratch_buf(bufhidden, kind)
@@ -722,7 +722,7 @@ end
 function M.redress()
   if valid_win(S.header_win) then header_opts(S.header_win) end
   for _, win in pairs(S.panes) do
-    if valid_win(win) then chrome.dress(win, { fillchars = { eob = " " } }) end
+    if valid_win(win) then chrome.dress(win, {}) end
   end
 end
 

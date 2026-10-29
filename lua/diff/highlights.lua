@@ -292,8 +292,8 @@ local function build_defaults()
     DiffNvimActiveFile      = { bg = s.active_bg },
     -- A clickable row under the mouse pointer
     DiffNvimHover           = { bg = s.hover_bg },
-    -- A draggable window edge under the mouse pointer: a separator, or a
-    -- status line when each window has its own
+    -- A draggable window edge under the mouse pointer: a separator drawn in
+    -- the hover colour, or a status line when each window has its own
     DiffNvimEdgeHover       = { fg = p.edge_hover, bold = true },
     DiffNvimEdgeHoverStatus = { bg = p.edge_hover },
     -- Mode bar above the sidebar
@@ -319,8 +319,9 @@ local function build_defaults()
     -- Mode bar item under the cursor, while the bar has keyboard focus
     DiffNvimModeCursor      = { link = "CursorLine" },
 
-    -- The status line of the plugin's own windows is a divider, not a
-    -- heading, so it recedes to the separator colour.
+    -- The status line of the plugin's own windows: a blank row, a gap
+    DiffNvimGap             = { bg = bg },
+    -- The diff header's status line, a rule under its band
     DiffNvimRule            = { fg = p.separator_fg, bg = s.header_bg },
     -- Panel headings ('winbar'), set like the panels' section headings: on
     -- Normal's own background (the raised band is for what can be clicked),

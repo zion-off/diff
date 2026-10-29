@@ -33,15 +33,22 @@ end
 
 local function esc(s) return (tostring(s or ""):gsub("%%", "%%%%")) end
 
---- The status line of a plugin window: no text, only its highlight, so
---- 'fillchars' draws it as a rule — a divider under the window rather than
---- a second heading. It cannot be the empty string: a window-local
---- 'statusline' of "" means "fall back to the global one", which is the
---- default ruler.
+--- The status line of a plugin window: no text, only its highlight, so it
+--- draws as a blank row of the window's own surface — a gap under the window
+--- rather than a rule or a second heading. It cannot be the empty string: a
+--- window-local 'statusline' of "" means "fall back to the global one", which
+--- is the default ruler.
+M.GAP = "%#DiffNvimGap#"
+-- The diff header's own status line, kept as a rule: it is the header band's
+-- lower edge, where a blank row would read as dead space under it.
 M.RULE = "%#DiffNvimRule#"
--- A status line drawn as empty space, for a window whose edge is better
--- marked by spacing than by a line.
-M.SPACER = "%#Normal#"
+
+-- Every separator is drawn blank: windows are told apart by raised surfaces
+-- and by space, not by lines.
+local BLANK_SEPARATORS = {
+  vert = " ", vertleft = " ", vertright = " ", verthoriz = " ",
+  horiz = " ", horizup = " ", horizdown = " ",
+}
 
 --- A panel heading for 'winbar', set like the panels' own section headings
 --- ("Staged Changes"): the title as written, its text in the column theirs
@@ -59,10 +66,10 @@ function M.winbar(label, right)
   return line
 end
 
---- Dress a plugin window: hide the end-of-buffer tildes, head it with
---- `opts.label` / `opts.right` when given, and draw its status line as a
---- rule, or as blank space with `opts.spacer`. `opts.fillchars` adds further
---- entries.
+--- Dress a plugin window: hide the end-of-buffer tildes, draw its separators
+--- and status line as blank space, and head it with `opts.label` /
+--- `opts.right` when given. `opts.rule` draws a rule instead of the gap, and
+--- `opts.under_rule` carries such a rule on across the gap beside this window.
 ---
 --- Headings go in 'winbar', never the status line. A status line is a
 --- footer: a title there sits under the window it names, directly above the
@@ -72,31 +79,27 @@ end
 ---
 --- Under the global bar the window's status line is left unset and the
 --- global fill characters are kept: that bar is filled with the focused
---- window's fill characters, and a rule set here would draw dashes through
---- the gaps of the reader's status line.
+--- window's fill characters, and a glyph set here would draw through the gaps
+--- of the reader's status line.
 --- @param win integer
----
---- A spacer under the global bar blanks the separator line below the window
---- instead ('horiz' is the window's own; the status line glyphs are not).
---- @param opts table|nil { label?, right?, fillchars?, spacer? }
+--- @param opts table|nil { label?, right?, rule?, under_rule? }
 function M.dress(win, opts)
   opts = opts or {}
   local global_bar = vim.o.laststatus == 3
-  local fc = { eob = " " }
-  local rule = opts.spacer and " " or "─"
+  local fc = vim.tbl_extend("force", { eob = " " }, BLANK_SEPARATORS)
   if global_bar then
     local global = vim.go.fillchars
     fc.stl = global:match("stl:([^,]+)") or " "
     fc.stlnc = global:match("stlnc:([^,]+)") or " "
-    if opts.spacer then fc.horiz = " " end
+    if opts.rule then fc.horiz = "─" end
+    if opts.under_rule then fc.horizdown = "─" end
   else
-    fc.stl, fc.stlnc = rule, rule
+    local glyph = opts.rule and "─" or " "
+    fc.stl, fc.stlnc = glyph, glyph
   end
-  fc = vim.tbl_extend("force", fc, opts.fillchars or {})
   pcall(vim.api.nvim_set_option_value, "fillchars", M.fillchars(win, fc), { win = win })
   pcall(vim.api.nvim_set_option_value, "winbar", M.winbar(opts.label, opts.right), { win = win })
-  local statusline = global_bar and "" or (opts.spacer and M.SPACER or M.RULE)
-  pcall(vim.api.nvim_set_option_value, "statusline", statusline, { win = win })
+  pcall(vim.api.nvim_set_option_value, "statusline", global_bar and "" or (opts.rule and M.RULE or M.GAP), { win = win })
 end
 
 --- Tag `buf` as the plugin's own, so windows can be recognised without
