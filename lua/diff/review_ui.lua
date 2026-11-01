@@ -75,7 +75,9 @@ local THREAD_ACTIONS = {
     })
   end,
   set_resolved = function(thread, resolved)
-    actions.set_resolved(thread, resolved)
+    log.debug("%s thread %s", resolved and "resolve" or "reopen", tostring(thread.id))
+    local err = actions.set_resolved(thread, resolved)
+    if err then notify("cannot change the thread: " .. err, vim.log.levels.WARN) end
   end,
   edit = function(_, comment)
     compose.open({
@@ -90,7 +92,9 @@ local THREAD_ACTIONS = {
     })
   end,
   delete = function(comment)
-    actions.delete_comment(comment)
+    log.debug("delete comment %s", tostring(comment.id))
+    local err = actions.delete_comment(comment)
+    if err then notify("cannot delete the comment: " .. err, vim.log.levels.WARN) end
   end,
 }
 
@@ -132,9 +136,7 @@ local function drafts_list(drafts, width)
     table.insert(lines, where .. kind)
     table.insert(hls, { #lines - 1, 0, #where, "DiffNvimThreadAuthor" })
     if kind ~= "" then table.insert(hls, { #lines - 1, #where, -1, "DiffNvimThreadMeta" }) end
-    for _, para in ipairs(vim.split(d.body:gsub("\r", ""), "\n", { plain = true })) do
-      for _, wrapped in ipairs(require("diff.util").wrap(para, width - 3)) do table.insert(lines, "   " .. wrapped) end
-    end
+    vim.list_extend(lines, require("diff.util").wrap_text(d.body, width, "   "))
   end
   return lines, hls
 end
@@ -148,10 +150,10 @@ function M.open_review()
     notify("this branch has no open pull request", vim.log.levels.WARN)
     return
   end
-  local pending = pr.pending()
-  local drafts = pending and pending.count or 0
+  local pending, drafts = pr.pending(), pr.drafts()
+  local drafts_label = string.format("%d draft comment%s", #drafts, #drafts == 1 and "" or "s")
   local title = "Review #" .. p.number
-  if drafts > 0 then title = title .. string.format(" · %d draft comment%s", drafts, drafts == 1 and "" or "s") end
+  if #drafts > 0 then title = title .. " · " .. drafts_label end
   local function submit(event, done_msg)
     return function(text, done)
       local err = actions.submit(event, text)
@@ -160,7 +162,7 @@ function M.open_review()
     end
   end
   local items = {
-    { label = "Comment", style = "primary", allow_empty = drafts > 0, run = bound_to_shown_pr(submit("comment", "review submitted")) },
+    { label = "Comment", style = "primary", allow_empty = #drafts > 0, run = bound_to_shown_pr(submit("comment", "review submitted")) },
     { label = "Approve", allow_empty = true, run = bound_to_shown_pr(submit("approve", "pull request approved")) },
     { label = "Request changes", run = bound_to_shown_pr(submit("request_changes", "changes requested")) },
   }
@@ -172,14 +174,14 @@ function M.open_review()
         done(err)
       end) })
   end
-  table.insert(items, { label = "Open on GitHub", allow_empty = true, run = bound_to_shown_pr(function(_, done)
-    pr.open_in_browser()
-    done(nil)
-  end) })
+  table.insert(items, { label = "Open on GitHub", allow_empty = true, keep_open = true,
+    run = bound_to_shown_pr(function(_, done)
+      pr.open_in_browser()
+      done(nil)
+    end) })
   table.insert(items, { label = "Cancel" })
-  local drafts = pr.drafts()
   local list = #drafts > 0 and {
-    title = string.format("Your %d draft comment%s", #drafts, #drafts == 1 and "" or "s"),
+    title = "Your " .. drafts_label,
     render = function(width) return drafts_list(drafts, width) end,
   } or nil
   compose.open({ title = title, buttons = items, list = list })
