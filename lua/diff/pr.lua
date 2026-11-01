@@ -89,10 +89,13 @@ local function branch_candidates(root, branch, callback)
   end)
 end
 
-local function find_pr(root, branch, callback)
+--- @param gen integer  the lookup this is for: a newer one stops it
+local function find_pr(root, branch, gen, callback)
   branch_candidates(root, branch, function(candidates)
+    if gen ~= S.gen then return end
     log.debug("looking up the pull request of %s as %s", branch or "HEAD", vim.inspect(candidates))
     local function try(i)
+      if gen ~= S.gen then return end
       local name = candidates[i]
       if name == nil then return callback(nil) end
       github.find_pull_request(root, name or nil, function(pr)
@@ -161,7 +164,7 @@ function M.sync(root, branch, opts)
       S.pr, S.review = nil, nil
       return finish_loading(gen)
     end
-    find_pr(root, branch, function(pr)
+    find_pr(root, branch, gen, function(pr)
       if gen ~= S.gen then return end
       if not pr then
         log.debug("no open pull request for %s", branch or "HEAD")
