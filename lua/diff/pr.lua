@@ -45,27 +45,64 @@ end
 -- Loading
 -- ---------------------------------------------------------------------------
 
---- Branch names to ask gh about: a remote-tracking name ("origin/x") is also
---- tried without its remote, which is how the pull request names it.
-local function branch_candidates(branch)
-  if not branch then return { false } end
-  local out = { branch }
-  local bare = branch:match("^[^/]+/(.+)$")
-  if bare then table.insert(out, bare) end
-  return out
+--- The GitHub owner in a remote URL: git@github.com:owner/repo(.git) or
+--- https://github.com/owner/repo.
+local function url_owner(url)
+  return url and url:gsub("%.git$", ""):gsub("/+$", ""):match("[:/]([^/:]+)/[^/:]+$") or nil
+end
+
+--- `ref` ("remote/branch") split at the longest remote name it starts with.
+local function split_remote(ref, remotes)
+  local best
+  for name in pairs(remotes) do
+    if vim.startswith(ref, name .. "/") and (not best or #name > #best) then best = name end
+  end
+  if best then return best, ref:sub(#best + 2) end
+end
+
+--- Names to ask gh about for `branch`, most precise first. A pull request
+--- from a fork is found only as "owner:branch", and the remote it was
+--- fetched from is often not named after its owner, so the owner comes from
+--- the remote's URL. A remote-tracking name ("origin/x") is also tried bare,
+--- and a local branch through the remote branch it tracks.
+--- @param callback fun(names: (string|false)[])  false: the checked-out branch
+local function branch_candidates(root, branch, callback)
+  if not branch then return callback({ false }) end
+  git.remotes(root, function(remotes)
+    local function from_remote_ref(ref, out)
+      local remote, bare = split_remote(ref, remotes)
+      if not remote then return out end
+      local owner = url_owner(remotes[remote])
+      if owner then table.insert(out, owner .. ":" .. bare) end
+      table.insert(out, bare)
+      return out
+    end
+    local out = from_remote_ref(branch, {})
+    if #out > 0 then
+      table.insert(out, branch)
+      return callback(out)
+    end
+    git.upstream(root, branch, function(upstream)
+      out = upstream and from_remote_ref(upstream, {}) or {}
+      table.insert(out, 1, branch)
+      callback(out)
+    end)
+  end)
 end
 
 local function find_pr(root, branch, callback)
-  local candidates = branch_candidates(branch)
-  local function try(i)
-    local name = candidates[i]
-    if name == nil then return callback(nil) end
-    github.find_pull_request(root, name or nil, function(pr)
-      if pr then return callback(pr) end
-      try(i + 1)
-    end)
-  end
-  try(1)
+  branch_candidates(root, branch, function(candidates)
+    log.debug("looking up the pull request of %s as %s", branch or "HEAD", vim.inspect(candidates))
+    local function try(i)
+      local name = candidates[i]
+      if name == nil then return callback(nil) end
+      github.find_pull_request(root, name or nil, function(pr)
+        if pr then return callback(pr) end
+        try(i + 1)
+      end)
+    end
+    try(1)
+  end)
 end
 
 local function set_review(review)

@@ -545,6 +545,28 @@ function M.find_branch(root, name, callback)
   end)
 end
 
+--- The repository's remotes and their fetch URLs.
+--- @param callback fun(remotes: table<string, string>)  name -> url
+function M.remotes(root, callback)
+  M.run({ "config", "--get-regexp", "^remote\\..*\\.url$" }, root, function(lines, _, code)
+    local out = {}
+    for _, line in ipairs(code == 0 and lines or {}) do
+      local name, url = line:match("^remote%.(.+)%.url%s+(%S+)$")
+      if name then out[name] = url end
+    end
+    callback(out)
+  end)
+end
+
+--- The upstream a local branch tracks ("origin/main"), or nil.
+--- @param callback fun(upstream: string|nil)
+function M.upstream(root, branch, callback)
+  M.run({ "rev-parse", "--abbrev-ref", "--symbolic-full-name", branch .. "@{upstream}" }, root,
+    function(lines, _, code)
+      callback(code == 0 and lines[1] and lines[1] ~= "" and lines[1] or nil)
+    end)
+end
+
 --- List what `head` changed since its merge base with `base` — what a pull
 --- request's "Files changed" tab shows. One process: `--raw` supplies each
 --- file's old and new blob, which pins its content even if the branches move

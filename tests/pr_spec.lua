@@ -5,6 +5,14 @@ local pr = require("diff.pr")
 
 local repo = H.repo({ ["a.lua"] = "one\n" })
 local head = vim.trim(H.git(repo, "rev-parse", "HEAD"))
+-- origin is the repository the pull request is on; "fork" is a contributor's
+-- fork, a remote not named after its owner.
+H.git(repo, "remote", "add", "origin", "git@github.com:acme/r.git")
+H.git(repo, "remote", "add", "fork", "https://github.com/someone/r")
+H.git(repo, "update-ref", "refs/remotes/fork/feature", "HEAD")
+H.git(repo, "branch", "mine")
+H.git(repo, "config", "branch.mine.remote", "fork")
+H.git(repo, "config", "branch.mine.merge", "refs/heads/feature")
 
 local log = {}
 local logged_in = true
@@ -31,9 +39,12 @@ local function later(cb, ...)
 end
 
 gh.authenticated = function(_, cb) later(cb, logged_in) end
+-- gh finds the pull request as the checked-out branch, by its bare name
+-- (as if it were on origin), or as the fork's "owner:branch".
+local FOUND = { feature = true, ["someone:feature"] = true }
 github.find_pull_request = function(_, branch, cb)
   table.insert(log, "find " .. tostring(branch))
-  later(cb, (branch == nil or branch == "feature") and review.pr or nil)
+  later(cb, (branch == nil or FOUND[branch]) and review.pr or nil)
 end
 github.fetch_review = function(_, _, cb) table.insert(log, "fetch"); later(cb, vim.deepcopy(review)) end
 github.start_review = function(_, _, commit, cb) table.insert(log, "start " .. commit); later(cb, "R_new") end
@@ -68,7 +79,21 @@ return {
     logged_in, log = true, {}
     synced("origin/feature", { force = true })
     H.eq(pr.pull_request().number, 7)
-    H.eq(log, { "find origin/feature", "find feature", "fetch" })
+    H.eq(log, { "find acme:feature", "find feature", "fetch" })
+  end },
+
+  { "finds a fork's pull request as owner:branch, the owner read from the remote's URL", function()
+    log = {}
+    synced("fork/feature")
+    H.eq(log, { "find someone:feature", "fetch" })
+  end },
+
+  { "finds a local branch's pull request through the branch it tracks", function()
+    log = {}
+    FOUND.feature = nil
+    synced("mine")
+    FOUND.feature = true
+    H.eq(log, { "find mine", "find someone:feature", "fetch" })
   end },
 
   { "the branch's changes show live threads at their current lines", function()
