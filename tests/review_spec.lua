@@ -230,7 +230,7 @@ return {
     require("diff").close()
   end },
 
-  { "the review float lists the draft comments above the summary, scrollably", function()
+  { "the review float lists the draft comments under the summary, scrollably", function()
     local function draft(id, line, body)
       return vim.tbl_extend("force", vim.deepcopy(thread), { id = id, line = line, pending = true,
         comments = { vim.tbl_extend("force", thread.comments[1], { id = "C" .. id, body = body, pending = true }) } })
@@ -242,6 +242,8 @@ return {
     require("diff.review_ui").open_review()
     local s = compose._state()
     H.ok(s.list and vim.api.nvim_win_is_valid(s.list), "a list window")
+    local function top(w) return vim.api.nvim_win_get_position(w)[1] end
+    H.ok(top(s.editor) < top(s.bar) and top(s.bar) < top(s.list), "editor, then buttons, then the list")
     local buf = vim.api.nvim_win_get_buf(s.list)
     local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
     H.eq(lines[1], " a.lua line 10")

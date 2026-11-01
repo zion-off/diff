@@ -358,8 +358,9 @@ never handles a token.
   review", until you submit the review as a comment, an approval or a request
   for changes. Drafts live on GitHub, so they survive closing Neovim and show
   in the browser. Replies made while you have drafts join them.
-- **The review float** (`<leader>gr`) lists your draft comments above the
-  summary, each with its file, line and text. The list scrolls with the mouse
+- **The review float** (`<leader>gr`) has the summary box and its buttons on
+  top and your draft comments listed under them, each with its file, line and
+  text. The list scrolls with the mouse
   wheel, or with `j`/`k` after `<S-Tab>` from the editor (`<Tab>` goes back).
 - **Discard drafts** in the review float throws the pending review away
   (press twice to confirm).

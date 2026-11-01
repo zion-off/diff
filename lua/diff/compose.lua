@@ -7,9 +7,10 @@
 ---   ╰──────────────────────────────────────╯
 ---    Add to review   Cancel                     the buttons
 ---
---- A float may also show a list above the editor (the review's draft
---- comments): it scrolls with the usual keys or the mouse wheel, and Shift-Tab
---- from the editor moves into it.
+--- A float may also show a list under the buttons (the review's draft
+--- comments), as GitHub puts the review's box above its comments: it scrolls
+--- with the usual keys or the mouse wheel, and Shift-Tab from the editor
+--- moves into it.
 ---
 --- In normal mode, the `submit_comment` key (Enter) presses the first
 --- button, Tab moves to the buttons (where h/l move and Enter presses), and
@@ -151,7 +152,7 @@ end
 ---             the first is pressed by `submit_comment`; one without `run` cancels; one
 ---             with `confirm` (a label) asks for a second press first
 ---   list    = { title, render = fun(width): lines: string[], hls: { row, s, e, hl }[] }|nil,
----             shown above the editor
+---             shown under the buttons
 ---   on_close = fun()|nil }
 function M.open(opts)
   M.close()
@@ -166,10 +167,9 @@ function M.open(opts)
     list_height = math.max(0, math.min(#list_lines, room, math.floor(vim.o.lines * 0.5)))
   end
   local list_rows = list_height > 0 and list_height + 2 or 0
-  -- Rows: the list and its border, the editor and its border, then the
-  -- buttons right under it.
-  local top = math.max(0, math.floor((vim.o.lines - list_rows - height - 3) / 2))
-  local row = top + list_rows
+  -- Rows: the editor and its border, the buttons right under it, then the
+  -- list and its border.
+  local row = math.max(0, math.floor((vim.o.lines - list_rows - height - 3) / 2))
   local col = math.max(0, math.floor((vim.o.columns - width - 2) / 2))
 
   local editor_buf = scratch("compose", "diff.nvim Comment")
@@ -209,7 +209,8 @@ function M.open(opts)
       pcall(vim.api.nvim_buf_set_extmark, list_buf, NS, h[1], h[2], { end_col = end_col, hl_group = h[4] })
     end
     list = require("diff.float").open(list_buf, false, {
-      relative = "editor", row = top, col = col, width = width, height = list_height, title = opts.list.title,
+      relative = "editor", row = row + height + 3, col = col, width = width, height = list_height,
+      title = opts.list.title,
     }, { footer = "j/k scroll   tab back" })
     if list then
       for k, v in pairs({ wrap = false, cursorline = false }) do
