@@ -1763,11 +1763,22 @@ local function leave_comment(p)
   end
 end
 
-local function show_threads_at_cursor()
+--- Open the pull request threads on the cursor's row.
+function M.show_comments()
   local win = current_pane()
-  if not (S.layout and valid_win(win)) then return end
-  if not show_threads_at(win, vim.api.nvim_win_get_cursor(win)[1]) then
-    notify("no comments on this line")
+  if S.layout and valid_win(win) then show_threads_at(win, vim.api.nvim_win_get_cursor(win)[1]) end
+end
+
+--- Keys for `show_comments` at the cursor: the threads when the row has
+--- any, else the key itself, unmapped, so it keeps its own meaning ('keywordprg'
+--- for K) where there is nothing to show.
+local function show_comments_keys(p, key)
+  return function()
+    local rows = S.thread_rows[p]
+    if rows and rows[vim.api.nvim_win_get_cursor(0)[1] - 1] then
+      return "<Cmd>lua require('diff.diff_view').show_comments()<CR>"
+    end
+    return key
   end
 end
 
@@ -1839,7 +1850,8 @@ setup_keymaps = function(buf, p)
 
   map({ "n", "v" }, km.leave_note, leave_note(p), "Leave note")
   map({ "n", "v" }, km.leave_comment, leave_comment(p), "Comment on the pull request")
-  map("n", km.show_comments, show_threads_at_cursor, "Show pull request comments on this line")
+  map("n", km.show_comments, show_comments_keys(p, km.show_comments), "Show pull request comments on this line",
+    { expr = true })
   map("n", km.toggle_notes, function() require("diff.annotations").toggle_notes(S.root) end, "Toggle notes panel")
   map("n", km.next_hunk, function() M.jump_hunk(1) end, "Next hunk")
   map("n", km.prev_hunk, function() M.jump_hunk(-1) end, "Previous hunk")

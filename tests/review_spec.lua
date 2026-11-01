@@ -101,6 +101,17 @@ return {
     pr_thread.close()
   end },
 
+  { "K on a line without comments keeps its own meaning", function()
+    local win = S().panes.new
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { row_of_new(1), 0 })
+    vim.api.nvim_create_user_command("ReviewSpecKeyword", function(o) vim.g.keyword_looked_up = o.args end, { nargs = "*" })
+    vim.o.keywordprg = ":ReviewSpecKeyword"
+    feed("K")
+    H.eq(pr_thread.is_open(), false)
+    H.eq(vim.g.keyword_looked_up, "line")
+  end },
+
   { "clicking a thread's sign opens it; clicking its Resolve button resolves it", function()
     local win = S().panes.new
     H.eq(dv.click(win, row_of_new(4), 1), false, "a line without threads")
