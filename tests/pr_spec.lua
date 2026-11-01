@@ -63,7 +63,9 @@ end
 local function synced(branch, opts)
   local before = changes
   pr.sync(repo, branch, opts)
-  H.wait(function() return changes > before and pr._state().review ~= nil end, "review loaded")
+  H.wait(function()
+    return changes > before and pr._state().review ~= nil and (branch ~= nil or pr._state().local_oid ~= nil)
+  end, "review loaded")
 end
 
 return {
@@ -127,7 +129,7 @@ return {
 
   { "the branch's changes take comments only when the local branch is the pull request's head", function()
     local target = await(function(cb) pr.comment_target(repo, { kind = "range", head = "HEAD", path = "a.lua" }, "old", cb) end)
-    H.eq(target, { commit = head })
+    H.eq(target, { pr_id = "PR_1", commit = head })
     H.write(repo, "a.lua", "two\n")
     H.git(repo, "commit", "-qam", "unpushed")
     local _, why = await(function(cb) pr.comment_target(repo, { kind = "range", head = "HEAD", path = "a.lua" }, "new", cb) end)
@@ -139,7 +141,7 @@ return {
     local _, why = await(function(cb) pr.comment_target(repo, { kind = "commit", hash = head, path = "a.lua" }, "new", cb) end)
     H.ok(why:find("draft review is on commit c_old"), why)
     local target = await(function(cb) pr.comment_target(repo, { kind = "commit", hash = "c_old", path = "a.lua" }, "new", cb) end)
-    H.eq(target, { commit = "c_old" })
+    H.eq(target, { pr_id = "PR_1", commit = "c_old" })
   end },
 
   { "the first comment starts a draft review, removed again if GitHub rejects the comment", function()
@@ -147,7 +149,7 @@ return {
     log = {}
     github.add_thread = function(_, id, _, _, cb) table.insert(log, "thread " .. id); later(cb, nil, "Line could not be resolved") end
     local err = await(function(cb)
-      pr.add_comment({ commit = head }, { path = "a.lua", side = "new", line = 1 }, "hi", cb)
+      pr.add_comment({ pr_id = "PR_1", commit = head }, { path = "a.lua", side = "new", line = 1 }, "hi", cb)
     end)
     H.eq(err, "Line could not be resolved")
     H.eq(log, { "start " .. head, "thread R_new", "delete R_new" })
@@ -158,10 +160,82 @@ return {
     log = {}
     github.add_thread = function(_, id, _, _, cb) table.insert(log, "thread " .. id); later(cb, "T9") end
     local err = await(function(cb)
-      pr.add_comment({ commit = head }, { path = "a.lua", side = "new", line = 1 }, "hi", cb)
+      pr.add_comment({ pr_id = "PR_1", commit = head }, { path = "a.lua", side = "new", line = 1 }, "hi", cb)
     end)
     H.eq(err, nil)
     H.eq(log, { "delete R_empty", "start " .. head, "thread R_new", "fetch" })
+  end },
+
+  { "an older commit of a long pull request is in it when the head descends from it", function()
+    local st = pr._state()
+    local saved_commits, saved_head = st.review.commits, st.pr.head_oid
+    st.review.pending = nil
+    st.review.commits = {}
+    st.review.commits_complete = false
+    st.pr.head_oid = vim.trim(H.git(repo, "rev-parse", "HEAD"))
+    local target = await(function(cb) pr.comment_target(repo, { kind = "commit", hash = head, path = "a.lua" }, "new", cb) end)
+    H.eq(target, { pr_id = "PR_1", commit = head })
+    st.review.commits_complete = true
+    local _, why = await(function(cb) pr.comment_target(repo, { kind = "commit", hash = head, path = "a.lua" }, "new", cb) end)
+    H.ok(why and why:find("not part of"), tostring(why))
+    st.review.commits, st.pr.head_oid = saved_commits, saved_head
+  end },
+
+  { "a comment written for one pull request is not sent to another", function()
+    local err = await(function(cb)
+      pr.add_comment({ pr_id = "PR_other", commit = head }, { path = "a.lua", side = "new", line = 1 }, "hi", cb)
+    end)
+    H.ok(err and err:find("changed"), tostring(err))
+  end },
+
+  { "a reload superseded by a branch switch still reports back", function()
+    local reported = false
+    pr.reload(function() reported = true end)
+    pr.sync(repo, "fork/feature")
+    H.wait(function() return reported end, "reload callback")
+  end },
+
+  { "checking out another branch looks its pull request up again, and says so", function()
+    synced(nil, { head = "feature" })
+    local switched = 0
+    local id = vim.api.nvim_create_autocmd("User", { pattern = "DiffNvimPrChanged", callback = function(ev)
+      if ev.data and ev.data.switched then switched = switched + 1 end
+    end })
+    log = {}
+    pr.sync(repo, nil, { head = "feature" })
+    vim.wait(100)
+    H.eq(log, {}, "same branch: nothing looked up")
+    synced(nil, { head = "other" })
+    H.eq(log, { "find nil", "fetch" })
+    H.eq(switched, 1)
+    vim.api.nvim_del_autocmd(id)
+  end },
+
+  { "threads on the branch's changes are hidden while the local branch is not at the head", function()
+    -- HEAD has moved on from the head the fake pull request has (an earlier test committed).
+    local cur = vim.trim(H.git(repo, "rev-parse", "HEAD"))
+    review.pr.head_oid = cur
+    synced(nil, { head = "again", force = true })
+    H.eq(pr.in_sync(), true)
+    H.ok(#pr.threads_for({ kind = "range", head = "HEAD", path = "a.lua" }) > 0, "shown in sync")
+    H.write(repo, "a.lua", "three\n")
+    H.git(repo, "commit", "-qam", "ahead")
+    pr.sync(repo, nil, { head = "again" })
+    H.wait(function() return not pr.in_sync() end, "out of sync noticed")
+    H.eq(pr.threads_for({ kind = "range", head = "HEAD", path = "a.lua" }), {})
+    review.pr.head_oid = head
+  end },
+
+  { "a review that failed to load says so when commenting", function()
+    github.fetch_review = function(_, _, cb) later(cb, nil, "boom") end
+    local notify = vim.notify
+    vim.notify = function() end
+    pr.sync(repo, nil, { head = "failing" })
+    H.wait(function() return not pr.loading() end, "settled")
+    vim.notify = notify
+    local _, why = await(function(cb) pr.comment_target(repo, { kind = "commit", hash = head, path = "a.lua" }, "new", cb) end)
+    H.ok(why:find("did not load"), why)
+    github.fetch_review = function(_, _, cb) table.insert(log, "fetch"); later(cb, vim.deepcopy(review)) end
   end },
 
   { "clearing forgets the pull request", function()

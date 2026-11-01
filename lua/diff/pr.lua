@@ -24,17 +24,22 @@ local log    = require("diff.log").scope("pr")
 local function fresh_state()
   return {
     root = nil,
-    branch = nil,   -- the branch shown: nil for HEAD, else a previewed branch
-    synced = false, -- root/branch have been looked up at least once
+    branch = nil,    -- the branch shown: nil for HEAD, else a previewed branch
+    head = nil,      -- the checked-out branch's name, which a checkout changes
+    synced = false,  -- root/branch/head have been looked up at least once
+    loading = false, -- a lookup is in flight
+    local_oid = nil, -- the commit the branch shown is at locally
     pr = nil, review = nil,
-    gen = 0,        -- bumps on every sync, so stale responses are dropped
+    gen = 0,         -- bumps on every sync, so stale responses are dropped
   }
 end
 
 local S = fresh_state()
 
-local function fire()
-  vim.api.nvim_exec_autocmds("User", { pattern = "DiffNvimPrChanged", modeline = false })
+--- @param data table|nil  { switched = true }: another pull request (or
+---   none) is being loaded, so anything acting on the old one must stop
+local function fire(data)
+  vim.api.nvim_exec_autocmds("User", { pattern = "DiffNvimPrChanged", modeline = false, data = data or {} })
 end
 
 local function short(oid)
@@ -44,12 +49,6 @@ end
 -- ---------------------------------------------------------------------------
 -- Loading
 -- ---------------------------------------------------------------------------
-
---- The GitHub owner in a remote URL: git@github.com:owner/repo(.git) or
---- https://github.com/owner/repo.
-local function url_owner(url)
-  return url and url:gsub("%.git$", ""):gsub("/+$", ""):match("[:/]([^/:]+)/[^/:]+$") or nil
-end
 
 --- `ref` ("remote/branch") split at the longest remote name it starts with.
 local function split_remote(ref, remotes)
@@ -72,7 +71,7 @@ local function branch_candidates(root, branch, callback)
     local function from_remote_ref(ref, out)
       local remote, bare = split_remote(ref, remotes)
       if not remote then return out end
-      local owner = url_owner(remotes[remote])
+      local owner = git.github_repo(remotes[remote])
       if owner then table.insert(out, owner .. ":" .. bare) end
       table.insert(out, bare)
       return out
@@ -110,37 +109,66 @@ local function set_review(review)
   S.pr = review and review.pr or S.pr
 end
 
+--- Read where the branch shown is locally. Threads are drawn on the
+--- branch's changes only while it is at the pull request's head, so a
+--- commit, pull or reset that moves it redraws them.
+local function read_local_oid(root, branch, gen)
+  git.rev_parse(root, { branch or "HEAD" }, function(shas)
+    local oid = shas and shas[1] or nil
+    if gen ~= S.gen or oid == S.local_oid then return end
+    log.debug("%s is now at %s locally", branch or "HEAD", short(oid))
+    S.local_oid = oid
+    if S.pr then fire() end
+  end)
+end
+
+local function finish_loading(gen)
+  if gen ~= S.gen then return end
+  S.loading = false
+  fire()
+end
+
 --- Look up the pull request of the branch shown and load its review.
 --- @param root   string
 --- @param branch string|nil  previewed branch; nil for the checked-out one
---- @param opts   table|nil   { force = true }: fetch again even when the
----   branch is the one already loaded, and check the gh login again
+--- @param opts   table|nil   {
+---   head  = the checked-out branch's name (nil when detached): checking out
+---           another branch looks its pull request up,
+---   force = fetch again even when nothing changed, and check the gh login again }
 function M.sync(root, branch, opts)
   opts = opts or {}
-  if S.synced and S.root == root and S.branch == branch and not opts.force then return end
-  local changed_branch = S.root ~= root or S.branch ~= branch
+  local changed = S.root ~= root or S.branch ~= branch or S.head ~= opts.head
+  if S.synced and not changed and not opts.force then
+    if S.pr then read_local_oid(root, branch, S.gen) end
+    return
+  end
   S.gen = S.gen + 1
   local gen = S.gen
-  S.root, S.branch, S.synced = root, branch, true
-  if changed_branch and (S.pr or S.review) then
-    S.pr, S.review = nil, nil
-    fire()
+  S.root, S.branch, S.head, S.synced, S.loading = root, branch, opts.head, true, true
+  if changed then
+    S.local_oid = nil
+    if S.pr then
+      log.info("branch shown changed; forgetting pull request #%d", S.pr.number)
+      S.pr, S.review = nil, nil
+      -- Announced after the caller's own work (a sidebar refresh), not in it.
+      vim.schedule(function() if gen == S.gen then fire({ switched = true }) end end)
+    end
   end
-
   local elapsed = require("diff.log").timer()
   gh.authenticated(root, function(ok)
     if gen ~= S.gen then return end
     if not ok then
-      if S.pr then S.pr, S.review = nil, nil; fire() end
-      return
+      S.pr, S.review = nil, nil
+      return finish_loading(gen)
     end
     find_pr(root, branch, function(pr)
       if gen ~= S.gen then return end
       if not pr then
         log.debug("no open pull request for %s", branch or "HEAD")
-        if S.pr then S.pr, S.review = nil, nil; fire() end
-        return
+        S.pr, S.review = nil, nil
+        return finish_loading(gen)
       end
+      read_local_oid(root, branch, gen)
       github.fetch_review(root, pr.id, function(review, err)
         if gen ~= S.gen then return end
         if not review then
@@ -152,13 +180,15 @@ function M.sync(root, branch, opts)
           log.info("pull request #%d for %s: %d threads in %.0f ms", pr.number, branch or "HEAD",
             #review.threads, elapsed())
         end
-        fire()
+        finish_loading(gen)
       end)
     end)
   end, { recheck = opts.force })
 end
 
 --- Fetch the review of the loaded pull request again (after an action).
+--- The callback always runs; a result for a pull request no longer shown is
+--- dropped.
 --- @param callback fun()|nil
 function M.reload(callback)
   local pr, root, gen = S.pr, S.root, S.gen
@@ -167,13 +197,14 @@ function M.reload(callback)
     return
   end
   github.fetch_review(root, pr.id, function(review, err)
-    if gen ~= S.gen then return end
-    if review then
+    if gen ~= S.gen then
+      log.debug("dropping the reload of #%d: the branch shown changed", pr.number)
+    elseif review then
       set_review(review)
+      fire()
     else
       log.warn("cannot reload the review of #%d: %s", pr.number, tostring(err))
     end
-    fire()
     if callback then callback() end
   end)
 end
@@ -199,6 +230,17 @@ end
 --- @return table|nil  the viewer's draft review { id, commit, count }
 function M.pending()
   return S.review and S.review.pending or nil
+end
+
+--- @return boolean  whether a lookup is in flight
+function M.loading()
+  return S.loading
+end
+
+--- @return boolean  whether the branch shown is at the pull request's head
+---   locally (true while unknown or without a pull request)
+function M.in_sync()
+  return not (S.pr and S.local_oid) or S.local_oid == S.pr.head_oid
 end
 
 --- @return table|nil  the loaded review (tests)
@@ -228,7 +270,7 @@ function M.threads_for(source)
   end
   for _, t in ipairs(S.review.threads) do
     if t.path == source.path then
-      if source.kind == "range" and shows_pr_branch(source) and not t.outdated then
+      if source.kind == "range" and shows_pr_branch(source) and not t.outdated and S.local_oid == S.pr.head_oid then
         add(t.side, t.line, t)
       elseif source.kind == "commit" and t.commit == source.hash and t.side == "new" then
         add("new", t.original_line, t)
@@ -239,13 +281,19 @@ function M.threads_for(source)
 end
 
 --- Where a comment on `side` of the diff of `source` would go, checked
---- against the local branch. Calls back with the commit GitHub ties it to,
---- or with the reason it cannot be made, in words for the reader.
---- @param callback fun(target: {commit: string}|nil, reason: string|nil)
+--- against the local branch. Calls back with the pull request and the
+--- commit GitHub ties the comment to, or with the reason it cannot be made,
+--- in words for the reader.
+--- @param callback fun(target: {pr_id: string, commit: string}|nil, reason: string|nil)
 function M.comment_target(root, source, side, callback)
   local pr, review = S.pr, S.review
-  if not (pr and review) then
+  if not pr then
     callback(nil, "This branch has no open pull request.")
+    return
+  end
+  if not review then
+    callback(nil, string.format("The comments of pull request #%d did not load. Run :DiffNvimRefresh to try again.",
+      pr.number))
     return
   end
   local function check_pending(commit)
@@ -256,18 +304,25 @@ function M.comment_target(root, source, side, callback)
         short(pending.commit), short(commit)))
       return
     end
-    callback({ commit = commit }, nil)
+    callback({ pr_id = pr.id, commit = commit }, nil)
   end
 
   if source.kind == "commit" then
-    if not review.commits[source.hash] then
-      callback(nil, string.format("Commit %s is not part of pull request #%d.", short(source.hash), pr.number))
-    elseif side ~= "new" then
+    if side ~= "new" then
       callback(nil, "On a single commit, comments go on new-side lines. "
         .. "GitHub measures removed lines against the pull request's base, not the commit's parent.")
-    else
-      check_pending(source.hash)
+      return
     end
+    local function not_in_pr()
+      callback(nil, string.format("Commit %s is not part of pull request #%d.", short(source.hash), pr.number))
+    end
+    if review.commits[source.hash] then return check_pending(source.hash) end
+    if review.commits_complete then return not_in_pr() end
+    -- GitHub lists a pull request's last commits only; an older one is in
+    -- it if the head descends from it.
+    git.is_ancestor(root, source.hash, pr.head_oid, function(yes)
+      if yes then check_pending(source.hash) else not_in_pr() end
+    end)
     return
   end
 
@@ -314,6 +369,10 @@ end
 function M.add_comment(target, anchor, body, callback)
   local pr, root = S.pr, S.root
   if not pr then return callback("no pull request") end
+  if target.pr_id ~= pr.id then
+    log.info("comment written for another pull request; not sending it")
+    return callback("the pull request shown changed while the comment was written")
+  end
   local pending = M.pending()
   log.info("comment on %s %s:%d%s at %s", anchor.path, anchor.side, anchor.line,
     anchor.start_line and (" from " .. anchor.start_line) or "", short(target.commit))

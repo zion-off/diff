@@ -154,12 +154,21 @@ return {
     H.sh({ "git", "init", "-q", "--bare", remote })
     local repo = H.repo({ ["a.txt"] = "a\n" })
     H.git(repo, "branch", "develop")
-    H.eq(await(function(cb) git.find_branch(repo, "develop", cb) end), { ref = "refs/heads/develop", name = "develop" })
+    H.eq(await(function(cb) git.find_branch(repo, "develop", nil, cb) end), { ref = "refs/heads/develop", name = "develop" })
     H.git(repo, "remote", "add", "origin", remote)
     H.git(repo, "push", "-q", "origin", "develop")
     H.git(repo, "fetch", "-q", "origin")
-    H.eq(await(function(cb) git.find_branch(repo, "develop", cb) end),
+    H.eq(await(function(cb) git.find_branch(repo, "develop", nil, cb) end),
       { ref = "refs/remotes/origin/develop", name = "develop" })
-    H.eq(await(function(cb) git.find_branch(repo, "nope", cb) end), nil)
+    H.eq(await(function(cb) git.find_branch(repo, "nope", nil, cb) end), nil)
+    -- In a fork's clone, the remote holding the pull request's base repository wins over origin.
+    H.git(repo, "remote", "set-url", "origin", "git@github.com:me/r.git")
+    H.git(repo, "remote", "add", "upstream", remote)
+    H.git(repo, "config", "remote.upstream.url", "https://github.com/Acme/r.git")
+    H.git(repo, "update-ref", "refs/remotes/upstream/develop", "HEAD")
+    H.eq(await(function(cb) git.find_branch(repo, "develop", "acme/r", cb) end),
+      { ref = "refs/remotes/upstream/develop", name = "develop" })
+    H.eq({ git.github_repo("git@github.com:o/r.git") }, { "o", "r" })
+    H.eq({ git.github_repo("https://github.com/o/r/") }, { "o", "r" })
   end },
 }

@@ -526,22 +526,59 @@ function M.get_default_base(root, callback)
   end)
 end
 
---- Find branch `name`, preferring the remote's copy (origin/<name>) to a
---- local one: the remote's is what a pull request is measured against.
+--- The owner and name of the GitHub repository a remote URL points at:
+--- git@github.com:owner/repo(.git), https://github.com/owner/repo, or the
+--- same on another host.
+--- @return string|nil owner, string|nil repo
+function M.github_repo(url)
+  if not url then return nil end
+  url = url:gsub("%.git$", ""):gsub("/+$", "")
+  return url:match("[:/]([^/:]+)/([^/:]+)$")
+end
+
+--- Find branch `name`, preferring a remote's copy to a local one: the
+--- remote's is what a pull request is measured against. The remotes that
+--- point at `repo` ("owner/name", the pull request's base repository) come
+--- first, then origin: in a fork's clone, origin is the fork, whose copy of
+--- the base branch may lag behind.
+--- @param repo     string|nil
 --- @param callback fun(base: {ref: string, name: string}|nil)
-function M.find_branch(root, name, callback)
-  local candidates = { "refs/remotes/origin/" .. name, "refs/heads/" .. name }
-  M.run(vim.list_extend({ "for-each-ref", "--format=%(refname)" }, candidates), root, function(lines, _, code)
-    local found = {}
-    for _, line in ipairs(code == 0 and lines or {}) do found[line] = true end
-    for _, c in ipairs(candidates) do
-      if found[c] then
-        callback({ ref = c, name = name })
-        return
+function M.find_branch(root, name, repo, callback)
+  M.remotes(root, function(remotes)
+    local candidates = {}
+    if repo then
+      local names = vim.tbl_keys(remotes)
+      table.sort(names)
+      for _, remote in ipairs(names) do
+        local owner, rname = M.github_repo(remotes[remote])
+        if owner and (owner .. "/" .. rname):lower() == repo:lower() then
+          table.insert(candidates, "refs/remotes/" .. remote .. "/" .. name)
+        end
       end
     end
-    log.debug("no branch named %s", name)
-    callback(nil)
+    vim.list_extend(candidates, { "refs/remotes/origin/" .. name, "refs/heads/" .. name })
+    M.run(vim.list_extend({ "for-each-ref", "--format=%(refname)" }, vim.deepcopy(candidates)), root,
+      function(lines, _, code)
+        local found = {}
+        for _, line in ipairs(code == 0 and lines or {}) do found[line] = true end
+        for _, c in ipairs(candidates) do
+          if found[c] then
+            log.debug("branch %s of %s is %s", name, repo or "the repository", c)
+            callback({ ref = c, name = name })
+            return
+          end
+        end
+        log.debug("no branch named %s", name)
+        callback(nil)
+      end)
+  end)
+end
+
+--- Whether commit `a` is `b` or one of its ancestors.
+--- @param callback fun(yes: boolean)
+function M.is_ancestor(root, a, b, callback)
+  M.run({ "merge-base", "--is-ancestor", a, b }, root, function(_, _, code)
+    callback(code == 0)
   end)
 end
 

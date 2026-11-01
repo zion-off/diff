@@ -114,6 +114,9 @@ local function build(width, info)
     if (info.pr.drafts or 0) > 0 then
       pr_full = pr_full .. string.format(" · %d draft%s", info.pr.drafts, info.pr.drafts == 1 and "" or "s")
     end
+    -- Comments on the branch's changes are hidden while the local branch
+    -- differs from the pull request's head, so the label says why.
+    if info.pr.out_of_sync then pr_full = pr_full .. " · out of sync" end
   end
   local pr_label = pr_full
   local function pr_cells() return pr_label ~= "" and w(pr_label) + 2 or 0 end
@@ -179,7 +182,7 @@ end
 
 --- Draw the bar.
 --- @param info table|nil  { branch, preview, worktree, away, branch_mode,
----   pr = { number, drafts }|nil,
+---   pr = { number, drafts, out_of_sync }|nil,
 ---   actions = { pick_branch, go_home, show_changes, show_branch, open_review } };
 ---   nil redraws what was last given (after a resize).
 --- The clickable segment at row `line`, display column `col` (both 1-based).

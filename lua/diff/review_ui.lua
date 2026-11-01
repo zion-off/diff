@@ -23,6 +23,23 @@ local function lines_label(first, last)
   return first == last and ("line " .. first) or ("lines " .. first .. "–" .. last)
 end
 
+--- `run` for a button of a float opened on the pull request shown now. If
+--- another pull request (or none) is shown by the time it is pressed, it
+--- refuses, and the float keeps what was typed.
+local function bound_to_shown_pr(run)
+  local p = pr.pull_request()
+  local id = p and p.id
+  return function(text, done)
+    local now = pr.pull_request()
+    if not (now and now.id == id) then
+      log.info("pull request changed since the float opened; refusing")
+      done("the pull request shown changed since this was opened")
+      return
+    end
+    run(text, done)
+  end
+end
+
 local function refocus_thread()
   local win = pr_thread.win()
   if win then pcall(vim.api.nvim_set_current_win, win) end
@@ -42,9 +59,8 @@ function M.comment(root, source, side, first, last)
     compose.open({
       title = string.format("Comment on %s %s", vim.fn.fnamemodify(source.path, ":t"), lines_label(first, last)),
       buttons = {
-        { label = pending and "Add to review" or "Start a review", style = "primary", run = function(text, done)
-          pr.add_comment(target, anchor, text, done)
-        end },
+        { label = pending and "Add to review" or "Start a review", style = "primary",
+          run = bound_to_shown_pr(function(text, done) pr.add_comment(target, anchor, text, done) end) },
         { label = "Cancel" },
       },
     })
@@ -57,9 +73,8 @@ local THREAD_ACTIONS = {
       title = "Reply",
       on_close = refocus_thread,
       buttons = {
-        { label = pr.pending() and "Add reply to review" or "Reply", style = "primary", run = function(text, done)
-          pr.reply(thread, text, done)
-        end },
+        { label = pr.pending() and "Add reply to review" or "Reply", style = "primary",
+          run = bound_to_shown_pr(function(text, done) pr.reply(thread, text, done) end) },
         { label = "Cancel" },
       },
     })
@@ -73,7 +88,8 @@ local THREAD_ACTIONS = {
       text = comment.body,
       on_close = refocus_thread,
       buttons = {
-        { label = "Save", style = "primary", run = function(text, done) pr.edit_comment(comment, text, done) end },
+        { label = "Save", style = "primary",
+          run = bound_to_shown_pr(function(text, done) pr.edit_comment(comment, text, done) end) },
         { label = "Cancel" },
       },
     })
@@ -126,18 +142,19 @@ function M.open_review()
     end
   end
   local items = {
-    { label = "Comment", style = "primary", allow_empty = drafts > 0, run = submit("comment", "review submitted") },
-    { label = "Approve", allow_empty = true, run = submit("approve", "pull request approved") },
-    { label = "Request changes", run = submit("request_changes", "changes requested") },
+    { label = "Comment", style = "primary", allow_empty = drafts > 0,
+      run = bound_to_shown_pr(submit("comment", "review submitted")) },
+    { label = "Approve", allow_empty = true, run = bound_to_shown_pr(submit("approve", "pull request approved")) },
+    { label = "Request changes", run = bound_to_shown_pr(submit("request_changes", "changes requested")) },
   }
   if pending then
     table.insert(items, { label = "Discard drafts", style = "danger", confirm = "Confirm discard", allow_empty = true,
-      run = function(_, done) pr.discard(done) end })
+      run = bound_to_shown_pr(function(_, done) pr.discard(done) end) })
   end
-  table.insert(items, { label = "Open on GitHub", allow_empty = true, run = function(_, done)
+  table.insert(items, { label = "Open on GitHub", allow_empty = true, run = bound_to_shown_pr(function(_, done)
     pr.open_in_browser()
     done(nil)
-  end })
+  end) })
   table.insert(items, { label = "Cancel" })
   compose.open({ title = title, buttons = items })
 end

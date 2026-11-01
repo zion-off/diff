@@ -186,6 +186,26 @@ return {
     require("diff").close()
   end },
 
+  { "a review float opened on one pull request refuses to act on another, keeping the text", function()
+    pr.sync(repo, nil)
+    H.wait(function() return pr._state().review ~= nil end, "review loaded")
+    require("diff.review_ui").open_review()
+    local s = compose._state()
+    vim.api.nvim_buf_set_lines(s.editor_buf, 0, -1, false, { "Looks good" })
+    vim.cmd("stopinsert")
+    pr._state().pr = vim.tbl_extend("force", pr._state().pr, { id = "PR_2", number = 8 })
+    local msgs = {}
+    local notify = vim.notify
+    vim.notify = function(m) table.insert(msgs, m) end
+    feed("<C-s>")
+    vim.notify = notify
+    H.eq(compose.is_open(), true)
+    H.eq(vim.api.nvim_buf_get_lines(s.editor_buf, 0, -1, false), { "Looks good" })
+    H.ok(msgs[1] and msgs[1]:find("changed"), vim.inspect(msgs))
+    compose.close()
+    pr.clear()
+  end },
+
   { "a working-tree diff takes no comments, and says why", function()
     pr.sync(repo, nil)
     H.wait(function() return pr._state().review ~= nil end, "review loaded")
