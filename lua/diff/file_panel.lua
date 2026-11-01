@@ -382,6 +382,7 @@ end
 function M.set_root(root)
   S.gen = S.gen + 1
   S.root, S.status, S.active, S.preview, S.branch, S.base = root, nil, nil, nil, nil, nil
+  S.base_override = nil
   S.collapsed_dirs = {}
 end
 
@@ -394,8 +395,8 @@ function M.setup(buf, win, repo_root)
   if keep.root == repo_root then
     S.status, S.collapsed, S.collapsed_dirs, S.active = keep.status, keep.collapsed, keep.collapsed_dirs, keep.active
     S.branch, S.base, S.branch_mode = keep.branch, keep.base, keep.branch_mode
+    S.base_override = keep.base_override
   end
-  S.base_override = keep.base_override
 
   local km = require("diff.config").get().keymaps or {}
   local function map(key, fn, desc, extra)
@@ -498,12 +499,15 @@ local function fetch_branch(head, cb)
     end)
   end
   if S.base ~= nil then return with_base(S.base or nil) end
-  if S.base_override then
-    local name = S.base_override.name
-    return git.find_branch(root, name, S.base_override.repo, function(base)
+  -- A lookup finishing after the base changed (use_base) must not keep its answer.
+  local override = S.base_override
+  local function still_current() return root == S.root and S.base_override == override end
+  if override then
+    local name = override.name
+    return git.find_branch(root, name, override.repo, function(base)
       -- A base the repository does not have locally is still a name git may resolve.
       base = base or { ref = name, name = name }
-      if root == S.root then S.base = base end
+      if still_current() then S.base = base end
       with_base(base)
     end)
   end
@@ -514,7 +518,7 @@ local function fetch_branch(head, cb)
   end
   git.get_default_base(root, function(base)
     log.debug("base branch: %s", base and base.ref or "(none)")
-    if root == S.root then S.base = base or false end
+    if still_current() then S.base = base or false end
     with_base(base)
   end)
 end
