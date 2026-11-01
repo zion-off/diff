@@ -223,8 +223,16 @@ local function mutate(root, mutation, vars, path, callback)
       return
     end
     local value = data
-    for _, key in ipairs(path) do value = type(value) == "table" and value[key] or nil end
-    callback(value or true, nil)
+    for _, key in ipairs(path) do
+      if type(value) ~= "table" then value = nil break end
+      value = value[key]
+    end
+    if value == nil or value == vim.NIL then
+      local field = table.concat(path, ".")
+      log.warn("GitHub's answer has no %s", field)
+      return callback(nil, "GitHub's answer has no " .. field)
+    end
+    callback(value, nil)
   end)
 end
 
