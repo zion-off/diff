@@ -228,7 +228,7 @@ Opened with `<leader>gb` (or `:DiffNvimPreviewBranch`).
 | `<leader>gv` | Toggle split / unified, keeping the cursor on its line |
 | `<leader>n` | Leave a note on current / visual selection |
 | `<leader>c` | Comment on the pull request at the current line / visual selection |
-| `K` | Show the pull request comments on this line |
+| `K` | Show the pull request comments on this line (elsewhere, Neovim's own `K`) |
 | `<leader>N` | Toggle notes panel |
 | `q` | Close diff view |
 
@@ -339,7 +339,8 @@ never handles a token.
   you have on it. Press `<leader>gr` or run `:DiffNvimReview` to open the
   review.
 - **Branch mode** compares the branch with the pull request's base branch, so
-  its files and lines match GitHub's.
+  its files and lines match GitHub's. In a fork's clone it uses the remote that
+  points at the pull request's own repository, not the fork's `origin`.
 - **Comment threads** show on their lines in the diff: a sign (`●` open, `◆`
   your draft, a dimmed `●` when resolved or outdated) and the first comment at
   the end of the line. Press `K` on the line to open the thread in a float
@@ -363,8 +364,9 @@ Where comments can go:
 - On the branch's changes (branch mode), when your local branch is at the
   commit GitHub has for the pull request. If you have unpushed commits, or the
   pull request has commits you haven't pulled, the plugin asks you to push or
-  pull first, because the line numbers would not match GitHub's. Comments can
-  still be read.
+  pull first, because the line numbers would not match GitHub's. The comments
+  on the branch's changes are hidden then, and the mode bar says "out of
+  sync"; the comments on single commits still show.
 - On a single commit of the pull request (from the commit panel), on new-side
   lines. Removed lines can't take comments there, because GitHub measures them
   against the pull request's base rather than the commit's parent. A commit
@@ -375,7 +377,7 @@ A draft review is tied to one commit. While you have drafts, new comments go
 only on that commit's diff; submit or discard the drafts to comment elsewhere.
 
 The pull request is looked up when the interface opens and when the branch it
-shows changes. It is fetched again after each action and on `:DiffNvimRefresh`,
+shows changes, including a checkout made outside Neovim. It is fetched again after each action and on `:DiffNvimRefresh`,
 never in the background.
 
 ## Notes Storage Format
