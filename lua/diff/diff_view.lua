@@ -487,7 +487,10 @@ local function host_window()
     local kind = chrome.kind(vim.api.nvim_win_get_buf(win))
     local w = vim.api.nvim_win_get_width(win)
     local is_panel = kind == "file-panel" or kind == "commit-panel" or kind == "mode-bar"
-    if win ~= S.header_win and not is_panel and (not best_w or w > best_w) then
+    local is_float = vim.api.nvim_win_get_config(win).relative ~= ""
+    -- The split's left pane is closed when leaving a split, so it cannot host.
+    if win ~= S.header_win and win ~= S.extra_win and not is_panel and not is_float
+      and (not best_w or w > best_w) then
       best, best_w = win, w
     end
   end
