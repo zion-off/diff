@@ -80,10 +80,29 @@ local function enqueue(what, text, run)
   if not running then run_next() end
 end
 
---- @return boolean  whether requests are waiting or running (tests)
+--- @return boolean  whether requests are waiting or running
 function M.busy()
   return running
 end
+
+pr.track_writes(M.busy)
+
+--- The loaded version of `thread`: a float may hold one from before the
+--- review was last read. nil when it is gone.
+local function current_thread(thread)
+  local found = pr.thread_by_id(thread.id)
+  if not found then log.info("thread %s is no longer loaded", tostring(thread.id)) end
+  return found
+end
+
+local function current_comment(comment)
+  local found, thread = pr.comment_by_id(comment.id)
+  if not found then log.info("comment %s is no longer loaded", tostring(comment.id)) end
+  return found, thread
+end
+
+local GONE = "it is no longer on the pull request. Run :DiffNvimRefresh to see what is"
+local NO_DRAFT_REVIEW = "your draft review was never created on GitHub"
 
 local function new_comment(body, pending, commit)
   return {
@@ -105,10 +124,12 @@ function M.add_comment(target, anchor, body)
     log.info("comment written for another pull request; not sending it")
     return "the pull request shown changed while the comment was written"
   end
-  -- A draft review GitHub has on another commit is empty (comment_target
-  -- refuses one with comments); it is replaced by one on this commit.
+  -- An empty draft review on another commit is replaced by one on this
+  -- commit; one with comments takes this comment too (comment_target refuses
+  -- one known to be on another commit).
   local before = pr.pending()
-  local replaced = before and before.commit ~= target.commit and before.id or nil
+  local reuse = before and (before.count > 0 or before.commit == target.commit)
+  local replaced = before and not reuse and before.id or nil
   local comment = new_comment(body, true, target.commit)
   local thread = {
     id = local_id("thread"), path = anchor.path, side = anchor.side, line = anchor.line,
@@ -117,9 +138,9 @@ function M.add_comment(target, anchor, body)
     can_reply = true, can_resolve = false, can_unresolve = false, comments = { comment },
   }
   local pending
-  pr.edit_review(function(review)
+  local edited = pr.edit_review(function(review)
     table.insert(review.threads, thread)
-    if before and not replaced then
+    if reuse then
       before.count = before.count + 1
       pending = before
     else
@@ -127,6 +148,7 @@ function M.add_comment(target, anchor, body)
       review.pending = pending
     end
   end)
+  if not edited then return "the comments of the pull request are not loaded" end
   enqueue("add your comment on " .. where(anchor.path, anchor.line), body, function(done)
     local function add(review_id, started)
       github.add_thread(root, review_id, anchor, body, function(ids, err)
@@ -134,7 +156,9 @@ function M.add_comment(target, anchor, body)
           if started then
             log.info("removing the draft review started for the rejected comment")
             pending.id = nil
-            github.delete_review(root, review_id, function() end)
+            github.delete_review(root, review_id, function(_, del_err)
+              if del_err then log.warn("cannot remove the empty draft review %s: %s", review_id, del_err) end
+            end)
           end
           return done(err)
         end
@@ -165,6 +189,8 @@ end
 --- Reply in `thread`. With a draft review the reply joins it; without one
 --- it is published.
 function M.reply(thread, body)
+  thread = current_thread(thread)
+  if not thread then return GONE end
   local root, pending = pr.root(), pr.pending()
   local comment = new_comment(body, pending ~= nil, thread.commit)
   pr.edit_review(function()
@@ -174,6 +200,8 @@ function M.reply(thread, body)
   enqueue("reply on " .. where(thread.path, thread.line or thread.original_line), body, function(done)
     local why = not_on_github(thread)
     if why then return done(why) end
+    -- Sent without the draft review it was shown in, it would be published.
+    if pending and not pending.id then return done(NO_DRAFT_REVIEW) end
     github.reply(root, thread.id, body, pending and pending.id or nil, function(id, err)
       if err then return done(err) end
       if type(id) == "string" then comment.id = id end
@@ -183,6 +211,8 @@ function M.reply(thread, body)
 end
 
 function M.set_resolved(thread, resolved)
+  thread = current_thread(thread)
+  if not thread then return GONE end
   local root = pr.root()
   pr.edit_review(function() thread.resolved = resolved end)
   local what = (resolved and "resolve" or "reopen") .. " the thread on " .. where(thread.path, thread.line)
@@ -194,6 +224,8 @@ function M.set_resolved(thread, resolved)
 end
 
 function M.edit_comment(comment, body)
+  comment = current_comment(comment)
+  if not comment then return GONE end
   local root = pr.root()
   pr.edit_review(function() comment.body = body end)
   enqueue("save your edited comment", body, function(done)
@@ -204,18 +236,20 @@ function M.edit_comment(comment, body)
 end
 
 function M.delete_comment(comment)
+  local thread
+  comment, thread = current_comment(comment)
+  if not comment then return GONE end
   local root, pending = pr.root(), pr.pending()
   pr.edit_review(function(review)
-    for i, t in ipairs(review.threads) do
-      for j, c in ipairs(t.comments) do
-        if c == comment then
-          table.remove(t.comments, j)
-          if #t.comments == 0 then table.remove(review.threads, i) end
-          if c.pending and pending then pending.count = math.max(0, pending.count - 1) end
-          return
-        end
+    for j, c in ipairs(thread.comments) do
+      if c == comment then table.remove(thread.comments, j) break end
+    end
+    if #thread.comments == 0 then
+      for i, t in ipairs(review.threads) do
+        if t == thread then table.remove(review.threads, i) break end
       end
     end
+    if comment.pending and pending then pending.count = math.max(0, pending.count - 1) end
   end)
   enqueue("delete your comment", nil, function(done)
     local why = not_on_github(comment)
@@ -235,7 +269,10 @@ function M.submit(event, body)
   log.info("submit review of #%d as %s (%s)", p.number, gh_event, pending and "draft review" or "no drafts")
   if pending then pr.edit_review(function(review) pr.settle_drafts(review, "submitted") end) end
   enqueue("submit your review", body, function(done)
-    if not pending then
+    if pending and not pending.id then
+      log.info("the draft review was never created on GitHub; submitting the review without it")
+    end
+    if not (pending and pending.id) then
       return github.post_review(root, p.id, p.head_oid, gh_event, summary, function(_, err) done(err) end)
     end
     github.submit_review(root, pending.id, gh_event, summary, function(_, err)

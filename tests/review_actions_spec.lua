@@ -53,8 +53,7 @@ gh.authenticated = function(_, cb) vim.schedule(function() cb(true) end) end
 github.find_pull_request = function(_, _, cb) vim.schedule(function() cb(review.pr) end) end
 github.fetch_review = function(_, _, cb)
   table.insert(calls, "fetch")
-  local copy = vim.deepcopy(review)
-  vim.schedule(function() cb(copy) end)
+  answer("fetch", cb, vim.deepcopy(review))
 end
 github.start_review = function(_, _, commit, cb) table.insert(calls, "start " .. commit:sub(1, 7)); answer("start", cb, "R_new") end
 github.add_thread = function(_, rid, anchor, body, cb)
@@ -246,5 +245,61 @@ return {
     H.eq(pr.pending() and pr.pending().id, "R_sub", "back once GitHub said no")
     H.eq(vim.fn.getreg('"'), "lgtm")
     H.ok(notices[#notices].msg:find("submit your review", 1, true), notices[#notices].msg)
+  end },
+
+  { "a read of the review that started before a new comment does not undo it", function()
+    review = fresh_review()
+    load()
+    held.fetch = true
+    actions.edit_comment(find_thread("T1").comments[1], "edited")
+    H.wait(function() return calls[#calls] == "fetch" end, "the review read as the queue emptied")
+    held.start = true
+    actions.add_comment(TARGET, { path = "a.lua", side = "new", line = 1 }, "kept")
+    release("fetch")
+    vim.wait(30)
+    local threads = pr._state().review.threads
+    H.eq(threads[#threads].comments[1].body, "kept", "still shown")
+    H.eq(pr.pending().count, 1)
+    actions.add_comment(TARGET, { path = "a.lua", side = "new", line = 1 }, "second")
+    held.fetch = false
+    release("start")
+    settled()
+    local starts = vim.tbl_filter(function(c) return c:match("^start") end, calls)
+    H.eq(#starts, 1, "one draft review started")
+  end },
+
+  { "after the draft review failed to start, a reply is not published and a submit posts a plain review", function()
+    review = fresh_review()
+    load()
+    responses.start = { nil, "no" }
+    actions.add_comment(TARGET, { path = "a.lua", side = "new", line = 1 }, "x")
+    actions.reply(find_thread("T1"), "y")
+    actions.submit("approve", "")
+    settled()
+    H.eq(vim.tbl_filter(function(c) return c:match("^reply") end, calls), {}, "the reply was not sent")
+    H.ok(vim.tbl_contains(calls, "post APPROVE"), vim.inspect(calls))
+    H.ok(notices[#notices - 1].msg:find("never created", 1, true) or notices[#notices].msg:find("never created", 1, true))
+  end },
+
+  { "a draft review with comments is kept even when GitHub does not say its commit", function()
+    review = fresh_review()
+    review.pending = { id = "R_kept", commit = nil, count = 1 }
+    load()
+    actions.add_comment(TARGET, { path = "a.lua", side = "new", line = 1 }, "more")
+    settled()
+    H.eq(calls, { "thread R_kept new:1 more", "fetch" })
+  end },
+
+  { "acting on a thread from before the review was read again acts on the loaded one", function()
+    review = fresh_review()
+    load()
+    local old = find_thread("T1")
+    pr.reload()
+    H.wait(function() return find_thread("T1") ~= old end, "read again")
+    calls = {}
+    actions.delete_comment(old.comments[1])
+    H.eq(find_thread("T1"), nil, "gone from the screen")
+    settled()
+    H.eq(calls, { "delete C1", "fetch" })
   end },
 }

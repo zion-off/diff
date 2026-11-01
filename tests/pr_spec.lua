@@ -168,18 +168,16 @@ return {
 
   { "checking out another branch looks its pull request up again, and says so", function()
     synced(nil, { head = "feature" })
-    local switched = 0
-    local id = vim.api.nvim_create_autocmd("User", { pattern = "DiffNvimPrChanged", callback = function(ev)
-      if ev.data and ev.data.switched then switched = switched + 1 end
-    end })
     log = {}
     pr.sync(repo, nil, { head = "feature" })
     vim.wait(100)
     H.eq(log, {}, "same branch: nothing looked up")
-    synced(nil, { head = "other" })
+    local before = changes
+    pr.sync(repo, nil, { head = "other" })
+    H.eq(pr.pull_request(), nil, "the old pull request is forgotten at once")
+    H.wait(function() return not pr.loading() end, "looked up")
     H.eq(log, { "find nil", "fetch" })
-    H.eq(switched, 1)
-    vim.api.nvim_del_autocmd(id)
+    H.ok(changes > before, "and says so")
   end },
 
   { "threads on the branch's changes are hidden while the local branch is not at the head", function()

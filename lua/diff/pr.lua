@@ -32,15 +32,18 @@ local function fresh_state()
     pr = nil, review = nil,
     gen = 0,         -- bumps on every sync, so stale responses are dropped
     settled = {},    -- draft review id -> "submitted" | "discarded", once done here
+    edits = 0,       -- bumps on every change made here, so reads taken before one are dropped
   }
 end
 
 local S = fresh_state()
 
---- @param data table|nil  { switched = true }: another pull request (or
----   none) is being loaded, so anything acting on the old one must stop
-local function fire(data)
-  vim.api.nvim_exec_autocmds("User", { pattern = "DiffNvimPrChanged", modeline = false, data = data or {} })
+-- Whether changes made here are still on their way to GitHub; a read of the
+-- review taken meanwhile would show them undone. Set by review_actions.lua.
+local writes_in_flight = function() return false end
+
+local function fire()
+  vim.api.nvim_exec_autocmds("User", { pattern = "DiffNvimPrChanged", modeline = false, data = {} })
 end
 
 local function short(oid)
@@ -148,6 +151,12 @@ local function set_review(review)
   S.pr = review and review.pr or S.pr
 end
 
+--- Whether a review read that started at edit count `edits` is out of date:
+--- changes made here since, or still being sent, are not in it.
+local function behind_local_edits(edits)
+  return S.edits ~= edits or writes_in_flight()
+end
+
 --- Read where the branch shown is locally. Threads are drawn on the
 --- branch's changes only while it is at the pull request's head, so a
 --- commit, pull or reset that moves it redraws them.
@@ -190,10 +199,11 @@ function M.sync(root, branch, opts)
       log.info("branch shown changed; forgetting pull request #%d", S.pr.number)
       S.pr, S.review = nil, nil
       -- Announced after the caller's own work (a sidebar refresh), not in it.
-      vim.schedule(function() if gen == S.gen then fire({ switched = true }) end end)
+      vim.schedule(function() if gen == S.gen then fire() end end)
     end
   end
   local elapsed = require("diff.log").timer()
+  local edits = S.edits
   gh.authenticated(root, function(ok)
     if gen ~= S.gen then return end
     if not ok then
@@ -214,6 +224,8 @@ function M.sync(root, branch, opts)
           log.warn("cannot load the review of #%d: %s", pr.number, tostring(err))
           vim.notify("diff.nvim: cannot load pull request #" .. pr.number .. ": " .. tostring(err), vim.log.levels.WARN)
           S.pr, S.review = pr, nil
+        elseif S.review and behind_local_edits(edits) then
+          log.info("dropping the review read of #%d: changes made here are not in it yet", pr.number)
         else
           set_review(review)
           log.info("pull request #%d for %s: %d threads in %.0f ms", pr.number, branch or "HEAD",
@@ -230,7 +242,7 @@ end
 --- dropped.
 --- @param callback fun()|nil
 function M.reload(callback)
-  local pr, root, gen = S.pr, S.root, S.gen
+  local pr, root, gen, edits = S.pr, S.root, S.gen, S.edits
   if not pr then
     if callback then callback() end
     return
@@ -238,6 +250,8 @@ function M.reload(callback)
   github.fetch_review(root, pr.id, function(review, err)
     if gen ~= S.gen then
       log.debug("dropping the reload of #%d: the branch shown changed", pr.number)
+    elseif review and behind_local_edits(edits) then
+      log.info("dropping the reload of #%d: changes made here are not in it yet", pr.number)
     elseif review then
       set_review(review)
       fire()
@@ -412,9 +426,34 @@ end
 --- @param fn fun(review: table)
 function M.edit_review(fn)
   if not S.review then return false end
+  S.edits = S.edits + 1
   fn(S.review)
   fire()
   return true
+end
+
+--- Tell reads of the review whether changes made here are still being sent,
+--- so they do not undo them on screen.
+--- @param fn fun(): boolean
+function M.track_writes(fn)
+  writes_in_flight = fn
+end
+
+--- The loaded thread with `id`, or nil.
+function M.thread_by_id(id)
+  for _, t in ipairs(S.review and S.review.threads or {}) do
+    if t.id == id then return t end
+  end
+end
+
+--- The loaded comment with `id` and its thread, or nil.
+--- @return table|nil comment, table|nil thread
+function M.comment_by_id(id)
+  for _, t in ipairs(S.review and S.review.threads or {}) do
+    for _, c in ipairs(t.comments) do
+      if c.id == id then return c, t end
+    end
+  end
 end
 
 --- Remember that the draft review `id` was submitted or discarded here, so
