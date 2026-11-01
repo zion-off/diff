@@ -1,0 +1,212 @@
+--- diff.nvim — a floating editor for writing a comment, with a row of
+--- buttons under it.
+---
+---   ╭──────── Comment on a.lua:12 ────────╮
+---   │ text, in Markdown, any number of     │   the editor (insert mode)
+---   │ lines                                │
+---   ╰──────────────────────────────────────╯
+---    Add to review   Cancel                     the buttons
+---
+--- Ctrl-S presses the first button from the editor; Tab moves to the
+--- buttons, where h/l move and Enter presses; Esc (normal mode) or q cancels.
+--- A button's `run(text, done)` gets the text and calls done(err): on an error
+--- the window stays open, text intact, so nothing typed is lost.
+local M = {}
+
+local buttons = require("diff.buttons")
+local chrome  = require("diff.chrome")
+local log     = require("diff.log").scope("compose")
+
+local NS = vim.api.nvim_create_namespace("diff_nvim_compose")
+
+local EDITOR_HEIGHT = 8
+local MAX_WIDTH = 80
+
+-- The window open now, if any: { editor, editor_buf, bar, bar_buf, target, opts, busy }
+local S = nil
+
+local function valid_win(w) return w and vim.api.nvim_win_is_valid(w) end
+
+--- Close the editor and its buttons.
+function M.close()
+  local s = S
+  S = nil
+  if not s then return end
+  if s.target then s.target:release() end
+  for _, w in ipairs({ s.bar, s.editor }) do
+    if valid_win(w) then pcall(vim.api.nvim_win_close, w, true) end
+  end
+  if s.opts.on_close then s.opts.on_close() end
+end
+
+function M.is_open()
+  return S ~= nil
+end
+
+local function text_of(s)
+  local lines = vim.api.nvim_buf_get_lines(s.editor_buf, 0, -1, false)
+  return vim.trim(table.concat(lines, "\n"))
+end
+
+local render_bar
+
+local function press(s, item)
+  if s.busy or S ~= s then return end
+  if not item.run then
+    log.debug("%s pressed", item.label)
+    M.close()
+    return
+  end
+  local text = text_of(s)
+  if text == "" and not item.allow_empty then
+    vim.notify("diff.nvim: write something first", vim.log.levels.WARN)
+    return
+  end
+  log.debug("%s pressed (%d characters)", item.label, #text)
+  s.busy = true
+  render_bar(s)
+  item.run(text, function(err)
+    if S ~= s then return end
+    s.busy = false
+    if err then
+      vim.notify("diff.nvim: " .. item.label .. " failed: " .. err, vim.log.levels.ERROR)
+      render_bar(s)
+      return
+    end
+    M.close()
+  end)
+end
+
+render_bar = function(s)
+  if not vim.api.nvim_buf_is_valid(s.bar_buf) then return end
+  local items = {}
+  if s.busy then
+    items = { { label = "Sending…", action = function() end } }
+  else
+    for _, item in ipairs(s.opts.buttons) do
+      table.insert(items, {
+        label = item.label, style = item.style, action = function() press(s, item) end,
+      })
+    end
+  end
+  local line, hls, segs = buttons.row(items, "")
+  vim.bo[s.bar_buf].modifiable = true
+  vim.api.nvim_buf_set_lines(s.bar_buf, 0, -1, false, { line })
+  vim.bo[s.bar_buf].modifiable = false
+  vim.api.nvim_buf_clear_namespace(s.bar_buf, NS, 0, -1)
+  for _, h in ipairs(hls) do
+    pcall(vim.api.nvim_buf_set_extmark, s.bar_buf, NS, 0, h[1], { end_col = h[2], hl_group = h[3] })
+  end
+  for _, seg in ipairs(segs) do seg.row = 0 end
+  s.target:set(segs)
+end
+
+local function scratch(kind, name)
+  local buf = vim.api.nvim_create_buf(false, true)
+  chrome.tag(buf, kind)
+  chrome.name(buf, name)
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].swapfile = false
+  return buf
+end
+
+local function map(buf, modes, key, fn)
+  vim.keymap.set(modes, key, fn, { buffer = buf, nowait = true, silent = true })
+end
+
+--- Open the editor, replacing one already open.
+--- @param opts table {
+---   title   = string,
+---   text    = string|nil,     initial text
+---   buttons = { { label, style?, allow_empty?, run = fun(text, done)|nil } },
+---             the first is pressed by Ctrl-S; one without `run` cancels
+---   on_close = fun()|nil }
+function M.open(opts)
+  M.close()
+  local width = math.max(30, math.min(MAX_WIDTH, vim.o.columns - 8))
+  local height = math.min(EDITOR_HEIGHT, math.max(3, vim.o.lines - 8))
+  -- Rows: the editor and its border, then the buttons right under it.
+  local row = math.max(0, math.floor((vim.o.lines - height - 3) / 2))
+  local col = math.max(0, math.floor((vim.o.columns - width - 2) / 2))
+
+  local editor_buf = scratch("compose", "diff.nvim Comment")
+  vim.bo[editor_buf].filetype = "markdown"
+  if opts.text and opts.text ~= "" then
+    vim.api.nvim_buf_set_lines(editor_buf, 0, -1, false, vim.split(opts.text, "\n", { plain = true }))
+  end
+  local cfg = {
+    relative = "editor", row = row, col = col, width = width, height = height,
+    style = "minimal", border = "rounded", title = " " .. opts.title .. " ", title_pos = "center",
+  }
+  local with_footer = vim.tbl_extend("force", cfg,
+    { footer = " ctrl-s " .. opts.buttons[1].label:lower() .. "   tab buttons   esc cancel ", footer_pos = "center" })
+  local ok, editor = pcall(vim.api.nvim_open_win, editor_buf, true, with_footer)
+  if not ok then ok, editor = pcall(vim.api.nvim_open_win, editor_buf, true, cfg) end
+  if not ok then
+    log.warn("cannot open the editor: %s", tostring(editor))
+    return
+  end
+  for k, v in pairs({ wrap = true, linebreak = true, cursorline = false, spell = false }) do
+    pcall(vim.api.nvim_set_option_value, k, v, { win = editor })
+  end
+  vim.wo[editor].winhighlight = "Normal:DiffNvimPickerNormal,FloatBorder:DiffNvimPickerBorder,"
+    .. "FloatTitle:DiffNvimPickerTitle,FloatFooter:DiffNvimPickerFooter"
+
+  local bar_buf = scratch("compose-buttons", "diff.nvim Comment buttons")
+  vim.bo[bar_buf].modifiable = false
+  local bar_ok, bar = pcall(vim.api.nvim_open_win, bar_buf, false, {
+    relative = "editor", row = row + height + 2, col = col + 1, width = width, height = 1,
+    style = "minimal", border = "none", focusable = true, zindex = 60,
+  })
+  if not bar_ok then
+    log.warn("cannot open the buttons: %s", tostring(bar))
+    pcall(vim.api.nvim_win_close, editor, true)
+    return
+  end
+  vim.wo[bar].winhighlight = "Normal:DiffNvimPickerNormal"
+
+  local s = { editor = editor, editor_buf = editor_buf, bar = bar, bar_buf = bar_buf, opts = opts, busy = false }
+  s.target = buttons.target(bar_buf, bar)
+  S = s
+  render_bar(s)
+
+  local function to_editor() if valid_win(s.editor) then vim.api.nvim_set_current_win(s.editor) end end
+  local function to_bar()
+    if not valid_win(s.bar) then return end
+    vim.cmd("stopinsert")
+    vim.api.nvim_set_current_win(s.bar)
+    pcall(vim.api.nvim_win_set_cursor, s.bar, { 1, 1 })
+  end
+
+  map(editor_buf, { "n", "i" }, "<C-s>", function() press(s, opts.buttons[1]) end)
+  map(editor_buf, "n", "<Tab>", to_bar)
+  map(editor_buf, "n", "<Esc>", M.close)
+  map(editor_buf, "n", "q", M.close)
+
+  map(bar_buf, "n", "<CR>", function() s.target:press_cursor() end)
+  for _, key in ipairs({ "l", "w", "<Tab>", "<Right>" }) do map(bar_buf, "n", key, function() s.target:step(1) end) end
+  for _, key in ipairs({ "h", "b", "<S-Tab>", "<Left>" }) do map(bar_buf, "n", key, function() s.target:step(-1) end) end
+  for _, key in ipairs({ "i", "a", "k", "<Up>" }) do map(bar_buf, "n", key, to_editor) end
+  map(bar_buf, "n", "<C-s>", function() press(s, opts.buttons[1]) end)
+  map(bar_buf, "n", "<Esc>", M.close)
+  map(bar_buf, "n", "q", M.close)
+
+  -- Closing either window some other way (:q) closes the pair.
+  vim.api.nvim_create_autocmd("WinClosed", {
+    pattern = { tostring(editor), tostring(bar) }, once = true,
+    callback = function() vim.schedule(function() if S == s then M.close() end end) end,
+  })
+
+  local last = vim.api.nvim_buf_line_count(editor_buf)
+  pcall(vim.api.nvim_win_set_cursor, editor, { last, 0 })
+  vim.cmd("startinsert!")
+  log.debug("opened the editor: %s", opts.title)
+end
+
+--- The windows of the open editor (tests).
+function M._state()
+  return S
+end
+
+return M

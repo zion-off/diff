@@ -346,6 +346,15 @@ local function build_defaults()
     DiffNvimPickerRemote      = { fg = s.dim_fg },
     DiffNvimPickerMatch       = { fg = s.accent, bold = true },
 
+    -- Buttons in the review floats: on the control track's surface, the one
+    -- Ctrl-S presses tinted like a visited mode, one that discards in the
+    -- remove colour; hovered like the mode bar's cells
+    DiffNvimButton          = { fg = text_fg, bg = s.track_bg },
+    DiffNvimButtonPrimary   = { fg = text_fg, bg = s.away_bg, bold = true },
+    DiffNvimButtonDanger    = { fg = removed, bg = s.track_bg },
+    DiffNvimButtonHover     = { bg = s.cell_hover_bg },
+    DiffNvimButtonCursor    = { link = "CursorLine" },
+
     -- Full-width filename header bar spanning both diff panes. A raised
     -- surface a step above Normal — linking it to StatusLine made it the
     -- brightest, heaviest band on screen while naming the least urgent thing.

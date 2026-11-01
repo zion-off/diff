@@ -12,6 +12,7 @@ local mode_bar     = require("diff.mode_bar")
 local file_panel   = require("diff.file_panel")
 local commit_panel = require("diff.commit_panel")
 local chrome       = require("diff.chrome")
+local clickable    = require("diff.clickable")
 local config       = require("diff.config")
 local git          = require("diff.git")
 local log          = require("diff.log").scope("sidebar")
@@ -371,6 +372,7 @@ local function clear_hover()
   mode_bar.hover(nil)
   file_panel.hover(nil)
   commit_panel.hover(nil)
+  clickable.hover(nil)
   require("diff.diff_view").hover(nil, nil)
 end
 
@@ -380,11 +382,13 @@ local function on_mouse_move()
     local mp = vim.fn.getmousepos()
     highlight_edge(edge_under_mouse(mp))
     local line = line_under_mouse(mp)
-    -- The bar's items share rows, so there the column matters too.
-    local key = line and mp.winid == M._bar_win and line .. ":" .. mp.wincol or line
+    -- The bar's and the floats' items share rows, so there the column matters too.
+    local shares_rows = mp.winid == M._bar_win or clickable.get(mp.winid) ~= nil
+    local key = line and shares_rows and line .. ":" .. mp.wincol or line
     if mp.winid == hover_win and key == hover_line then return end
     hover_win, hover_line = mp.winid, key
     mode_bar.hover(mp.winid == M._bar_win and line or nil, mp.wincol)
+    clickable.hover(mp.winid, line, mp.wincol)
     file_panel.hover(mp.winid == M._file_win and line or nil)
     commit_panel.hover(mp.winid == M._commit_win and line or nil)
     require("diff.diff_view").hover(mp.winid, line)
@@ -413,7 +417,13 @@ end
 local function click_target(mp)
   local line = line_under_mouse(mp)
   if not line then return nil end
-  local item = mp.winid == M._bar_win and mode_bar.item_at(line, mp.wincol) or nil
+  local float = clickable.get(mp.winid)
+  local item
+  if mp.winid == M._bar_win then
+    item = mode_bar.item_at(line, mp.wincol)
+  elseif float then
+    item = float.item_at(line, mp.wincol)
+  end
   return { winid = mp.winid, line = line, col = mp.wincol, item = item }
 end
 
@@ -432,9 +442,15 @@ local function click(t)
     mode_bar.click(t.line, t.col)
     return
   end
+  local float = clickable.get(t.winid)
+  if float then
+    log.trace("click on float %d at %d:%d", t.winid, t.line, t.col)
+    float.click(t.line, t.col)
+    return
+  end
   local panel = t.winid == M._commit_win and commit_panel or t.winid == M._file_win and file_panel or nil
   if not panel then
-    require("diff.diff_view").click(t.winid, t.line)
+    require("diff.diff_view").click(t.winid, t.line, t.col)
     return
   end
   log.trace("click on %s row %d", panel == file_panel and "file panel" or "commit panel", t.line)
@@ -907,6 +923,7 @@ local function close_interface(opts)
   -- The view first, so its watchers and buffers go before the tab does.
   require("diff.diff_view").close()
   require("diff.annotations").close_panel()
+  require("diff.compose").close()
   commit_panel.close_tooltip()
 
   local diff_tab = get_diff_tab()
