@@ -281,6 +281,29 @@ return {
     pr.reload()
   end },
 
+  { "with draft comments, the summary may be empty for a comment or a request for changes; without, only for an approval", function()
+    local function allowed(drafts)
+      extra_threads = {}
+      for i = 1, drafts do
+        table.insert(extra_threads, vim.tbl_extend("force", vim.deepcopy(thread), { id = "E" .. i, line = 40 - i, pending = true,
+          comments = { vim.tbl_extend("force", thread.comments[1], { id = "CE" .. i, body = "d", pending = true }) } }))
+      end
+      pr.sync(repo, nil, { force = true })
+      H.wait(function() return pr._state().review ~= nil and #pr.drafts() == drafts end, "drafts loaded")
+      require("diff.review_ui").open_review()
+      local out = {}
+      for _, b in ipairs(compose._state().opts.buttons) do out[b.label] = b.allow_empty or false end
+      compose.close()
+      return out
+    end
+    local with = allowed(2)
+    H.eq({ with["Comment"], with["Request changes"], with["Approve"] }, { true, true, true })
+    local without = allowed(0)
+    H.eq({ without["Comment"], without["Request changes"], without["Approve"] }, { false, false, true })
+    extra_threads = {}
+    pr.reload()
+  end },
+
   { "a review float opened on one pull request refuses to act on another, keeping the text", function()
     pr.sync(repo, nil)
     H.wait(function() return pr._state().review ~= nil end, "review loaded")

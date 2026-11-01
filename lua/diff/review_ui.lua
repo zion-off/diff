@@ -164,7 +164,7 @@ function M.open_review()
   local items = {
     { label = "Comment", style = "primary", allow_empty = #drafts > 0, run = bound_to_shown_pr(submit("comment", "review submitted")) },
     { label = "Approve", allow_empty = true, run = bound_to_shown_pr(submit("approve", "pull request approved")) },
-    { label = "Request changes", run = bound_to_shown_pr(submit("request_changes", "changes requested")) },
+    { label = "Request changes", allow_empty = #drafts > 0, run = bound_to_shown_pr(submit("request_changes", "changes requested")) },
   }
   if pending then
     table.insert(items, { label = "Discard drafts", style = "danger", confirm = "Confirm discard", allow_empty = true,
