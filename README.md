@@ -31,6 +31,7 @@ A NeoVim plugin that replicates the Git source-control UX of VSCode's SCM sideba
 | **Fast navigation** | `]f` / `[f` move between files, `gf` jumps to the real file at the same line |
 | **Annotation notes** | Select lines, press `<leader>n`, type a note — saved to an XDG Markdown file |
 | **Notes panel** | Toggle with `<leader>N`; `dd` deletes a note, `q` closes |
+| **Pull request review** | With `gh` logged in, read and write review comments on the branch's pull request, reply, resolve, and submit the review (see [Pull Request Review](#pull-request-review)) |
 
 ---
 
@@ -38,6 +39,7 @@ A NeoVim plugin that replicates the Git source-control UX of VSCode's SCM sideba
 
 - NeoVim ≥ 0.9 (developed and tested on 0.11; asynchronous tree-sitter parsing needs 0.11, older versions parse synchronously)
 - `git` on `$PATH`
+- Optional: the GitHub CLI (`gh`), logged in, for pull request review
 - No external plugin dependencies
 
 ---
@@ -138,6 +140,9 @@ require("diff").setup({
     stage_hunk           = "s",
     unstage_hunk         = "u",
     leave_note           = "<leader>n",
+    leave_comment        = "<leader>c",
+    show_comments        = "K",
+    open_review          = "<leader>gr",
     toggle_notes         = "<leader>N",
     preview_branch       = "<leader>gb",
     branch_changes       = "<leader>gB",
@@ -175,6 +180,7 @@ require("diff").setup({
 | `<leader>gb` | Preview another branch (open branch picker) |
 | `<leader>gB` | Toggle branch mode (see [Branch Changes](#branch-changes)) |
 | `<leader>gv` | Toggle the diff view between split and unified |
+| `<leader>gr` | Review the branch's pull request (submit, discard drafts, open on GitHub) |
 
 ### File Status Panel
 
@@ -221,6 +227,8 @@ Opened with `<leader>gb` (or `:DiffNvimPreviewBranch`).
 | `zM` | Collapse back to the configured context |
 | `<leader>gv` | Toggle split / unified, keeping the cursor on its line |
 | `<leader>n` | Leave a note on current / visual selection |
+| `<leader>c` | Comment on the pull request at the current line / visual selection |
+| `K` | Show the pull request comments on this line |
 | `<leader>N` | Toggle notes panel |
 | `q` | Close diff view |
 
@@ -249,7 +257,8 @@ Hunk staging uses zero-context patches. A change directly next to a final line w
 | `:DiffNvimPreviewBranch` | Preview another branch's commits without checking it out |
 | `:DiffNvimNotes` | Toggle notes panel |
 | `:DiffNvimLayout [split\|unified]` | Show diffs split or unified (no argument toggles) |
-| `:DiffNvimRefresh` | Re-fetch the panels |
+| `:DiffNvimRefresh` | Re-fetch the panels, and the branch's pull request from GitHub |
+| `:DiffNvimReview` | Review the branch's pull request |
 | `:DiffNvimLog` | Open the log file |
 
 ---
@@ -317,6 +326,57 @@ panel its history. Pick the branch of the worktree you opened the interface in
 to switch back.
 
 ---
+
+## Pull Request Review
+
+When the GitHub CLI is installed and logged in (`gh auth status`) and the
+branch the sidebar shows has an open pull request, the interface reviews it
+the way GitHub's "Files changed" tab does. Without `gh`, or without a pull
+request, none of this appears. Everything goes through `gh`, so the plugin
+never handles a token.
+
+- **The mode bar** names the pull request (`#123`) and how many draft comments
+  you have on it. Press `<leader>gr` or run `:DiffNvimReview` to open the
+  review.
+- **Branch mode** compares the branch with the pull request's base branch, so
+  its files and lines match GitHub's.
+- **Comment threads** show on their lines in the diff: a sign (`●` open, `◆`
+  your draft, a dimmed `●` when resolved or outdated) and the first comment at
+  the end of the line. Press `K` on the line to open the thread in a float
+  under it.
+- **In the thread float**, the keys are `r` reply, `R` resolve or unresolve, `e` edit your comment, `x` delete it
+  (press twice to confirm), `<Tab>` move between buttons, `<CR>` press the one
+  under the cursor, `q` close.
+- **To comment**, press `<leader>c` on a line or a visual selection. A float
+  opens to write the comment in Markdown: `<C-s>` adds it, `<Tab>` moves to the
+  buttons, `<Esc>` cancels. If GitHub rejects the comment, the float stays open
+  with your text.
+- **Comments are drafts** in a pending review, as with GitHub's "Start a
+  review", until you submit the review as a comment, an approval or a request
+  for changes. Drafts live on GitHub, so they survive closing Neovim and show
+  in the browser. Replies made while you have drafts join them.
+- **Discard drafts** in the review float throws the pending review away
+  (press twice to confirm).
+
+Where comments can go:
+
+- On the branch's changes (branch mode), when your local branch is at the
+  commit GitHub has for the pull request. If you have unpushed commits, or the
+  pull request has commits you haven't pulled, the plugin asks you to push or
+  pull first, because the line numbers would not match GitHub's. Comments can
+  still be read.
+- On a single commit of the pull request (from the commit panel), on new-side
+  lines. Removed lines can't take comments there, because GitHub measures them
+  against the pull request's base rather than the commit's parent. A commit
+  shows the comments that were made on it.
+- Not on uncommitted changes.
+
+A draft review is tied to one commit. While you have drafts, new comments go
+only on that commit's diff; submit or discard the drafts to comment elsewhere.
+
+The pull request is looked up when the interface opens and when the branch it
+shows changes. It is fetched again after each action and on `:DiffNvimRefresh`,
+never in the background.
 
 ## Notes Storage Format
 
@@ -408,6 +468,12 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimModeAwayHover` | The branch row or **Done** under the mouse pointer while previewing |
 | `DiffNvimModeTrack` / `DiffNvimModeTrackHover` | Unselected half of the mode control (under the mouse pointer) |
 | `DiffNvimModeSegment` | Selected half of the mode control |
+| `DiffNvimModePr` / `DiffNvimModeAwayPr` | The pull request label in the branch row (while previewing) |
+| `DiffNvimThreadMarker` / `DiffNvimThreadDraft` / `DiffNvimThreadResolved` | Sign of a line with open / draft / resolved or outdated review comments |
+| `DiffNvimThreadVirtText` | First comment shown at the end of the line |
+| `DiffNvimThreadAuthor` / `DiffNvimThreadMeta` | Author, and age and state, in the comments float |
+| `DiffNvimButton` / `DiffNvimButtonPrimary` / `DiffNvimButtonDanger` | Buttons in the review floats (the one Ctrl-S presses, ones that discard) |
+| `DiffNvimButtonHover` / `DiffNvimButtonCursor` | Button under the mouse pointer / the cursor |
 
 ---
 
@@ -419,6 +485,7 @@ The plugin fires `User` autocommands that other code can hook into:
 |---|---|---|
 | `DiffNvimViewChanged` | The diff view opened another file, or closed | `{ kind, path, staged, hash }`, or `{}` when closed |
 | `DiffNvimGitChanged` | The repository's index or HEAD changed | — |
+| `DiffNvimPrChanged` | The branch's pull request or its review changed | — |
 
 ---
 
