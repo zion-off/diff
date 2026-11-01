@@ -292,14 +292,12 @@ function M.open(repo_root, on_select)
 
     local win = require("diff.float").open(buf, true, {
       relative = "editor", width = width, height = height, row = row, col = col, title = "Preview branch",
-    }, { footer = "↑↓ move   ⏎ select   esc cancel", winhighlight = "CursorLine:DiffNvimPickerSelected" })
+    }, { footer = "↑↓ move   ⏎ select   esc cancel", winhighlight = "CursorLine:DiffNvimPickerSelected",
+      options = { cursorline = true, wrap = false } })
     if not win then
       pcall(vim.api.nvim_buf_delete, buf, { force = true })
       return
     end
-
-    pcall(vim.api.nvim_set_option_value, "cursorline", true,  { win = win })
-    pcall(vim.api.nvim_set_option_value, "wrap",       false, { win = win })
 
     M._win = win
     M._buf = buf

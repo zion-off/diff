@@ -190,11 +190,8 @@ function M.open(opts)
     .. "tab buttons   esc esc cancel"
   local editor = float.open(editor_buf, true, {
     relative = "editor", row = row, col = col, width = width, height = height, title = opts.title,
-  }, { footer = footer })
+  }, { footer = footer, options = { wrap = true, linebreak = true, cursorline = false, spell = false } })
   if not editor then return false end
-  for k, v in pairs({ wrap = true, linebreak = true, cursorline = false, spell = false }) do
-    pcall(vim.api.nvim_set_option_value, k, v, { win = editor })
-  end
 
   local bar_buf = float.scratch("compose-buttons", "diff.nvim Comment buttons")
   local bar_ok, bar = pcall(vim.api.nvim_open_win, bar_buf, false, {
@@ -218,11 +215,8 @@ function M.open(opts)
     list = float.open(list_buf, false, {
       relative = "editor", row = row + height + 3, col = col, width = width, height = list_height,
       title = opts.list.title,
-    }, { footer = "j/k scroll   tab back" })
+    }, { footer = "j/k scroll   tab back", options = { wrap = false, cursorline = false } })
     if list then
-      for k, v in pairs({ wrap = false, cursorline = false }) do
-        pcall(vim.api.nvim_set_option_value, k, v, { win = list })
-      end
       map(list_buf, "n", "<Tab>", function() if valid_win(editor) then vim.api.nvim_set_current_win(editor) end end)
       map(list_buf, "n", "<S-Tab>", function() if valid_win(editor) then vim.api.nvim_set_current_win(editor) end end)
       map(list_buf, "n", "<Esc>", M.close)

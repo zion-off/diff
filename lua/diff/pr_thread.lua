@@ -198,11 +198,8 @@ function M.open(opts)
   local row, col = placement(opts.win, opts.row, 6, width)
   local win = require("diff.float").open(buf, true, {
     relative = "editor", row = row, col = col, width = width, height = 6, title = "Comments",
-  }, { footer = "r reply   R resolve   e edit   x delete   q close" })
+  }, { footer = "r reply   R resolve   e edit   x delete   q close", options = { wrap = false, cursorline = false } })
   if not win then return end
-  for k, v in pairs({ wrap = false, cursorline = false }) do
-    pcall(vim.api.nvim_set_option_value, k, v, { win = win })
-  end
 
   local s = { win = win, buf = buf, opts = opts, meta = {}, confirm = {} }
   -- Reply and edit open the comment editor, and focus moving to it keeps

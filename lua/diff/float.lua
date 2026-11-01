@@ -11,6 +11,7 @@ local aug = vim.api.nvim_create_augroup("DiffNvimFloat", { clear = true })
 -- window -> { winhighlight = string, options = table|nil }: the look each float keeps.
 local kept = {}
 local watching = false
+local sweep_pending = false
 
 local WINHIGHLIGHT = "Normal:DiffNvimPickerNormal,FloatBorder:DiffNvimPickerBorder,"
   .. "FloatTitle:DiffNvimPickerTitle,FloatFooter:DiffNvimPickerFooter"
@@ -38,7 +39,10 @@ function M.keep_look(win, look)
   vim.api.nvim_create_autocmd({ "WinEnter", "WinLeave", "BufWinEnter" }, {
     group = aug,
     callback = function()
+      if sweep_pending then return end
+      sweep_pending = true
       vim.schedule(function()
+        sweep_pending = false
         for w, l in pairs(kept) do
           if vim.api.nvim_win_is_valid(w) then restore(w, l) else kept[w] = nil end
         end
@@ -51,7 +55,8 @@ end
 --- @param buf   integer
 --- @param enter boolean  focus it
 --- @param cfg   table    nvim_open_win config; a `title` is padded and centred
---- @param opts  table|nil { footer = string|nil, winhighlight = string|nil (added to the shared one) }
+--- @param opts  table|nil { footer = string|nil, winhighlight = string|nil (added to the shared one),
+---   options = table|nil  window options to set and keep, such as { cursorline = false } }
 --- @return integer|nil  the window, nil when it could not open
 function M.open(buf, enter, cfg, opts)
   opts = opts or {}
@@ -71,7 +76,10 @@ function M.open(buf, enter, cfg, opts)
   end
   local winhighlight = WINHIGHLIGHT .. (opts.winhighlight and ("," .. opts.winhighlight) or "")
   vim.wo[win].winhighlight = winhighlight
-  M.keep_look(win, { winhighlight = winhighlight })
+  for name, value in pairs(opts.options or {}) do
+    pcall(vim.api.nvim_set_option_value, name, value, { win = win })
+  end
+  M.keep_look(win, { winhighlight = winhighlight, options = opts.options })
   return win
 end
 

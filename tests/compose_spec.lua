@@ -176,6 +176,7 @@ return {
       return vim.wo[s.bar].winhighlight == "Normal:DiffNvimPickerNormal" and vim.wo[s.editor].winhighlight:find("FloatBorder:DiffNvimPickerBorder", 1, true)
     end, "highlights restored")
     H.eq(vim.wo[s.bar].cursorline, false, "no row marked in the button row")
+    H.wait(function() return vim.wo[s.editor].cursorline == false end, "no row marked in the editor")
     vim.api.nvim_del_autocmd(id)
     compose.close()
   end },
