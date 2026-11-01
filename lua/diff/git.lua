@@ -34,59 +34,24 @@ local GIT_PREFIX = { "git", "-c", "core.quotepath=false" }
 ---   output ended with a newline, which content readers need to see.
 function M.run(args, cwd, callback, opts)
   opts = opts or {}
-  local stdout_chunks = {}
-  local stderr_chunks = {}
   local elapsed = require("diff.log").timer()
-
   local cmd = vim.list_extend(vim.list_extend({}, GIT_PREFIX), args)
 
-  local job_id = vim.fn.jobstart(cmd, {
-    cwd = cwd,
-    env = GIT_ENV,
-    stdout_buffered = true,
-    stderr_buffered = true,
-
-    -- Append rather than assign: a second callback must not discard data
-    -- received before it.
-    on_stdout = function(_, data)
-      if data then vim.list_extend(stdout_chunks, data) end
-    end,
-
-    on_stderr = function(_, data)
-      if data then vim.list_extend(stderr_chunks, data) end
-    end,
-
-    on_exit = function(_, code)
-      vim.schedule(function()
-        if not opts.raw then
-          while #stdout_chunks > 0 and stdout_chunks[#stdout_chunks] == "" do
-            table.remove(stdout_chunks)
-          end
-        end
-        local stderr_str = table.concat(stderr_chunks, "\n"):gsub("\n+$", "")
-        log.debug("git %s -> exit %d in %.1f ms (%d lines)",
-          table.concat(args, " "), code, elapsed(), #stdout_chunks)
-        if code ~= 0 and stderr_str ~= "" then
-          log.debug("git %s stderr: %s", args[1], stderr_str)
-        end
-        callback(stdout_chunks, stderr_str, code)
-      end)
-    end,
-  })
-
-  -- jobstart returns <= 0 on failure (command not found, invalid args, etc.)
-  if job_id <= 0 then
-    log.error("failed to start git %s (jobstart returned %d)", table.concat(args, " "), job_id)
-    vim.schedule(function()
-      callback({}, "failed to start git process (is git installed?)", -1)
+  local started = require("diff.process").run(cmd, { cwd = cwd, env = GIT_ENV, stdin = opts.stdin, raw = opts.raw },
+    function(lines, stderr, code)
+      if code == -1 then
+        callback({}, "failed to start git process (is git installed?)", -1)
+        return
+      end
+      log.debug("git %s -> exit %d in %.1f ms (%d lines)", table.concat(args, " "), code, elapsed(), #lines)
+      if code ~= 0 and stderr ~= "" then
+        log.debug("git %s stderr: %s", args[1], stderr)
+      end
+      callback(lines, stderr, code)
     end)
-    return
+  if not started then
+    log.error("failed to start git %s", table.concat(args, " "))
   end
-
-  if opts.stdin then
-    vim.fn.chansend(job_id, opts.stdin)
-  end
-  vim.fn.chanclose(job_id, "stdin")
 end
 
 -- ---------------------------------------------------------------------------
