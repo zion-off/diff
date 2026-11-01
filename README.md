@@ -352,8 +352,8 @@ never handles a token.
 - **To comment**, press `<leader>c` on a line or a visual selection. A float
   opens to write the comment in Markdown. Press `<Esc>`, then `<CR>` to add it
   (`keymaps.submit_comment`) or `<Esc>` again to cancel; `<Tab>` moves to the
-  buttons. If GitHub rejects the comment, the float stays open
-  with your text.
+  buttons. While a float holds text you haven't sent, opening another one
+  (a reply, the review) is refused, so nothing you typed is lost.
 - **Comments are drafts** in a pending review, as with GitHub's "Start a
   review", until you submit the review as a comment, an approval or a request
   for changes. Drafts live on GitHub, so they survive closing Neovim and show

@@ -118,4 +118,34 @@ return {
     H.eq(compose.is_open(), false, "Cancel pressed")
     H.eq(sent, {})
   end },
+
+  { "opening another editor keeps one holding unsent text", function()
+    local s = open()
+    type_text(s, "half a thought")
+    H.eq(compose.open({ title = "Review", buttons = { { label = "Cancel" } } }), false)
+    H.eq(compose._state(), s, "the first editor stays")
+    H.eq(vim.api.nvim_get_current_win(), s.editor, "and is focused")
+    type_text(s, "")
+    H.eq(compose.open({ title = "Review", buttons = { { label = "Cancel" } } }), true, "an empty one is replaced")
+    vim.cmd("stopinsert")
+    compose.close()
+  end },
+
+  { "a button marked to keep the window open leaves it, and its text, as they were", function()
+    local pressed = 0
+    compose.open({ title = "Review", buttons = {
+      { label = "Open on GitHub", allow_empty = true, keep_open = true, run = function(_, done)
+        pressed = pressed + 1
+        done(nil)
+      end },
+    } })
+    local s = compose._state()
+    type_text(s, "summary")
+    H.ok(clickable.click(s.bar, 1, col_of(s, "Open on GitHub")))
+    H.eq(pressed, 1)
+    H.eq(compose.is_open(), true)
+    H.eq(vim.api.nvim_buf_get_lines(s.editor_buf, 0, -1, false), { "summary" })
+    vim.cmd("stopinsert")
+    compose.close()
+  end },
 }
