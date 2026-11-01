@@ -33,6 +33,8 @@ function M.close()
   S = nil
   if not s then return end
   if s.target then s.target:release() end
+  -- Insert mode would otherwise carry over into the window focus returns to.
+  if vim.api.nvim_get_current_win() == s.editor then vim.cmd("stopinsert") end
   for _, w in ipairs({ s.bar, s.editor }) do
     if valid_win(w) then pcall(vim.api.nvim_win_close, w, true) end
   end
