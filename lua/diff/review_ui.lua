@@ -1,22 +1,17 @@
 --- diff.nvim — what the reader does to a pull request review: comment on
 --- lines, read and act on threads, submit the review. Connects the review
---- state (pr.lua) to the floats that ask for text (compose.lua) and show
---- threads (pr_thread.lua).
+--- state (pr.lua) and its actions (review_actions.lua) to the floats that
+--- ask for text (compose.lua) and show threads (pr_thread.lua).
 local M = {}
 
 local pr        = require("diff.pr")
+local actions   = require("diff.review_actions")
 local compose   = require("diff.compose")
 local pr_thread = require("diff.pr_thread")
 local log       = require("diff.log").scope("review")
 
 local function notify(msg, level)
   vim.notify("diff.nvim: " .. msg, level or vim.log.levels.INFO)
-end
-
-local function report(what)
-  return function(err)
-    if err then notify(what .. " failed: " .. err, vim.log.levels.ERROR) end
-  end
 end
 
 local function lines_label(first, last)
@@ -60,8 +55,7 @@ function M.comment(root, source, side, first, last)
       title = string.format("Comment on %s %s", vim.fn.fnamemodify(source.path, ":t"), lines_label(first, last)),
       buttons = {
         { label = pending and "Add to review" or "Start a review", style = "primary",
-          busy = pending and "Adding to review…" or "Starting review…",
-          run = bound_to_shown_pr(function(text, done) pr.add_comment(target, anchor, text, done) end) },
+          run = bound_to_shown_pr(function(text, done) done(actions.add_comment(target, anchor, text)) end) },
         { label = "Cancel" },
       },
     })
@@ -75,14 +69,13 @@ local THREAD_ACTIONS = {
       on_close = refocus_thread,
       buttons = {
         { label = pr.pending() and "Add reply to review" or "Reply", style = "primary",
-          busy = pr.pending() and "Adding reply to review…" or "Replying…",
-          run = bound_to_shown_pr(function(text, done) pr.reply(thread, text, done) end) },
+          run = bound_to_shown_pr(function(text, done) done(actions.reply(thread, text)) end) },
         { label = "Cancel" },
       },
     })
   end,
   set_resolved = function(thread, resolved)
-    pr.set_resolved(thread, resolved, report(resolved and "resolve" or "unresolve"))
+    actions.set_resolved(thread, resolved)
   end,
   edit = function(_, comment)
     compose.open({
@@ -90,14 +83,14 @@ local THREAD_ACTIONS = {
       text = comment.body,
       on_close = refocus_thread,
       buttons = {
-        { label = "Save", style = "primary", busy = "Saving…",
-          run = bound_to_shown_pr(function(text, done) pr.edit_comment(comment, text, done) end) },
+        { label = "Save", style = "primary",
+          run = bound_to_shown_pr(function(text, done) done(actions.edit_comment(comment, text)) end) },
         { label = "Cancel" },
       },
     })
   end,
   delete = function(comment)
-    pr.delete_comment(comment, report("delete"))
+    actions.delete_comment(comment)
   end,
 }
 
@@ -161,34 +154,25 @@ function M.open_review()
   if drafts > 0 then title = title .. string.format(" · %d draft comment%s", drafts, drafts == 1 and "" or "s") end
   local function submit(event, done_msg)
     return function(text, done)
-      pr.submit(event, text, function(err)
-        if not err then notify(done_msg) end
-        done(err)
-      end)
+      local err = actions.submit(event, text)
+      if not err then notify(done_msg) end
+      done(err)
     end
   end
   local items = {
-    { label = "Comment", style = "primary", allow_empty = drafts > 0, busy = "Submitting review…",
-      run = bound_to_shown_pr(submit("comment", "review submitted")) },
-    { label = "Approve", allow_empty = true, busy = "Approving…", run = bound_to_shown_pr(submit("approve", "pull request approved")) },
-    { label = "Request changes", busy = "Requesting changes…", run = bound_to_shown_pr(submit("request_changes", "changes requested")) },
+    { label = "Comment", style = "primary", allow_empty = drafts > 0, run = bound_to_shown_pr(submit("comment", "review submitted")) },
+    { label = "Approve", allow_empty = true, run = bound_to_shown_pr(submit("approve", "pull request approved")) },
+    { label = "Request changes", run = bound_to_shown_pr(submit("request_changes", "changes requested")) },
   }
   if pending then
     table.insert(items, { label = "Discard drafts", style = "danger", confirm = "Confirm discard", allow_empty = true,
-      busy = "Discarding drafts…",
       run = bound_to_shown_pr(function(_, done)
-        pr.discard(function(err, gone)
-          if gone then
-            notify("there were no draft comments left on GitHub: they were submitted or discarded elsewhere",
-              vim.log.levels.WARN)
-          elseif not err then
-            notify("draft comments discarded")
-          end
-          done(err)
-        end)
+        local err = actions.discard()
+        if not err then notify("draft comments discarded") end
+        done(err)
       end) })
   end
-  table.insert(items, { label = "Open on GitHub", allow_empty = true, busy = "Opening GitHub…", run = bound_to_shown_pr(function(_, done)
+  table.insert(items, { label = "Open on GitHub", allow_empty = true, run = bound_to_shown_pr(function(_, done)
     pr.open_in_browser()
     done(nil)
   end) })

@@ -382,6 +382,13 @@ Where comments can go:
 A draft review is tied to one commit. While you have drafts, new comments go
 only on that commit's diff; submit or discard the drafts to comment elsewhere.
 
+Actions show at once: a comment, reply, resolve, edit, delete, submit or
+discard changes what you see the moment you make it, and goes to GitHub in
+the background, in the order you made them. If GitHub rejects one, a
+notification says what failed and why, any text you wrote for it is put in
+the unnamed register (`p` pastes it back), and the view goes back to what
+GitHub has.
+
 The pull request is looked up when the interface opens and when the branch it
 shows changes, including a checkout made outside Neovim. It is fetched again after each action and on `:DiffNvimRefresh`,
 never in the background.

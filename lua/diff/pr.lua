@@ -1,10 +1,10 @@
 --- diff.nvim — the pull request of the branch on screen, and its review.
 ---
---- Holds what github.lua fetched for the branch the panels show, decides
---- where comments can go, and carries out review actions. Every change of
---- state fires `User DiffNvimPrChanged`, which the diff view and the mode bar
---- redraw from. Nothing is fetched in the background: only on entering a
---- branch's view, after an action, and on an explicit refresh.
+--- Holds what github.lua fetched for the branch the panels show, and
+--- decides where comments can go; review_actions.lua changes it. Every
+--- change of state fires `User DiffNvimPrChanged`, which the diff view and
+--- the mode bar redraw from. Nothing is fetched in the background: only on
+--- entering a branch's view, after actions, and on an explicit refresh.
 ---
 --- Comments can go on two kinds of diff:
 ---   - the branch's changes ("range" sources), when the local branch is at
@@ -108,13 +108,11 @@ local function find_pr(root, branch, gen, callback)
   end)
 end
 
---- Correct a fetched review for draft reviews already submitted or
---- discarded here, which GitHub can still list as drafts just afterwards:
---- discarded comments go, submitted ones are no longer drafts.
-local function without_settled(review)
-  local how = review.pending and S.settled[review.pending.id]
-  if not how then return review end
-  log.debug("GitHub still lists the %s draft review %s; correcting", how, review.pending.id)
+--- Take the viewer's draft review out of `review`: its comments go
+--- ("discarded") or stop being drafts ("submitted"), and a thread left with
+--- no comments goes too.
+--- @param how "submitted"|"discarded"
+function M.settle_drafts(review, how)
   review.pending = nil
   local threads = {}
   for _, t in ipairs(review.threads) do
@@ -133,6 +131,15 @@ local function without_settled(review)
     end
   end
   review.threads = threads
+end
+
+--- Correct a fetched review for draft reviews already submitted or
+--- discarded here, which GitHub can still list as drafts just afterwards.
+local function without_settled(review)
+  local how = review.pending and S.settled[review.pending.id]
+  if not how then return review end
+  log.debug("GitHub still lists the %s draft review %s; correcting", how, review.pending.id)
+  M.settle_drafts(review, how)
   return review
 end
 
@@ -397,120 +404,34 @@ function M.comment_target(root, source, side, callback)
 end
 
 -- ---------------------------------------------------------------------------
--- Actions. Each calls back with nil on success, else GitHub's error, after
--- the review has been fetched again.
+-- Changes made here (review_actions.lua): shown at once, ahead of GitHub
 -- ---------------------------------------------------------------------------
 
---- The review is fetched again either way: a failure often means it changed
---- on GitHub (submitted or discarded in the browser, say), and what is shown
---- must catch up rather than keep offering what no longer exists.
-local function finish(action, callback)
-  return function(_, err)
-    if err then
-      log.warn("%s failed: %s", action, err)
-      M.reload(function() callback(err) end)
-      return
-    end
-    log.info("%s done", action)
-    M.reload(function() callback(nil) end)
-  end
+--- Apply `fn` to the loaded review and announce the change. Returns false
+--- without a review.
+--- @param fn fun(review: table)
+function M.edit_review(fn)
+  if not S.review then return false end
+  fn(S.review)
+  fire()
+  return true
 end
 
---- Add a draft comment, starting the draft review on `target.commit` if
---- there is none. A draft review started here is removed again when the
---- comment is rejected, so a failed first comment leaves nothing behind.
---- @param anchor table { path, side, line, start_line|nil }
-function M.add_comment(target, anchor, body, callback)
-  local pr, root = S.pr, S.root
-  if not pr then return callback("no pull request") end
-  if target.pr_id ~= pr.id then
-    log.info("comment written for another pull request; not sending it")
-    return callback("the pull request shown changed while the comment was written")
-  end
-  local pending = M.pending()
-  log.info("comment on %s %s:%d%s at %s", anchor.path, anchor.side, anchor.line,
-    anchor.start_line and (" from " .. anchor.start_line) or "", short(target.commit))
-  local function add(review_id, created)
-    github.add_thread(root, review_id, anchor, body, function(id, err)
-      if err and created then
-        log.info("removing the draft review started for the rejected comment")
-        github.delete_review(root, review_id, function() end)
-      end
-      finish("comment on " .. anchor.path, callback)(id, err)
-    end)
-  end
-  local function start()
-    github.start_review(root, pr.id, target.commit, function(review_id, err)
-      if err then return finish("start review", callback)(nil, err) end
-      add(review_id, true)
-    end)
-  end
-  if pending and pending.commit == target.commit then return add(pending.id, false) end
-  if not pending then return start() end
-  -- An empty draft review on another commit (comment_target refuses one
-  -- that has comments): replace it with one on this commit.
-  log.info("replacing the empty draft review on %s", short(pending.commit))
-  github.delete_review(root, pending.id, function(_, err)
-    if err then return finish("replace draft review", callback)(nil, err) end
-    start()
-  end)
+--- Remember that the draft review `id` was submitted or discarded here, so
+--- a read that still lists it as a draft is corrected (see without_settled).
+--- @param how "submitted"|"discarded"
+function M.settle(id, how)
+  if id then S.settled[id] = how end
 end
 
-function M.reply(thread, body, callback)
-  local pending = M.pending()
-  log.info("reply in thread %s%s", thread.id, pending and " (draft)" or "")
-  github.reply(S.root, thread.id, body, pending and pending.id or nil, finish("reply", callback))
+--- @return string|nil  the repository root the pull request was looked up in
+function M.root()
+  return S.root
 end
 
-function M.set_resolved(thread, resolved, callback)
-  github.set_resolved(S.root, thread.id, resolved, finish(resolved and "resolve" or "unresolve", callback))
-end
-
-function M.edit_comment(comment, body, callback)
-  github.update_comment(S.root, comment.id, body, finish("edit comment", callback))
-end
-
-function M.delete_comment(comment, callback)
-  github.delete_comment(S.root, comment.id, finish("delete comment", callback))
-end
-
---- Submit the review: the draft review if there is one, else a review of
---- the head commit with just `body`.
---- @param event string  a key of github.EVENTS
-function M.submit(event, body, callback)
-  local pr = S.pr
-  if not pr then return callback("no pull request") end
-  local pending = M.pending()
-  local gh_event = github.EVENTS[event]
-  body = body ~= "" and body or nil
-  log.info("submit review of #%d as %s (%s)", pr.number, gh_event, pending and "draft review" or "no drafts")
-  if pending then
-    github.submit_review(S.root, pending.id, gh_event, body, function(state, err)
-      if not err then S.settled[pending.id] = "submitted" end
-      finish("submit review", callback)(state, err)
-    end)
-  else
-    github.post_review(S.root, pr.id, pr.head_oid, gh_event, body, finish("submit review", callback))
-  end
-end
-
---- Throw the draft review away.
---- @param callback fun(err: string|nil, gone: boolean|nil)  gone: there was
----   no draft review left on GitHub to discard
-function M.discard(callback)
-  local pending = M.pending()
-  if not pending then return callback(nil, true) end
-  log.info("discard draft review %s", pending.id)
-  github.delete_review(S.root, pending.id, function(id, delete_err)
-    if not delete_err then S.settled[pending.id] = "discarded" end
-    finish("discard review", function(err)
-      if err and not M.pending() then
-        log.info("draft review %s was already gone on GitHub", pending.id)
-        return callback(nil, true)
-      end
-      callback(err)
-    end)(id, delete_err)
-  end)
+--- @return string|nil  the login of the viewer, who writes the comments
+function M.viewer()
+  return S.review and S.review.viewer or nil
 end
 
 --- Open the pull request in the browser.

@@ -51,7 +51,7 @@ github.set_resolved = function(_, id, v, cb) table.insert(calls, "resolve " .. i
 github.start_review = function(_, _, commit, cb) table.insert(calls, "start " .. commit); later(cb, "R1") end
 github.add_thread = function(_, id, anchor, body, cb)
   table.insert(calls, string.format("thread %s %s %s:%d %s", id, anchor.path, anchor.side, anchor.line, body))
-  later(cb, "T2")
+  later(cb, { thread = "T2", comment = "C2" })
 end
 
 local function feed(keys)
@@ -176,7 +176,8 @@ return {
     vim.cmd("stopinsert")
     calls = {}
     feed("<CR>")
-    H.wait(function() return not compose.is_open() end, "sent")
+    H.eq(compose.is_open(), false, "closes at once")
+    H.wait(function() return calls[#calls] == "fetch" end, "sent, then the review read again")
     H.eq(calls, { "start " .. head, "thread R1 a.lua new:6 Why insert this?", "fetch" })
   end },
 
