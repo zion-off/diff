@@ -29,6 +29,7 @@ M.defaults = {
     unstage_hunk         = "u",
     leave_note           = "<leader>n",
     leave_comment        = "<leader>c",
+    submit_comment       = "<CR>",
     show_comments        = "K",
     open_review          = "<leader>gr",
     toggle_notes         = "<leader>N",

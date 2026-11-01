@@ -175,7 +175,7 @@ return {
     vim.api.nvim_buf_set_lines(s.editor_buf, 0, -1, false, { "Why insert this?" })
     vim.cmd("stopinsert")
     calls = {}
-    feed("<C-s>")
+    feed("<CR>")
     H.wait(function() return not compose.is_open() end, "sent")
     H.eq(calls, { "start " .. head, "thread R1 a.lua new:6 Why insert this?", "fetch" })
   end },
@@ -241,7 +241,7 @@ return {
     local msgs = {}
     local notify = vim.notify
     vim.notify = function(m) table.insert(msgs, m) end
-    feed("<C-s>")
+    feed("<CR>")
     vim.notify = notify
     H.eq(compose.is_open(), true)
     H.eq(vim.api.nvim_buf_get_lines(s.editor_buf, 0, -1, false), { "Looks good" })

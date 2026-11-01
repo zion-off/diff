@@ -7,8 +7,9 @@
 ---   ╰──────────────────────────────────────╯
 ---    Add to review   Cancel                     the buttons
 ---
---- Ctrl-S presses the first button from the editor; Tab moves to the
---- buttons, where h/l move and Enter presses; Esc (normal mode) or q cancels.
+--- In normal mode, the `submit_comment` key (Enter) presses the first
+--- button, Tab moves to the buttons (where h/l move and Enter presses), and
+--- Esc or q cancels. So from insert mode: Esc, then Enter sends, Esc cancels.
 --- A button's `run(text, done)` gets the text and calls done(err): on an error
 --- the window stays open, text intact, so nothing typed is lost.
 local M = {}
@@ -121,6 +122,19 @@ local function scratch(kind, name)
   return buf
 end
 
+--- The key that presses the first button from the editor, or nil when unset.
+local function submit_key()
+  local key = (require("diff.config").get().keymaps or {}).submit_comment
+  return key ~= "" and key or nil
+end
+
+local KEY_GLYPHS = { ["<cr>"] = "⏎", ["<enter>"] = "⏎", ["<return>"] = "⏎" }
+
+local function key_label(key)
+  if not key then return "" end
+  return KEY_GLYPHS[key:lower()] or key
+end
+
 local function map(buf, modes, key, fn)
   vim.keymap.set(modes, key, fn, { buffer = buf, nowait = true, silent = true })
 end
@@ -130,7 +144,7 @@ end
 ---   title   = string,
 ---   text    = string|nil,     initial text
 ---   buttons = { { label, style?, allow_empty?, confirm?, run = fun(text, done)|nil } },
----             the first is pressed by Ctrl-S; one without `run` cancels; one
+---             the first is pressed by `submit_comment`; one without `run` cancels; one
 ---             with `confirm` (a label) asks for a second press first
 ---   on_close = fun()|nil }
 function M.open(opts)
@@ -148,7 +162,8 @@ function M.open(opts)
   end
   local editor = require("diff.float").open(editor_buf, true, {
     relative = "editor", row = row, col = col, width = width, height = height, title = opts.title,
-  }, { footer = "ctrl-s " .. opts.buttons[1].label:lower() .. "   tab buttons   esc cancel" })
+  }, { footer = string.format("esc %s %s   tab buttons   esc esc cancel", key_label(submit_key()),
+    opts.buttons[1].label:lower()) })
   if not editor then return end
   for k, v in pairs({ wrap = true, linebreak = true, cursorline = false, spell = false }) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = editor })
@@ -180,7 +195,8 @@ function M.open(opts)
     pcall(vim.api.nvim_win_set_cursor, s.bar, { 1, 1 })
   end
 
-  map(editor_buf, { "n", "i" }, "<C-s>", function() press(s, opts.buttons[1]) end)
+  local submit = submit_key()
+  if submit then map(editor_buf, "n", submit, function() press(s, opts.buttons[1]) end) end
   map(editor_buf, "n", "<Tab>", to_bar)
   map(editor_buf, "n", "<Esc>", M.close)
   map(editor_buf, "n", "q", M.close)
@@ -189,7 +205,6 @@ function M.open(opts)
   for _, key in ipairs({ "l", "w", "<Tab>", "<Right>" }) do map(bar_buf, "n", key, function() s.target:step(1) end) end
   for _, key in ipairs({ "h", "b", "<S-Tab>", "<Left>" }) do map(bar_buf, "n", key, function() s.target:step(-1) end) end
   for _, key in ipairs({ "i", "a", "k", "<Up>" }) do map(bar_buf, "n", key, to_editor) end
-  map(bar_buf, "n", "<C-s>", function() press(s, opts.buttons[1]) end)
   map(bar_buf, "n", "<Esc>", M.close)
   map(bar_buf, "n", "q", M.close)
 

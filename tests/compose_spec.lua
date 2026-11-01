@@ -34,12 +34,12 @@ local function col_of(s, label)
 end
 
 return {
-  { "Ctrl-S sends the text with the first button and closes", function()
+  { "Enter in normal mode sends the text with the first button and closes", function()
     local s = open()
     H.eq(vim.api.nvim_get_current_win(), s.editor, "the editor has focus")
     type_text(s, "Why this?\n\nIt looks off.")
     vim.cmd("stopinsert")
-    feed("<C-s>")
+    feed("<CR>")
     H.eq(sent, { "Why this?\n\nIt looks off." })
     H.eq(compose.is_open(), false)
     H.ok(not vim.api.nvim_win_is_valid(s.bar), "the buttons close with the editor")
@@ -50,7 +50,7 @@ return {
     reply = "Line could not be resolved"
     type_text(s, "draft")
     vim.cmd("stopinsert")
-    feed("<C-s>")
+    feed("<CR>")
     H.eq(compose.is_open(), true)
     H.eq(vim.api.nvim_buf_get_lines(s.editor_buf, 0, -1, false), { "draft" })
     compose.close()
@@ -59,7 +59,7 @@ return {
   { "nothing is sent without text unless the button allows it", function()
     local s = open()
     vim.cmd("stopinsert")
-    feed("<C-s>")
+    feed("<CR>")
     H.eq(sent, {})
     H.eq(compose.is_open(), true)
     compose.close()
@@ -68,7 +68,7 @@ return {
       done(nil)
     end } } })
     vim.cmd("stopinsert")
-    feed("<C-s>")
+    feed("<CR>")
     H.eq(sent, { "" })
   end },
 

@@ -141,6 +141,7 @@ require("diff").setup({
     unstage_hunk         = "u",
     leave_note           = "<leader>n",
     leave_comment        = "<leader>c",
+    submit_comment       = "<CR>",   -- in the comment editor, normal mode
     show_comments        = "K",
     open_review          = "<leader>gr",
     toggle_notes         = "<leader>N",
@@ -349,8 +350,9 @@ never handles a token.
   (press twice to confirm), `<Tab>` move between buttons, `<CR>` press the one
   under the cursor, `q` close.
 - **To comment**, press `<leader>c` on a line or a visual selection. A float
-  opens to write the comment in Markdown: `<C-s>` adds it, `<Tab>` moves to the
-  buttons, `<Esc>` cancels. If GitHub rejects the comment, the float stays open
+  opens to write the comment in Markdown. Press `<Esc>`, then `<CR>` to add it
+  (`keymaps.submit_comment`) or `<Esc>` again to cancel; `<Tab>` moves to the
+  buttons. If GitHub rejects the comment, the float stays open
   with your text.
 - **Comments are drafts** in a pending review, as with GitHub's "Start a
   review", until you submit the review as a comment, an approval or a request
@@ -474,7 +476,7 @@ Override any group via `vim.api.nvim_set_hl` after `setup()`, or use the `highli
 | `DiffNvimThreadMarker` / `DiffNvimThreadDraft` / `DiffNvimThreadResolved` | Sign of a line with open / draft / resolved or outdated review comments |
 | `DiffNvimThreadVirtText` | First comment shown at the end of the line |
 | `DiffNvimThreadAuthor` / `DiffNvimThreadMeta` | Author, and age and state, in the comments float |
-| `DiffNvimButton` / `DiffNvimButtonPrimary` / `DiffNvimButtonDanger` | Buttons in the review floats (the one Ctrl-S presses, ones that discard) |
+| `DiffNvimButton` / `DiffNvimButtonPrimary` / `DiffNvimButtonDanger` | Buttons in the review floats (the one Enter presses, ones that discard) |
 | `DiffNvimButtonHover` / `DiffNvimButtonCursor` | Button under the mouse pointer / the cursor |
 
 ---

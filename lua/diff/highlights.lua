@@ -361,7 +361,7 @@ local function build_defaults()
     DiffNvimThreadMeta      = { fg = s.dim_fg },
 
     -- Buttons in the review floats: on the control track's surface, the one
-    -- Ctrl-S presses tinted like a visited mode, one that discards in the
+    -- Enter presses tinted like a visited mode, one that discards in the
     -- remove colour; hovered like the mode bar's cells
     DiffNvimButton          = { fg = text_fg, bg = s.track_bg },
     DiffNvimButtonPrimary   = { fg = text_fg, bg = s.away_bg, bold = true },
