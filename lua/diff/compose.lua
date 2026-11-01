@@ -7,6 +7,10 @@
 ---   ╰──────────────────────────────────────╯
 ---    Add to review   Cancel                     the buttons
 ---
+--- A float may also show a list above the editor (the review's draft
+--- comments): it scrolls with the usual keys or the mouse wheel, and Shift-Tab
+--- from the editor moves into it.
+---
 --- In normal mode, the `submit_comment` key (Enter) presses the first
 --- button, Tab moves to the buttons (where h/l move and Enter presses), and
 --- Esc or q cancels. So from insert mode: Esc, then Enter sends, Esc cancels.
@@ -23,7 +27,7 @@ local NS = vim.api.nvim_create_namespace("diff_nvim_compose")
 local EDITOR_HEIGHT = 8
 local MAX_WIDTH = 80
 
--- The window open now, if any: { editor, editor_buf, bar, bar_buf, target, opts, busy }
+-- The window open now, if any: { editor, editor_buf, bar, bar_buf, list, target, opts, busy }
 local S = nil
 
 local function valid_win(w) return w and vim.api.nvim_win_is_valid(w) end
@@ -36,7 +40,7 @@ function M.close()
   if s.target then s.target:release() end
   -- Insert mode would otherwise carry over into the window focus returns to.
   if vim.api.nvim_get_current_win() == s.editor then vim.cmd("stopinsert") end
-  for _, w in ipairs({ s.bar, s.editor }) do
+  for _, w in ipairs({ s.bar, s.editor, s.list or false }) do
     if valid_win(w) then pcall(vim.api.nvim_win_close, w, true) end
   end
   if s.opts.on_close then s.opts.on_close() end
@@ -146,13 +150,26 @@ end
 ---   buttons = { { label, style?, allow_empty?, confirm?, run = fun(text, done)|nil } },
 ---             the first is pressed by `submit_comment`; one without `run` cancels; one
 ---             with `confirm` (a label) asks for a second press first
+---   list    = { title, render = fun(width): lines: string[], hls: { row, s, e, hl }[] }|nil,
+---             shown above the editor
 ---   on_close = fun()|nil }
 function M.open(opts)
   M.close()
   local width = math.max(30, math.min(MAX_WIDTH, vim.o.columns - 8))
   local height = math.min(EDITOR_HEIGHT, math.max(3, vim.o.lines - 8))
-  -- Rows: the editor and its border, then the buttons right under it.
-  local row = math.max(0, math.floor((vim.o.lines - height - 3) / 2))
+  local list_lines, list_hls, list_height = nil, nil, 0
+  if opts.list then
+    list_lines, list_hls = opts.list.render(width)
+    -- Whatever the screen has left over the editor, its buttons and both
+    -- borders, up to most of it: the list scrolls for the rest.
+    local room = vim.o.lines - vim.o.cmdheight - 1 - (height + 3) - 2
+    list_height = math.max(0, math.min(#list_lines, room, math.floor(vim.o.lines * 0.5)))
+  end
+  local list_rows = list_height > 0 and list_height + 2 or 0
+  -- Rows: the list and its border, the editor and its border, then the
+  -- buttons right under it.
+  local top = math.max(0, math.floor((vim.o.lines - list_rows - height - 3) / 2))
+  local row = top + list_rows
   local col = math.max(0, math.floor((vim.o.columns - width - 2) / 2))
 
   local editor_buf = scratch("compose", "diff.nvim Comment")
@@ -182,7 +199,31 @@ function M.open(opts)
   end
   vim.wo[bar].winhighlight = "Normal:DiffNvimPickerNormal"
 
-  local s = { editor = editor, editor_buf = editor_buf, bar = bar, bar_buf = bar_buf, opts = opts, busy = false }
+  local list
+  if list_height > 0 then
+    local list_buf = scratch("compose-list", "diff.nvim Comment list")
+    vim.api.nvim_buf_set_lines(list_buf, 0, -1, false, list_lines)
+    vim.bo[list_buf].modifiable = false
+    for _, h in ipairs(list_hls) do
+      local end_col = h[3] == -1 and #list_lines[h[1] + 1] or h[3]
+      pcall(vim.api.nvim_buf_set_extmark, list_buf, NS, h[1], h[2], { end_col = end_col, hl_group = h[4] })
+    end
+    list = require("diff.float").open(list_buf, false, {
+      relative = "editor", row = top, col = col, width = width, height = list_height, title = opts.list.title,
+    }, { footer = "j/k scroll   tab back" })
+    if list then
+      for k, v in pairs({ wrap = false, cursorline = false }) do
+        pcall(vim.api.nvim_set_option_value, k, v, { win = list })
+      end
+      map(list_buf, "n", "<Tab>", function() if valid_win(editor) then vim.api.nvim_set_current_win(editor) end end)
+      map(list_buf, "n", "<S-Tab>", function() if valid_win(editor) then vim.api.nvim_set_current_win(editor) end end)
+      map(list_buf, "n", "<Esc>", M.close)
+      map(list_buf, "n", "q", M.close)
+    end
+  end
+
+  local s = { editor = editor, editor_buf = editor_buf, bar = bar, bar_buf = bar_buf, list = list, opts = opts,
+    busy = false }
   s.target = buttons.target(bar_buf, bar)
   S = s
   render_bar(s)
@@ -198,6 +239,7 @@ function M.open(opts)
   local submit = submit_key()
   if submit then map(editor_buf, "n", submit, function() press(s, opts.buttons[1]) end) end
   map(editor_buf, "n", "<Tab>", to_bar)
+  if list then map(editor_buf, "n", "<S-Tab>", function() vim.api.nvim_set_current_win(list) end) end
   map(editor_buf, "n", "<Esc>", M.close)
   map(editor_buf, "n", "q", M.close)
 
@@ -210,7 +252,7 @@ function M.open(opts)
 
   -- Closing either window some other way (:q) closes the pair.
   vim.api.nvim_create_autocmd("WinClosed", {
-    pattern = { tostring(editor), tostring(bar) }, once = true,
+    pattern = { tostring(editor), tostring(bar), list and tostring(list) or nil }, once = true,
     callback = function() vim.schedule(function() if S == s then M.close() end end) end,
   })
 

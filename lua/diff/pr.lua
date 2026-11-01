@@ -235,6 +235,25 @@ function M.pending()
   return S.review and S.review.pending or nil
 end
 
+--- The viewer's draft comments, in file and line order: new threads and
+--- replies alike, each with where it is.
+--- @return { path: string, line: integer|nil, side: string, reply: boolean, body: string }[]
+function M.drafts()
+  local out = {}
+  for _, t in ipairs(S.review and S.review.threads or {}) do
+    for i, c in ipairs(t.comments) do
+      if c.pending then
+        table.insert(out, { path = t.path, line = t.line or t.original_line, side = t.side, reply = i > 1, body = c.body })
+      end
+    end
+  end
+  table.sort(out, function(a, b)
+    if a.path ~= b.path then return a.path < b.path end
+    return (a.line or 0) < (b.line or 0)
+  end)
+  return out
+end
+
 --- @return boolean  whether a lookup is in flight
 function M.loading()
   return S.loading

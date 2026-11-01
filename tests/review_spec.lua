@@ -230,6 +230,38 @@ return {
     require("diff").close()
   end },
 
+  { "the review float lists the draft comments above the summary, scrollably", function()
+    local function draft(id, line, body)
+      return vim.tbl_extend("force", vim.deepcopy(thread), { id = id, line = line, pending = true,
+        comments = { vim.tbl_extend("force", thread.comments[1], { id = "C" .. id, body = body, pending = true }) } })
+    end
+    extra_threads = {}
+    for i = 1, 30 do table.insert(extra_threads, draft("D" .. i, 40 - i, "draft number " .. i .. "\nsecond line")) end
+    pr.sync(repo, nil, { force = true })
+    H.wait(function() return pr._state().review ~= nil and #pr.drafts() == 30 end, "drafts loaded")
+    require("diff.review_ui").open_review()
+    local s = compose._state()
+    H.ok(s.list and vim.api.nvim_win_is_valid(s.list), "a list window")
+    local buf = vim.api.nvim_win_get_buf(s.list)
+    local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    H.eq(lines[1], " a.lua line 10")
+    H.eq(lines[2], "   draft number 30", "the text, nearest line first")
+    H.eq(lines[3], "   second line")
+    H.ok(vim.api.nvim_win_get_height(s.list) < #lines, "taller than its window: it scrolls")
+    H.eq(vim.api.nvim_get_current_win(), s.editor, "the editor keeps focus")
+    vim.cmd("stopinsert")
+    feed("<S-Tab>")
+    H.eq(vim.api.nvim_get_current_win(), s.list)
+    feed("G")
+    H.ok(vim.fn.line("w0", s.list) > 1, "scrolled")
+    feed("<Tab>")
+    H.eq(vim.api.nvim_get_current_win(), s.editor)
+    compose.close()
+    H.ok(not vim.api.nvim_win_is_valid(s.list), "closes with the editor")
+    extra_threads = {}
+    pr.reload()
+  end },
+
   { "a review float opened on one pull request refuses to act on another, keeping the text", function()
     pr.sync(repo, nil)
     H.wait(function() return pr._state().review ~= nil end, "review loaded")

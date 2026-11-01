@@ -125,6 +125,25 @@ function M.show_threads(win, row, source, anchors)
   return true
 end
 
+--- The draft comments as list lines at `width`: where each is, then its
+--- text, wrapped.
+--- @return string[] lines, table[] hls { row, s, e, hl }
+local function drafts_list(drafts, width)
+  local lines, hls = {}, {}
+  for i, d in ipairs(drafts) do
+    if i > 1 then table.insert(lines, "") end
+    local where = " " .. d.path .. (d.line and (" line " .. d.line) or "")
+    local kind = d.reply and "  reply" or (d.side == "old" and "  removed line" or "")
+    table.insert(lines, where .. kind)
+    table.insert(hls, { #lines - 1, 0, #where, "DiffNvimThreadAuthor" })
+    if kind ~= "" then table.insert(hls, { #lines - 1, #where, -1, "DiffNvimThreadMeta" }) end
+    for _, para in ipairs(vim.split(d.body:gsub("\r", ""), "\n", { plain = true })) do
+      for _, wrapped in ipairs(require("diff.util").wrap(para, width - 3)) do table.insert(lines, "   " .. wrapped) end
+    end
+  end
+  return lines, hls
+end
+
 --- Open the review float: a summary, and buttons to submit it as a comment,
 --- an approval or a request for changes, discard the draft comments, or open
 --- the pull request on GitHub.
@@ -161,7 +180,12 @@ function M.open_review()
     done(nil)
   end) })
   table.insert(items, { label = "Cancel" })
-  compose.open({ title = title, buttons = items })
+  local drafts = pr.drafts()
+  local list = #drafts > 0 and {
+    title = string.format("Your %d draft comment%s", #drafts, #drafts == 1 and "" or "s"),
+    render = function(width) return drafts_list(drafts, width) end,
+  } or nil
+  compose.open({ title = title, buttons = items, list = list })
 end
 
 --- Close the review floats (the interface closed).
