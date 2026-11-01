@@ -126,6 +126,17 @@ function M.wrap(s, width)
   return rows
 end
 
+--- `text` (a comment's body, any number of paragraphs) wrapped at `width`,
+--- each line prefixed with `indent`.
+--- @return string[]
+function M.wrap_text(text, width, indent)
+  local out = {}
+  for _, para in ipairs(vim.split(text:gsub("\r", ""), "\n", { plain = true })) do
+    for _, line in ipairs(M.wrap(para, width - #indent)) do table.insert(out, indent .. line) end
+  end
+  return out
+end
+
 -- ---------------------------------------------------------------------------
 -- File rows (shared by the file and commit panels, so their columns match)
 -- ---------------------------------------------------------------------------

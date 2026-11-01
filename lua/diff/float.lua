@@ -3,7 +3,8 @@
 --- and a footer listing keys where Neovim can draw one.
 local M = {}
 
-local log = require("diff.log").scope("float")
+local chrome = require("diff.chrome")
+local log    = require("diff.log").scope("float")
 
 local WINHIGHLIGHT = "Normal:DiffNvimPickerNormal,FloatBorder:DiffNvimPickerBorder,"
   .. "FloatTitle:DiffNvimPickerTitle,FloatFooter:DiffNvimPickerFooter"
@@ -32,6 +33,33 @@ function M.open(buf, enter, cfg, opts)
   end
   vim.wo[win].winhighlight = WINHIGHLIGHT .. (opts.winhighlight and ("," .. opts.winhighlight) or "")
   return win
+end
+
+--- A scratch buffer for a float, wiped when hidden.
+--- @param kind string  chrome tag ("compose", "pr-thread")
+--- @param name string  buffer name
+function M.scratch(kind, name)
+  local buf = vim.api.nvim_create_buf(false, true)
+  chrome.tag(buf, kind)
+  chrome.name(buf, name)
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].modifiable = false
+  return buf
+end
+
+--- Replace the lines of read-only `buf` and its highlights in `ns`.
+--- @param hls table[]  { row (0-based), start_col, end_col (-1: end of line), hl_group }
+function M.set_lines(buf, ns, lines, hls)
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+  for _, h in ipairs(hls) do
+    local end_col = h[3] == -1 and #(lines[h[1] + 1] or "") or h[3]
+    pcall(vim.api.nvim_buf_set_extmark, buf, ns, h[1], h[2], { end_col = end_col, hl_group = h[4] })
+  end
 end
 
 return M
