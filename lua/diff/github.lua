@@ -1,9 +1,9 @@
 --- diff.nvim — the pull request API, over `gh`.
 ---
 --- Turns GitHub's responses into plain tables the rest of the plugin uses:
----   pr     { id, number, title, url, head_oid, base_name, branch }
----   review { pr, commits = { [oid] = true }, pending = { id, commit, count }|nil,
----            threads = thread[], truncated = boolean }
+---   pr     { id, number, title, url, head_oid, base_name, base_repo, branch }
+---   review { pr, commits = { [oid] = true }, commits_complete = boolean,
+---            pending = { id, commit, count }|nil, threads = thread[] }
 ---   thread { id, path, side, line, start_side, start_line, original_line,
 ---            original_start_line, resolved, outdated, pending, commit,
 ---            can_reply, can_resolve, can_unresolve, comments = comment[] }
@@ -30,6 +30,8 @@ local function pr_from(raw)
   return {
     id = raw.id, number = raw.number, title = raw.title, url = raw.url,
     head_oid = raw.headRefOid, base_name = raw.baseRefName, branch = raw.headRefName,
+    -- "owner/name" of the repository the pull request is on, from its URL.
+    base_repo = raw.url and raw.url:match("^https?://[^/]+/([^/]+/[^/]+)/pull/%d+") or nil,
   }
 end
 
@@ -62,32 +64,46 @@ function M.find_pull_request(root, branch, callback)
   end)
 end
 
-local REVIEW_QUERY = string.format([[
-query PullRequestReview($id: ID!) {
-  node(id: $id) {
-    ... on PullRequest {
-      id number title url headRefOid headRefName baseRefName
-      commits(last: %d) { nodes { commit { oid } } }
-      reviews(states: [PENDING], first: 10) {
-        nodes { id viewerDidAuthor commit { oid } comments { totalCount } }
-      }
-      reviewThreads(first: %d) {
-        pageInfo { hasNextPage }
-        nodes {
+local THREAD_FIELDS = string.format([[
           id isResolved isOutdated path line startLine originalLine originalStartLine
           diffSide startDiffSide viewerCanReply viewerCanResolve viewerCanUnresolve
           comments(first: %d) {
+            pageInfo { hasNextPage }
             nodes {
               id body createdAt state viewerCanUpdate viewerCanDelete
               author { login }
               originalCommit { oid }
             }
-          }
-        }
+          }]], MAX_COMMENTS)
+
+local REVIEW_QUERY = string.format([[
+query PullRequestReview($id: ID!) {
+  node(id: $id) {
+    ... on PullRequest {
+      id number title url headRefOid headRefName baseRefName
+      commits(last: %d) { totalCount nodes { commit { oid } } }
+      reviews(states: [PENDING], first: 10) {
+        nodes { id viewerDidAuthor commit { oid } comments { totalCount } }
+      }
+      reviewThreads(first: %d) {
+        pageInfo { hasNextPage endCursor }
+        nodes { %s }
       }
     }
   }
-}]], MAX_COMMITS, MAX_THREADS, MAX_COMMENTS)
+}]], MAX_COMMITS, MAX_THREADS, THREAD_FIELDS)
+
+local THREADS_PAGE_QUERY = string.format([[
+query PullRequestThreads($id: ID!, $after: String!) {
+  node(id: $id) {
+    ... on PullRequest {
+      reviewThreads(first: %d, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { %s }
+      }
+    }
+  }
+}]], MAX_THREADS, THREAD_FIELDS)
 
 local function nodes(conn)
   return type(conn) == "table" and type(conn.nodes) == "table" and conn.nodes or {}
@@ -109,6 +125,9 @@ end
 local function thread_from(raw)
   local comments = {}
   for _, c in ipairs(nodes(raw.comments)) do table.insert(comments, comment_from(c)) end
+  if raw.comments and raw.comments.pageInfo and raw.comments.pageInfo.hasNextPage then
+    log.warn("thread %s has more than %d comments; showing the first %d", tostring(raw.id), MAX_COMMENTS, MAX_COMMENTS)
+  end
   local first = comments[1] or {}
   return {
     id = raw.id, path = raw.path,
@@ -125,8 +144,27 @@ local function thread_from(raw)
   }
 end
 
+--- Fetch the threads after `cursor`, page by page, into `review.threads`.
+local function fetch_more_threads(root, pr_id, review, cursor, callback)
+  gh.graphql(root, THREADS_PAGE_QUERY, { id = pr_id, after = cursor }, function(data, err)
+    local conn = data and data.node and data.node.reviewThreads
+    if not conn then
+      callback(err or "pull request not found")
+      return
+    end
+    for _, t in ipairs(nodes(conn)) do table.insert(review.threads, thread_from(t)) end
+    local page = conn.pageInfo or {}
+    if page.hasNextPage and page.endCursor then
+      return fetch_more_threads(root, pr_id, review, page.endCursor, callback)
+    end
+    callback(nil)
+  end)
+end
+
 --- Everything the interface shows of a pull request's review: its threads,
---- its commits, and the viewer's draft (pending) review.
+--- its commits, and the viewer's draft (pending) review. GitHub lists only
+--- a pull request's last commits; `commits_complete` says whether that is
+--- all of them.
 --- @param callback fun(review: table|nil, err: string|nil)
 function M.fetch_review(root, pr_id, callback)
   gh.graphql(root, REVIEW_QUERY, { id = pr_id }, function(data, err)
@@ -135,12 +173,12 @@ function M.fetch_review(root, pr_id, callback)
       callback(nil, err or "pull request not found")
       return
     end
+    local commit_nodes = nodes(raw.commits)
     local review = {
       pr = pr_from(raw), commits = {}, threads = {}, pending = nil,
-      truncated = raw.reviewThreads and raw.reviewThreads.pageInfo
-        and raw.reviewThreads.pageInfo.hasNextPage == true or false,
+      commits_complete = not (raw.commits and raw.commits.totalCount and raw.commits.totalCount > #commit_nodes),
     }
-    for _, c in ipairs(nodes(raw.commits)) do
+    for _, c in ipairs(commit_nodes) do
       if c.commit and c.commit.oid then review.commits[c.commit.oid] = true end
     end
     for _, r in ipairs(nodes(raw.reviews)) do
@@ -153,12 +191,21 @@ function M.fetch_review(root, pr_id, callback)
       end
     end
     for _, t in ipairs(nodes(raw.reviewThreads)) do table.insert(review.threads, thread_from(t)) end
-    if review.truncated then
-      log.warn("pull request #%d has more than %d threads; showing the first %d", raw.number, MAX_THREADS, MAX_THREADS)
+    local function done(page_err)
+      if page_err then
+        callback(nil, page_err)
+        return
+      end
+      log.debug("pull request #%d: %d threads, %s commits, pending review %s", raw.number, #review.threads,
+        review.commits_complete and "all" or "the last " .. #commit_nodes, review.pending and review.pending.id or "none")
+      callback(review, nil)
     end
-    log.debug("pull request #%d: %d threads, pending review %s", raw.number, #review.threads,
-      review.pending and review.pending.id or "none")
-    callback(review, nil)
+    local page = raw.reviewThreads and raw.reviewThreads.pageInfo or {}
+    if page.hasNextPage and page.endCursor then
+      log.debug("pull request #%d has more than %d threads; fetching the rest", raw.number, MAX_THREADS)
+      return fetch_more_threads(root, pr_id, review, page.endCursor, done)
+    end
+    done(nil)
   end)
 end
 

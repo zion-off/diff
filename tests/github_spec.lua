@@ -35,7 +35,7 @@ return {
     stub(function() return pr_json("OPEN") end)
     local pr = await(function(cb) github.find_pull_request("/r", "feature", cb) end)
     H.eq(pr, { id = "PR_1", number = 7, title = "Add things", url = "https://github.com/o/r/pull/7",
-      head_oid = "abc", base_name = "main", branch = "feature" })
+      head_oid = "abc", base_name = "main", base_repo = "o/r", branch = "feature" })
     H.eq(calls[1].args[1], "pr")
     H.eq(calls[1].args[3], "feature")
   end },
@@ -77,6 +77,32 @@ return {
     H.eq({ t.side, t.start_side, t.line, t.start_line, t.pending, t.commit }, { "old", "old", 12, 10, true, "c2" })
     H.eq(t.comments[1].author, "me")
     H.eq(calls[1].stdin.variables, { id = "PR_1" })
+  end },
+
+  { "pages through more threads than one request returns, and says whether all commits came", function()
+    local function thread(id) return { id = id, path = "a.lua", diffSide = "RIGHT", line = 1, comments = { nodes = {} } } end
+    stub(function(_, stdin)
+      local req = vim.json.decode(stdin)
+      if not req.variables.after then
+        return vim.json.encode({ data = { node = {
+          id = "PR_1", number = 7, url = "https://github.com/o/r/pull/7", headRefOid = "c3",
+          commits = { totalCount = 300, nodes = { { commit = { oid = "c3" } } } },
+          reviews = { nodes = {} },
+          reviewThreads = { pageInfo = { hasNextPage = true, endCursor = "p1" }, nodes = { thread("T1") } },
+        } } })
+      elseif req.variables.after == "p1" then
+        return vim.json.encode({ data = { node = { reviewThreads = {
+          pageInfo = { hasNextPage = true, endCursor = "p2" }, nodes = { thread("T2") } } } } })
+      end
+      return vim.json.encode({ data = { node = { reviewThreads = {
+        pageInfo = { hasNextPage = false }, nodes = { thread("T3") } } } } })
+    end)
+    local review = await(function(cb) github.fetch_review("/r", "PR_1", cb) end)
+    local ids = {}
+    for _, t in ipairs(review.threads) do table.insert(ids, t.id) end
+    H.eq(ids, { "T1", "T2", "T3" })
+    H.eq(review.commits_complete, false)
+    H.eq(review.pr.base_repo, "o/r")
   end },
 
   { "sends requests on stdin, never as flags", function()
