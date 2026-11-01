@@ -2,7 +2,7 @@
 ---
 --- Turns GitHub's responses into plain tables the rest of the plugin uses:
 ---   pr     { id, number, title, url, head_oid, base_name, base_repo, branch }
----   review { pr, commits = { [oid] = true }, commits_complete = boolean,
+---   review { pr, viewer = login, commits = { [oid] = true }, commits_complete = boolean,
 ---            pending = { id, commit, count }|nil, threads = thread[] }
 ---   thread { id, path, side, line, start_side, start_line, original_line,
 ---            original_start_line, resolved, outdated, pending, commit,
@@ -78,6 +78,7 @@ local THREAD_FIELDS = string.format([[
 
 local REVIEW_QUERY = string.format([[
 query PullRequestReview($id: ID!) {
+  viewer { login }
   node(id: $id) {
     ... on PullRequest {
       id number title url headRefOid headRefName baseRefName
@@ -176,6 +177,7 @@ function M.fetch_review(root, pr_id, callback)
     local commit_nodes = nodes(raw.commits)
     local review = {
       pr = pr_from(raw), commits = {}, threads = {}, pending = nil,
+      viewer = data.viewer and data.viewer.login or nil,
       commits_complete = not (raw.commits and raw.commits.totalCount and raw.commits.totalCount > #commit_nodes),
     }
     for _, c in ipairs(commit_nodes) do
@@ -236,7 +238,8 @@ mutation StartReview($pr: ID!, $commit: GitObjectID) {
 end
 
 --- Add a draft comment thread to the draft review `review_id`.
---- @param anchor table { path, side, line, start_side|nil, start_line|nil }
+--- @param anchor   table { path, side, line, start_side|nil, start_line|nil }
+--- @param callback fun(ids: {thread: string, comment: string|nil}|nil, err: string|nil)
 function M.add_thread(root, review_id, anchor, body, callback)
   local vars = {
     review = review_id, path = anchor.path, body = body,
@@ -250,8 +253,14 @@ function M.add_thread(root, review_id, anchor, body, callback)
 mutation AddThread($review: ID!, $path: String!, $body: String!, $line: Int!, $side: DiffSide!,
                    $startLine: Int, $startSide: DiffSide) {
   addPullRequestReviewThread(input: { pullRequestReviewId: $review, path: $path, body: $body,
-      line: $line, side: $side, startLine: $startLine, startSide: $startSide }) { thread { id } }
-}]], vars, { "addPullRequestReviewThread", "thread", "id" }, callback)
+      line: $line, side: $side, startLine: $startLine, startSide: $startSide }) {
+    thread { id comments(first: 1) { nodes { id } } }
+  }
+}]], vars, { "addPullRequestReviewThread", "thread" }, function(thread, err)
+    if err then return callback(nil, err) end
+    local first = type(thread) == "table" and nodes(thread.comments)[1] or nil
+    callback({ thread = type(thread) == "table" and thread.id or nil, comment = first and first.id or nil }, nil)
+  end)
 end
 
 --- Reply in a thread. With a draft review the reply joins it; without one

@@ -110,7 +110,7 @@ return {
     local id = await(function(cb)
       github.add_thread("/r", "R1", { path = "a.lua", side = "new", line = 5 }, "@/etc/passwd", cb)
     end)
-    H.eq(id, "T9")
+    H.eq(id, { thread = "T9" })
     H.eq(calls[1].args, { "api", "graphql", "--input", "-" })
     local vars = calls[1].stdin.variables
     H.eq(vars.body, "@/etc/passwd")
