@@ -102,15 +102,43 @@ return {
     H.wait(function() return not pr_thread.is_open() end, "leaving closes")
   end },
 
-  { "the editor it opens keeps it open behind", function()
-    local s = open()
-    require("diff.compose").open({ title = "Reply", buttons = { { label = "Cancel" } } })
+  { "the editor it opens keeps it open behind; another editor closes it", function()
+    local compose = require("diff.compose")
+    pr_thread.open({
+      win = vim.api.nvim_get_current_win(), row = 0, where = "a.lua line 3",
+      threads = function() return threads end,
+      actions = { reply = function() compose.open({ title = "Reply", buttons = { { label = "Cancel" } } }) end },
+    })
+    local s = pr_thread._state()
+    goto_text(s, "first line")
+    feed("r")
     vim.wait(50)
-    H.eq(pr_thread.is_open(), true)
+    H.eq(pr_thread.is_open(), true, "its own reply editor")
     vim.cmd("stopinsert")
-    require("diff.compose").close()
+    compose.close()
     vim.api.nvim_set_current_win(s.win)
+    compose.open({ title = "Review", buttons = { { label = "Cancel" } } })
+    H.wait(function() return not pr_thread.is_open() end, "another editor closes it")
+    vim.cmd("stopinsert")
+    compose.close()
+  end },
+
+  { "moving to another comment calls off a delete waiting to be confirmed", function()
+    local s = open()
+    goto_text(s, "first line")
+    feed("x")
+    goto_text(s, "settled")
+    vim.api.nvim_exec_autocmds("CursorMoved", { buffer = s.buf })
+    H.ok(not table.concat(lines(s), "\n"):find("Confirm delete", 1, true), "back to Delete")
+    goto_text(s, "first line")
+    feed("x")
+    H.eq(done, {}, "the first press asks again")
     pr_thread.close()
+  end },
+
+  { "opening with no threads opens nothing", function()
+    pr_thread.open({ win = vim.api.nvim_get_current_win(), row = 0, threads = function() return {} end, actions = {} })
+    H.eq(pr_thread.is_open(), false)
   end },
 
   { "closes when the line has no threads left", function()

@@ -18,7 +18,6 @@
 local M = {}
 
 local buttons = require("diff.buttons")
-local chrome  = require("diff.chrome")
 local util    = require("diff.util")
 local log     = require("diff.log").scope("thread")
 
@@ -60,7 +59,7 @@ end
 --- @return string[] lines, table[] hls { row, s, e, hl }, table[] segs, table meta
 local function build(s, threads, width)
   local lines, hls, segs, meta = {}, {}, {}, {}
-  local a = s.opts.actions
+  local a = s.actions
   local function push(text, info)
     table.insert(lines, text)
     meta[#lines] = info
@@ -108,9 +107,7 @@ local function build(s, threads, width)
       table.insert(hls, { r, 1, 1 + #comment.author, "DiffNvimThreadAuthor" })
       table.insert(hls, { r, 1 + #comment.author, #head, "DiffNvimThreadMeta" })
       add_buttons(r, row_segs, row_hls)
-      for _, para in ipairs(vim.split(comment.body:gsub("\r", ""), "\n", { plain = true })) do
-        for _, wrapped in ipairs(util.wrap(para, width - 2)) do push("  " .. wrapped, info) end
-      end
+      for _, wrapped in ipairs(util.wrap_text(comment.body, width, "  ")) do push(wrapped, info) end
       push("", info)
     end
 
@@ -144,14 +141,7 @@ local function render(s)
   local width = vim.api.nvim_win_get_width(s.win)
   local lines, hls, segs, meta = build(s, threads, width)
   s.meta = meta
-  vim.bo[s.buf].modifiable = true
-  vim.api.nvim_buf_set_lines(s.buf, 0, -1, false, lines)
-  vim.bo[s.buf].modifiable = false
-  vim.api.nvim_buf_clear_namespace(s.buf, NS, 0, -1)
-  for _, h in ipairs(hls) do
-    local end_col = h[3] == -1 and #lines[h[1] + 1] or h[3]
-    pcall(vim.api.nvim_buf_set_extmark, s.buf, NS, h[1], h[2], { end_col = end_col, hl_group = h[4] })
-  end
+  require("diff.float").set_lines(s.buf, NS, lines, hls)
   s.target:set(segs)
   local max_h = math.max(5, math.floor(vim.o.lines * 0.5))
   pcall(vim.api.nvim_win_set_height, s.win, math.min(#lines, max_h))
@@ -176,7 +166,8 @@ function M.delete(comment)
     return
   end
   s.confirm = {}
-  s.opts.actions.delete(comment)
+  log.debug("delete comment %s from the comments float", tostring(comment.id))
+  s.actions.delete(comment)
 end
 
 --- Screen position for a float of `height` rows next to buffer row `row`
@@ -203,12 +194,7 @@ function M.open(opts)
   M.close()
   if not valid_win(opts.win) then return end
   local width = math.max(30, math.min(MAX_WIDTH, vim.api.nvim_win_get_width(opts.win) - 4))
-  local buf = vim.api.nvim_create_buf(false, true)
-  chrome.tag(buf, "pr-thread")
-  chrome.name(buf, "diff.nvim Comments")
-  vim.bo[buf].buftype = "nofile"
-  vim.bo[buf].bufhidden = "wipe"
-  vim.bo[buf].modifiable = false
+  local buf = require("diff.float").scratch("pr-thread", "diff.nvim Comments")
   local row, col = placement(opts.win, opts.row, 6, width)
   local win = require("diff.float").open(buf, true, {
     relative = "editor", row = row, col = col, width = width, height = 6, title = "Comments",
@@ -219,9 +205,22 @@ function M.open(opts)
   end
 
   local s = { win = win, buf = buf, opts = opts, meta = {}, confirm = {} }
+  -- Reply and edit open the comment editor, and focus moving to it keeps
+  -- this float open; focus moving anywhere else closes it.
+  local function opens_editor(name)
+    local fn = opts.actions[name]
+    return fn and function(...)
+      log.debug("%s from the comments float", name)
+      s.opened_editor = true
+      return fn(...)
+    end
+  end
+  s.actions = { reply = opens_editor("reply"), edit = opens_editor("edit"),
+    set_resolved = opts.actions.set_resolved, delete = opts.actions.delete }
   s.target = buttons.target(buf, win)
   S = s
   render(s)
+  if S ~= s then return end
   -- With its height known, move it above the line if it does not fit below.
   local r2, c2 = placement(opts.win, opts.row, vim.api.nvim_win_get_height(win), width)
   pcall(vim.api.nvim_win_set_config, win, { relative = "editor", row = r2, col = c2 })
@@ -229,7 +228,7 @@ function M.open(opts)
   local function map(key, fn)
     vim.keymap.set("n", key, fn, { buffer = buf, nowait = true, silent = true })
   end
-  local a = opts.actions
+  local a = s.actions
   map("r", function()
     local here = at_cursor()
     if here and here.thread.can_reply then a.reply(here.thread) end
@@ -266,10 +265,28 @@ function M.open(opts)
     group = aug, buffer = buf,
     callback = function()
       vim.schedule(function()
-        if S ~= s or vim.api.nvim_get_current_win() == s.win or require("diff.compose").is_open() then return end
+        if S ~= s or vim.api.nvim_get_current_win() == s.win then return end
+        if s.opened_editor and require("diff.compose").is_open() then return end
         log.debug("focus left the comments float; closing")
         M.close()
       end)
+    end,
+  })
+  vim.api.nvim_create_autocmd("WinEnter", {
+    group = aug, buffer = buf,
+    -- A float opening from this one enters it while still showing this buffer.
+    callback = function() if vim.api.nvim_get_current_win() == s.win then s.opened_editor = false end end,
+  })
+  -- A delete waiting for its confirming press is called off by moving to another comment.
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    group = aug, buffer = buf,
+    callback = function()
+      if S ~= s or not next(s.confirm) then return end
+      local here = at_cursor()
+      if here and here.comment and s.confirm[here.comment.id] then return end
+      log.debug("delete not confirmed; calling it off")
+      s.confirm = {}
+      render(s)
     end,
   })
   vim.api.nvim_create_autocmd("WinClosed", {
