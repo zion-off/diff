@@ -30,6 +30,8 @@ H.git(repo, "add", "docs/c.md")
 vim.cmd("cd " .. repo)
 vim.keymap.set("n", "<leader>gb", function() vim.g.user_map_ran = true end, { desc = "user mapping" })
 require("diff").setup({ log_level = os.getenv("DIFF_LOG") or "warn" })
+-- No gh session: pull request lookups must not depend on the machine running the tests.
+require("diff.gh").authenticated = function(_, cb) cb(false) end
 
 local dv      = require("diff.diff_view")
 local sidebar = require("diff.sidebar")

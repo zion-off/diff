@@ -21,7 +21,11 @@ end, { desc = "Toggle diff.nvim sidebar" })
 
 vim.api.nvim_create_user_command("DiffNvimRefresh", function()
   require("diff").refresh()
-end, { desc = "Refresh diff.nvim file and commit panels" })
+end, { desc = "Refresh diff.nvim panels and the branch's pull request" })
+
+vim.api.nvim_create_user_command("DiffNvimReview", function()
+  require("diff").review()
+end, { desc = "Review the branch's pull request" })
 
 vim.api.nvim_create_user_command("DiffNvimPreviewBranch", function()
   require("diff").preview_branch()

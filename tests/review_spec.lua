@@ -132,11 +132,33 @@ return {
     H.eq(calls, { "start " .. head, "thread R1 a.lua new:6 Why insert this?", "fetch" })
   end },
 
+  { "the mode bar names the pull request and opens its review", function()
+    dv.close()
+    require("diff").open()
+    local sidebar = require("diff.sidebar")
+    H.wait(function() return sidebar.is_open() end, "interface open")
+    local bar = sidebar._bar_buf
+    H.wait(function()
+      return (vim.api.nvim_buf_get_lines(bar, 0, 1, false)[1] or ""):find("#7", 1, true) ~= nil
+    end, "pull request in the branch row")
+    local line = vim.api.nvim_buf_get_lines(bar, 0, 1, false)[1]
+    local col = vim.api.nvim_strwidth(line:sub(1, line:find("#7", 1, true) - 1)) + 1
+    H.ok(require("diff.mode_bar").click(1, col), "the label is a button")
+    H.wait(function() return compose.is_open() end, "review float open")
+    local title = vim.api.nvim_win_get_config(compose._state().editor).title
+    H.ok(vim.inspect(title):find("Review #7", 1, true), vim.inspect(title))
+    compose.close()
+    require("diff").close()
+  end },
+
   { "a working-tree diff takes no comments, and says why", function()
+    pr.sync(repo, nil)
+    H.wait(function() return pr._state().review ~= nil end, "review loaded")
     H.write(repo, "a.lua", "edited\n")
     dv.open(repo, { kind = "worktree", path = "a.lua", status = "modified", staged = false })
     H.wait(function() return S().source and S().source.kind == "worktree" and S().layout end, "worktree diff")
     vim.api.nvim_set_current_win(S().panes.new)
+    vim.api.nvim_win_set_cursor(S().panes.new, { row_of_new(1), 0 })
     local msgs = {}
     local notify = vim.notify
     vim.notify = function(m) table.insert(msgs, m) end

@@ -83,7 +83,13 @@ end
 
 --- Refresh file and commit panels.
 function M.refresh()
-  sidebar.refresh()
+  sidebar.refresh({ fetch_remote = true })
+end
+
+--- Open the review of the branch's pull request: submit it, discard the
+--- draft comments, or open it on GitHub.
+function M.review()
+  require("diff.review_ui").open_review()
 end
 
 --- Open the branch picker to preview another branch's history without checking

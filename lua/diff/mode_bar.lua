@@ -105,12 +105,27 @@ local function build(width, info)
   local mode = info.preview and "  Preview" or (info.worktree and "  Worktree" or "")
   local sync = away and "" or sync_text(info.ahead, info.behind)
   local right = sync ~= "" and (sync .. " ") or ""
+  -- The branch's pull request, and the viewer's draft comments on it: a
+  -- button of its own that opens the review.
+  local pr_full, pr_short = "", ""
+  if info.pr then
+    pr_short = "#" .. info.pr.number
+    pr_full = pr_short
+    if (info.pr.drafts or 0) > 0 then
+      pr_full = pr_full .. string.format(" · %d draft%s", info.pr.drafts, info.pr.drafts == 1 and "" or "s")
+    end
+  end
+  local pr_label = pr_full
+  local function pr_cells() return pr_label ~= "" and w(pr_label) + 2 or 0 end
   local cell_w = width - w(done) - 1
-  local function room() return cell_w - w("⎇  ⌃⌄" .. mode .. right) - 1 end
-  -- A narrow sidebar gives up the counts, then the mode's name, before the
-  -- branch name shrinks below a few characters.
+  local function room() return cell_w - w("⎇  ⌃⌄" .. mode .. right) - pr_cells() - 1 end
+  -- A narrow sidebar gives up the counts, then the mode's name, then the
+  -- draft count and the pull request, before the branch name shrinks below
+  -- a few characters.
   if room() < 4 then right = "" end
   if room() < 4 then mode = "" end
+  if room() < 4 then pr_label = pr_short end
+  if room() < 4 then pr_label = "" end
   local name = util.trunc(info.branch or "…", math.max(4, room()))
   local left = "⎇ " .. name .. " ⌃⌄" .. mode
   local pick = a.pick_branch
@@ -118,9 +133,13 @@ local function build(width, info)
     { " ", hl.cell, pick, nil, hl.hover },
     { "⎇ " .. name, hl.name, pick },
     { " ⌃⌄" .. mode, hl.dim, pick },
-    { string.rep(" ", math.max(1, cell_w - w(left) - w(right))), hl.cell, pick },
-    { right, hl.dim, pick },
+    { string.rep(" ", math.max(1, cell_w - w(left) - w(right) - pr_cells())), hl.cell, pick },
   }
+  if pr_label ~= "" then
+    table.insert(parts1, { " " .. pr_label .. " ", away and "DiffNvimModeAwayPr" or "DiffNvimModePr",
+      a.open_review, nil, hl.hover })
+  end
+  table.insert(parts1, { right, hl.dim, pick })
   if away then table.insert(parts1, { done, "DiffNvimModeDone", a.go_home, nil, hl.hover }) end
   local l1, hl1, seg1 = row_from(parts1, 0)
 
@@ -160,8 +179,9 @@ end
 
 --- Draw the bar.
 --- @param info table|nil  { branch, preview, worktree, away, branch_mode,
----   actions = { pick_branch, go_home, show_changes, show_branch } }; nil
----   redraws what was last given (after a resize).
+---   pr = { number, drafts }|nil,
+---   actions = { pick_branch, go_home, show_changes, show_branch, open_review } };
+---   nil redraws what was last given (after a resize).
 --- The clickable segment at row `line`, display column `col` (both 1-based).
 local function segment_at(line, col)
   for _, seg in ipairs(S.segments) do

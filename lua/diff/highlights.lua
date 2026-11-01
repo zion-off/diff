@@ -316,6 +316,9 @@ local function build_defaults()
     DiffNvimModeTrack       = { fg = s.dim_fg, bg = s.track_bg },
     DiffNvimModeTrackHover  = { fg = text_fg, bg = s.track_hover_bg },
     DiffNvimModeSegment     = { fg = text_fg, bg = s.segment_bg },
+    -- The branch's pull request in the branch row, a button of its own
+    DiffNvimModePr          = { fg = s.accent, bg = s.header_bg, bold = true },
+    DiffNvimModeAwayPr      = { fg = s.accent, bg = s.away_bg, bold = true },
     -- Mode bar item under the cursor, while the bar has keyboard focus
     DiffNvimModeCursor      = { link = "CursorLine" },
 

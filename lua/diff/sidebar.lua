@@ -16,6 +16,7 @@ local clickable    = require("diff.clickable")
 local config       = require("diff.config")
 local git          = require("diff.git")
 local log          = require("diff.log").scope("sidebar")
+local pr           = require("diff.pr")
 
 local uv = vim.uv or vim.loop
 
@@ -898,6 +899,7 @@ function M.open(info)
   nmap(km.preview_branch, M.pick_preview_branch, "Preview branch")
   nmap(km.branch_changes, M.toggle_branch_mode, "Toggle branch changes")
   nmap(km.toggle_layout, function() require("diff.diff_view").toggle_layout() end, "Toggle split / unified")
+  nmap(km.open_review, function() require("diff.review_ui").open_review() end, "Review the pull request")
 
   M.refresh()
   log.info("opened interface for %s (git dir %s) in %.1f ms", info.root, info.git_dir, elapsed())
@@ -924,6 +926,7 @@ local function close_interface(opts)
   require("diff.diff_view").close()
   require("diff.annotations").close_panel()
   require("diff.review_ui").close()
+  pr.clear()
   commit_panel.close_tooltip()
 
   local diff_tab = get_diff_tab()
@@ -1073,6 +1076,15 @@ end
 -- it ("Since main") before branch mode is ever entered.
 local base_lookup = { root = nil, name = nil }
 
+--- The branch's pull request for the mode bar: its number and the viewer's
+--- draft comments; nil without one.
+local function pull_request_label()
+  local p = pr.pull_request()
+  if not p then return nil end
+  local pending = pr.pending()
+  return { number = p.number, drafts = pending and pending.count or 0 }
+end
+
 local function render_mode_bar()
   -- The upstream comes with the working tree's status, which is read only
   -- while the panels show your own branch's changes.
@@ -1088,11 +1100,13 @@ local function render_mode_bar()
     -- What the branch view compares with: the base in use once branch mode
     -- has loaded, else the configured or looked-up one.
     base = (M._branch_mode and file_panel.branch_base()) or config.get().base_branch or base_lookup.name,
+    pr = pull_request_label(),
     actions = {
       pick_branch  = function() M.pick_preview_branch() end,
       go_home      = go_home,
       show_changes = function() if M._branch_mode then M.toggle_branch_mode() end end,
       show_branch  = function() if not M._branch_mode then M.toggle_branch_mode() end end,
+      open_review  = function() require("diff.review_ui").open_review() end,
     },
   })
 end
@@ -1129,6 +1143,7 @@ end
 ---             than now. For background triggers: a burst of .git changes
 ---             (a rebase) must not pile up git processes, or keep superseding
 ---             itself so the panels never update. User actions refresh at once.
+---   fetch_remote: also fetch the branch's pull request again from GitHub
 function M.refresh(opts)
   opts = opts or {}
   if not M.is_open() or M._sidebar_hidden or not M._repo_root then return end
@@ -1154,6 +1169,9 @@ function M.refresh(opts)
     lookup_base()
     render_mode_bar()
     M.redress_panels()
+    -- Only a refresh the reader asked for fetches the pull request again;
+    -- otherwise it is looked up when the branch shown changes.
+    pr.sync(M._repo_root, M._preview_branch, { force = opts.fetch_remote })
   end
   refreshing = refreshing + 1
   -- The bar shows what the file panel learns: the upstream, the base branch.
@@ -1323,6 +1341,14 @@ function M.setup_auto_refresh()
       if is_valid_win(M._main_win) and vim.api.nvim_win_get_buf(M._main_win) == M._placeholder_buf then
         chrome.dress(M._main_win, {})
       end
+    end,
+  })
+
+  vim.api.nvim_create_autocmd("User", {
+    group = aug,
+    pattern = "DiffNvimPrChanged",
+    callback = function()
+      if M.is_open() and not M._sidebar_hidden then render_mode_bar() end
     end,
   })
 
