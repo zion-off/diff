@@ -99,22 +99,27 @@ local THREAD_ACTIONS = {
   end,
 }
 
---- The threads `source` shows on `side` line `line`.
-local function threads_on(source, side, line)
+--- The threads `source` shows at `anchors` ({ side, line }), in order.
+local function threads_at(source, anchors)
+  local out = {}
   for _, group in ipairs(pr.threads_for(source)) do
-    if group.side == side and group.line == line then return group.threads end
+    for _, a in ipairs(anchors) do
+      if group.side == a.side and group.line == a.line then vim.list_extend(out, group.threads) end
+    end
   end
-  return {}
+  return out
 end
 
---- Open the threads on `side` line `line` of the diff of `source`, in a
---- float under buffer row `row` of `win`.
-function M.show_threads(win, row, source, side, line)
-  if #threads_on(source, side, line) == 0 then return false end
+--- Open the threads at `anchors` ({ side, line }: one per side a diff row
+--- stands for) of the diff of `source`, in a float under buffer row `row`
+--- of `win`.
+function M.show_threads(win, row, source, anchors)
+  if #threads_at(source, anchors) == 0 then return false end
+  local first = anchors[1]
   pr_thread.open({
     win = win, row = row,
-    where = string.format("%s %s", vim.fn.fnamemodify(source.path, ":t"), lines_label(line, line)),
-    threads = function() return threads_on(source, side, line) end,
+    where = string.format("%s %s", vim.fn.fnamemodify(source.path, ":t"), lines_label(first.line, first.line)),
+    threads = function() return threads_at(source, anchors) end,
     actions = THREAD_ACTIONS,
   })
   return true

@@ -66,7 +66,7 @@ local function fresh_state()
     words = {},                 -- model row -> word ranges (lazy)
     lnum_width = 1,
     sep_marks = {},             -- pane -> { [row] = extmark id } of separators and hunk headers
-    thread_rows = {},           -- pane -> { [row] = { side, line, threads } } of pull request threads
+    thread_rows = {},           -- pane -> { [row] = { { side, line, threads } } } of pull request threads
     hover = nil,                -- layout row under the mouse pointer
     wrap_widths = {},           -- side -> pane width the wrap padding was computed for
     synced_view = nil,          -- view both split panes were last left showing
@@ -671,26 +671,34 @@ end
 local function decorate_threads(p)
   local buf = S.bufs[p]
   vim.api.nvim_buf_clear_namespace(buf, NS_THREADS, 0, -1)
-  S.thread_rows[p] = {}
+  local rows = {}
+  S.thread_rows[p] = rows
   local groups = require("diff.pr").threads_for(S.source)
   if #groups == 0 then return end
+  -- A unified pane's context row stands for a line on each side, so it can
+  -- carry the threads of both: one mark for all of them.
   local row_of_line = rows_by_line(p)
   for _, group in ipairs(groups) do
     local r = row_of_line[group.side][group.line]
     if r then
-      S.thread_rows[p][r] = group
-      local first = group.threads[1].comments[1]
-      local count = 0
-      for _, t in ipairs(group.threads) do count = count + #t.comments end
-      local preview = first and (first.author .. ": " .. util.trunc(first.body:gsub("%s+", " "), 50)) or ""
-      if count > 1 then preview = preview .. string.format("  +%d", count - 1) end
-      local sign, hl = thread_style(group.threads)
-      vim.api.nvim_buf_set_extmark(buf, NS_THREADS, r, 0, {
-        sign_text = sign, sign_hl_group = hl,
-        virt_text = { { "  " .. preview, "DiffNvimThreadVirtText" } }, virt_text_pos = "eol",
-        priority = PRIORITY_THREAD_SIGN,
-      })
+      rows[r] = rows[r] or {}
+      table.insert(rows[r], group)
     end
+  end
+  for r, row_groups in pairs(rows) do
+    local threads = {}
+    for _, g in ipairs(row_groups) do vim.list_extend(threads, g.threads) end
+    local first = threads[1].comments[1]
+    local count = 0
+    for _, t in ipairs(threads) do count = count + #t.comments end
+    local preview = first and (first.author .. ": " .. util.trunc(first.body:gsub("%s+", " "), 50)) or ""
+    if count > 1 then preview = preview .. string.format("  +%d", count - 1) end
+    local sign, hl = thread_style(threads)
+    vim.api.nvim_buf_set_extmark(buf, NS_THREADS, r, 0, {
+      sign_text = sign, sign_hl_group = hl,
+      virt_text = { { "  " .. preview, "DiffNvimThreadVirtText" } }, virt_text_pos = "eol",
+      priority = PRIORITY_THREAD_SIGN,
+    })
   end
 end
 
@@ -1526,10 +1534,12 @@ end
 --- @return boolean whether the row has any
 local function show_threads_at(win, line)
   local p = pane_of_win(win)
-  local group = p and S.thread_rows[p] and S.thread_rows[p][line - 1]
-  if not group then return false end
-  log.debug("threads on %s %s line %d", S.source.path, group.side, group.line)
-  return require("diff.review_ui").show_threads(win, line - 1, S.source, group.side, group.line)
+  local groups = p and S.thread_rows[p] and S.thread_rows[p][line - 1]
+  if not groups then return false end
+  local anchors = {}
+  for _, g in ipairs(groups) do table.insert(anchors, { side = g.side, line = g.line }) end
+  log.debug("threads on %s row %d: %d anchors", S.source.path, line, #anchors)
+  return require("diff.review_ui").show_threads(win, line - 1, S.source, anchors)
 end
 
 --- Whether display column `col` of row `line` in `win` is on the row's

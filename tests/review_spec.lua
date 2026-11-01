@@ -34,10 +34,13 @@ local thread = {
   comments = { { id = "C1", author = "alice", body = "Is this right?", created_at = "2026-01-01T00:00:00Z",
     pending = false, commit = head, can_update = false, can_delete = false } },
 }
+local extra_threads = {}
 local function review()
+  local threads = { vim.deepcopy(thread) }
+  vim.list_extend(threads, vim.deepcopy(extra_threads))
   return {
     pr = { id = "PR_1", number = 7, head_oid = head, base_name = "develop", branch = "feature" },
-    commits = { [head] = true }, pending = nil, threads = { vim.deepcopy(thread) },
+    commits = { [head] = true }, pending = nil, threads = threads,
   }
 end
 
@@ -119,6 +122,36 @@ return {
     H.wait(function() return #calls >= 2 end, "resolve and reload")
     H.eq(calls, { "resolve T1 true", "fetch" })
     pr_thread.close()
+  end },
+
+  { "in the unified view, a context row opens the threads of both its sides", function()
+    local function side_thread(id, side)
+      return vim.tbl_extend("force", vim.deepcopy(thread), { id = id, side = side, line = 2,
+        comments = { vim.tbl_extend("force", thread.comments[1], { id = "C" .. id, body = "on " .. side }) } })
+    end
+    extra_threads = { side_thread("TO", "old"), side_thread("TN", "new") }
+    pr.reload()
+    dv.set_layout("unified")
+    H.wait(function() return S().panes.unified ~= nil end, "unified")
+    local row
+    for i, item in ipairs(S().layout.items) do
+      local r = item.row and S().model.rows[item.row]
+      if r and r.old == 2 and r.new == 2 then row = i end
+    end
+    H.wait(function() return #thread_marks(S().bufs.unified) >= 2 end, "marks drawn")
+    local on_row = 0
+    for _, m in ipairs(thread_marks(S().bufs.unified)) do
+      if m[2] == row - 1 then on_row = on_row + 1 end
+    end
+    H.eq(on_row, 1, "one mark for both sides")
+    H.ok(dv.click(S().panes.unified, row, 1))
+    H.ok(pr_thread.is_open(), "open after click")
+    local text = table.concat(vim.api.nvim_buf_get_lines(pr_thread._state().buf, 0, -1, false), "\n")
+    H.ok(text:find("on old", 1, true) and text:find("on new", 1, true), text)
+    pr_thread.close()
+    extra_threads = {}
+    pr.reload()
+    dv.set_layout("split")
   end },
 
   { "a comment on a line starts a review on the pull request's head", function()
