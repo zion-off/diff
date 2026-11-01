@@ -126,7 +126,9 @@ function Target:step(dir)
   if #self.segs == 0 or not vim.api.nvim_win_is_valid(self.win) then return end
   local cur = vim.api.nvim_win_get_cursor(self.win)
   local pos = { cur[1] - 1, cur[2] }
-  local function before(seg) return seg.row < pos[1] or (seg.row == pos[1] and seg.s < pos[2]) end
+  -- The cursor rests one past a button's start, so a button counts as behind it only
+  -- when its label starts before the cursor; else stepping back stays on this one.
+  local function before(seg) return seg.row < pos[1] or (seg.row == pos[1] and seg.s + 1 < pos[2]) end
   local function after(seg) return seg.row > pos[1] or (seg.row == pos[1] and seg.s > pos[2]) end
   local pick
   if dir > 0 then

@@ -148,4 +148,19 @@ return {
     vim.cmd("stopinsert")
     compose.close()
   end },
+
+  { "Shift-Tab steps back through the buttons, wrapping at the first", function()
+    local s = open()
+    vim.cmd("stopinsert")
+    feed("<Tab>")
+    local first = vim.api.nvim_win_get_cursor(s.bar)[2]
+    feed("<Tab>")
+    local second = vim.api.nvim_win_get_cursor(s.bar)[2]
+    H.ok(second > first, "Tab moved on")
+    feed("<S-Tab>")
+    H.eq(vim.api.nvim_win_get_cursor(s.bar)[2], first, "back on the first button")
+    feed("<S-Tab>")
+    H.eq(vim.api.nvim_win_get_cursor(s.bar)[2], second, "wraps to the last")
+    compose.close()
+  end },
 }
