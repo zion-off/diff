@@ -56,6 +56,23 @@ return {
     compose.close()
   end },
 
+  { "while a request is in flight the row says what it is doing", function()
+    local pending_done
+    local s = open({ buttons = {
+      { label = "Discard drafts", busy = "Discarding drafts…", allow_empty = true, run = function(_, done) pending_done = done end },
+      { label = "Approve", run = function(_, done) pending_done = done end },
+    } })
+    vim.cmd("stopinsert")
+    feed("<CR>")
+    H.eq(vim.api.nvim_buf_get_lines(s.bar_buf, 0, 1, false)[1], " Discarding drafts… ")
+    pending_done(nil)
+    s = open({ buttons = { { label = "Approve", allow_empty = true, run = function(_, done) pending_done = done end } } })
+    vim.cmd("stopinsert")
+    feed("<CR>")
+    H.eq(vim.api.nvim_buf_get_lines(s.bar_buf, 0, 1, false)[1], " Approve… ", "a button without its own words")
+    pending_done(nil)
+  end },
+
   { "nothing is sent without text unless the button allows it", function()
     local s = open()
     vim.cmd("stopinsert")

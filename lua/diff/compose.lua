@@ -28,7 +28,8 @@ local NS = vim.api.nvim_create_namespace("diff_nvim_compose")
 local EDITOR_HEIGHT = 8
 local MAX_WIDTH = 80
 
--- The window open now, if any: { editor, editor_buf, bar, bar_buf, list, target, opts, busy }
+-- The window open now, if any: { editor, editor_buf, bar, bar_buf, list, target, opts,
+-- busy = the button whose request is in flight }
 local S = nil
 
 local function valid_win(w) return w and vim.api.nvim_win_is_valid(w) end
@@ -77,11 +78,11 @@ local function press(s, item)
     return
   end
   log.debug("%s pressed (%d characters)", item.label, #text)
-  s.busy = true
+  s.busy = item
   render_bar(s)
   item.run(text, function(err)
     if S ~= s then return end
-    s.busy = false
+    s.busy = nil
     if err then
       vim.notify("diff.nvim: " .. item.label .. " failed: " .. err, vim.log.levels.ERROR)
       render_bar(s)
@@ -95,7 +96,7 @@ render_bar = function(s)
   if not vim.api.nvim_buf_is_valid(s.bar_buf) then return end
   local items = {}
   if s.busy then
-    items = { { label = "Sending…", action = function() end } }
+    items = { { label = s.busy.busy or (s.busy.label .. "…"), action = function() end } }
   else
     for _, item in ipairs(s.opts.buttons) do
       local confirming = s.confirming == item
@@ -148,7 +149,8 @@ end
 --- @param opts table {
 ---   title   = string,
 ---   text    = string|nil,     initial text
----   buttons = { { label, style?, allow_empty?, confirm?, run = fun(text, done)|nil } },
+---   buttons = { { label, style?, allow_empty?, confirm?, busy?, run = fun(text, done)|nil } },
+---             busy: what the row says while its request is in flight ("Approving…"),
 ---             the first is pressed by `submit_comment`; one without `run` cancels; one
 ---             with `confirm` (a label) asks for a second press first
 ---   list    = { title, render = fun(width): lines: string[], hls: { row, s, e, hl }[] }|nil,
@@ -224,7 +226,7 @@ function M.open(opts)
   end
 
   local s = { editor = editor, editor_buf = editor_buf, bar = bar, bar_buf = bar_buf, list = list, opts = opts,
-    busy = false }
+    busy = nil }
   s.target = buttons.target(bar_buf, bar)
   S = s
   render_bar(s)
