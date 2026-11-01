@@ -151,6 +151,28 @@ return {
     compose.close()
   end },
 
+  { "the pointer on a float's border is not on a draggable edge", function()
+    local sidebar = require("diff.sidebar")
+    require("diff.review_ui").open_review()
+    local float = compose._state().editor
+    local errors = {}
+    local real_getmousepos, real_notify = vim.fn.getmousepos, vim.notify
+    vim.notify = function(m, l) if l == vim.log.levels.ERROR then table.insert(errors, m) end end
+    -- One past the float's width and height: where a split's edges would be.
+    for _, mp in ipairs({
+      { wincol = vim.api.nvim_win_get_width(float) + 1, winrow = 1 },
+      { wincol = 1, winrow = vim.api.nvim_win_get_height(float) + 1 },
+    }) do
+      vim.fn.getmousepos = function() return vim.tbl_extend("force", { winid = float, line = 0, screenrow = 1 }, mp) end
+      feed("<MouseMove>")
+      vim.wait(50)
+    end
+    vim.fn.getmousepos, vim.notify = real_getmousepos, real_notify
+    H.eq(errors, {})
+    H.eq(sidebar._edge_float(), nil, "no edge highlighted")
+    compose.close()
+  end },
+
   { "the branch's changes are measured from the pull request's base", function()
     local sidebar = require("diff.sidebar")
     local fp = require("diff.file_panel")

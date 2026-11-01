@@ -168,6 +168,8 @@ local function edge_under_mouse(mp)
   if mp.line ~= 0 or not is_valid_win(win) or vim.api.nvim_win_get_tabpage(win) ~= get_diff_tab() then
     return nil
   end
+  -- A float's border is not a window edge: dragging it resizes nothing.
+  if vim.api.nvim_win_get_config(win).relative ~= "" then return nil end
   -- The rule under the diff header and the bottom of the mode bar are not
   -- meant to be moved.
   if win == require("diff.diff_view")._state().header_win then return nil end
