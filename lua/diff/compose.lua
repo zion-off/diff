@@ -57,6 +57,12 @@ local function press(s, item)
     M.close()
     return
   end
+  if item.confirm and s.confirming ~= item then
+    s.confirming = item
+    render_bar(s)
+    return
+  end
+  s.confirming = nil
   local text = text_of(s)
   if text == "" and not item.allow_empty then
     vim.notify("diff.nvim: write something first", vim.log.levels.WARN)
@@ -84,8 +90,10 @@ render_bar = function(s)
     items = { { label = "Sending…", action = function() end } }
   else
     for _, item in ipairs(s.opts.buttons) do
+      local confirming = s.confirming == item
       table.insert(items, {
-        label = item.label, style = item.style, action = function() press(s, item) end,
+        label = confirming and item.confirm or item.label, style = confirming and "danger" or item.style,
+        action = function() press(s, item) end,
       })
     end
   end
@@ -119,8 +127,9 @@ end
 --- @param opts table {
 ---   title   = string,
 ---   text    = string|nil,     initial text
----   buttons = { { label, style?, allow_empty?, run = fun(text, done)|nil } },
----             the first is pressed by Ctrl-S; one without `run` cancels
+---   buttons = { { label, style?, allow_empty?, confirm?, run = fun(text, done)|nil } },
+---             the first is pressed by Ctrl-S; one without `run` cancels; one
+---             with `confirm` (a label) asks for a second press first
 ---   on_close = fun()|nil }
 function M.open(opts)
   M.close()

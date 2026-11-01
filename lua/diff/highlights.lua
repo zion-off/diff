@@ -346,6 +346,17 @@ local function build_defaults()
     DiffNvimPickerRemote      = { fg = s.dim_fg },
     DiffNvimPickerMatch       = { fg = s.accent, bold = true },
 
+    -- Pull request threads: the sign of an open thread in the informational
+    -- colour, a draft in the note colour, settled ones (resolved, outdated)
+    -- receding; the first comment at the end of the line, like a note's
+    DiffNvimThreadMarker    = { fg = hl_attr("DiagnosticInfo", "fg") or s.accent, bold = true },
+    DiffNvimThreadDraft     = { fg = p.note_marker, bold = true },
+    DiffNvimThreadResolved  = { fg = s.dim_fg },
+    DiffNvimThreadVirtText  = { fg = p.note_virt, italic = true },
+    -- In the comments float: the author leads, the age and state recede
+    DiffNvimThreadAuthor    = { fg = text_fg, bold = true },
+    DiffNvimThreadMeta      = { fg = s.dim_fg },
+
     -- Buttons in the review floats: on the control track's surface, the one
     -- Ctrl-S presses tinted like a visited mode, one that discards in the
     -- remove colour; hovered like the mode bar's cells

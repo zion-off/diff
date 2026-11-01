@@ -25,6 +25,7 @@ local util    = require("diff.util")
 local NS       = vim.api.nvim_create_namespace("diff_nvim_diff")
 local NS_WORDS = vim.api.nvim_create_namespace("diff_nvim_words")
 local NS_NOTES = vim.api.nvim_create_namespace("diff_nvim_notes_markers")
+local NS_THREADS = vim.api.nvim_create_namespace("diff_nvim_pr_threads")
 local NS_HEAD  = vim.api.nvim_create_namespace("diff_nvim_header")
 local NS_WRAP  = vim.api.nvim_create_namespace("diff_nvim_wrap")
 local NS_HOVER = vim.api.nvim_create_namespace("diff_nvim_hover")
@@ -32,6 +33,7 @@ local NS_HOVER = vim.api.nvim_create_namespace("diff_nvim_hover")
 -- Highlight priorities relative to tree-sitter's 100.
 local PRIORITY_LINE_BG   = 50   -- below syntax so colours show through
 local PRIORITY_NOTE_SIGN = 70
+local PRIORITY_THREAD_SIGN = 80 -- a review thread's sign wins over a private note's
 local PRIORITY_WORD_HL   = 150  -- above syntax so changed tokens stand out
 local PRIORITY_HOVER     = 200  -- drawn over the separator it highlights
 
@@ -64,6 +66,7 @@ local function fresh_state()
     words = {},                 -- model row -> word ranges (lazy)
     lnum_width = 1,
     sep_marks = {},             -- pane -> { [row] = extmark id } of separators and hunk headers
+    thread_rows = {},           -- pane -> { [row] = { side, line, threads } } of pull request threads
     hover = nil,                -- layout row under the mouse pointer
     wrap_widths = {},           -- side -> pane width the wrap padding was computed for
     synced_view = nil,          -- view both split panes were last left showing
@@ -464,11 +467,12 @@ local function release_hidden_panes()
     if not S.panes[p] and valid_buf(buf) and S.sep_marks[p] then
       log.debug("releasing the hidden %s pane", p)
       syntax.unbind(buf)
-      for _, ns in ipairs({ NS, NS_NOTES, NS_WRAP, NS_HOVER }) do
+      for _, ns in ipairs({ NS, NS_NOTES, NS_THREADS, NS_WRAP, NS_HOVER }) do
         vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
       end
       set_lines(buf, {})
       S.sep_marks[p] = nil
+      S.thread_rows[p] = nil
     end
   end
 end
@@ -636,17 +640,63 @@ local function decorate_separators(p)
   end
 end
 
-local function decorate_notes(p)
-  local buf = S.bufs[p]
-  vim.api.nvim_buf_clear_namespace(buf, NS_NOTES, 0, -1)
-  local notes = require("diff.annotations").notes_for(S.root, S.source.path)
-  if #notes == 0 then return end
+--- Pane `p`'s row (0-based) for each file line, per side.
+local function rows_by_line(p)
   local row_of_line = { old = {}, new = {} }
   for i, item in ipairs(S.layout.items) do
     local old, new = lines_at(p, item)
     if old then row_of_line.old[old] = i - 1 end
     if new then row_of_line.new[new] = i - 1 end
   end
+  return row_of_line
+end
+
+--- How a line's threads look: a draft is marked as one, a line whose
+--- threads are all resolved or outdated recedes.
+local function thread_style(threads)
+  local settled = true
+  for _, t in ipairs(threads) do
+    if t.pending then return "◆", "DiffNvimThreadDraft" end
+    if not (t.resolved or t.outdated) then settled = false end
+  end
+  if settled then return "●", "DiffNvimThreadResolved" end
+  return "●", "DiffNvimThreadMarker"
+end
+
+--- Mark the lines that carry pull request threads: a sign, and the first
+--- comment at the end of the line.
+local function decorate_threads(p)
+  local buf = S.bufs[p]
+  vim.api.nvim_buf_clear_namespace(buf, NS_THREADS, 0, -1)
+  S.thread_rows[p] = {}
+  local groups = require("diff.pr").threads_for(S.source)
+  if #groups == 0 then return end
+  local row_of_line = rows_by_line(p)
+  for _, group in ipairs(groups) do
+    local r = row_of_line[group.side][group.line]
+    if r then
+      S.thread_rows[p][r] = group
+      local first = group.threads[1].comments[1]
+      local count = 0
+      for _, t in ipairs(group.threads) do count = count + #t.comments end
+      local preview = first and (first.author .. ": " .. util.trunc(first.body:gsub("%s+", " "), 50)) or ""
+      if count > 1 then preview = preview .. string.format("  +%d", count - 1) end
+      local sign, hl = thread_style(group.threads)
+      vim.api.nvim_buf_set_extmark(buf, NS_THREADS, r, 0, {
+        sign_text = sign, sign_hl_group = hl,
+        virt_text = { { "  " .. preview, "DiffNvimThreadVirtText" } }, virt_text_pos = "eol",
+        priority = PRIORITY_THREAD_SIGN,
+      })
+    end
+  end
+end
+
+local function decorate_notes(p)
+  local buf = S.bufs[p]
+  vim.api.nvim_buf_clear_namespace(buf, NS_NOTES, 0, -1)
+  local notes = require("diff.annotations").notes_for(S.root, S.source.path)
+  if #notes == 0 then return end
+  local row_of_line = rows_by_line(p)
   for _, note in ipairs(notes) do
     -- Notes written before sides were recorded show wherever their line does.
     local r
@@ -1091,6 +1141,7 @@ local function render(anchor, offset)
       set_lines(S.bufs[p], text)
       decorate(p)
       decorate_notes(p)
+      decorate_threads(p)
       apply_hover(p)
     end
   end
@@ -1264,7 +1315,9 @@ local function show_binary(root, source, navigator)
   local buf = S.bufs.new
   vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
   vim.api.nvim_buf_clear_namespace(buf, NS_NOTES, 0, -1)
+  vim.api.nvim_buf_clear_namespace(buf, NS_THREADS, 0, -1)
   vim.api.nvim_buf_clear_namespace(buf, NS_WRAP, 0, -1)
+  S.thread_rows = {}
   set_lines(buf, { "", "  Binary file — no text diff to show." })
   render_header()
   name_buffers()
@@ -1466,17 +1519,45 @@ function M.hover(win, line)
   end
 end
 
---- A mouse click on row `line` of pane `win`: a hunk header hiding lines
---- expands one step, like `expand_context` on it.
+--- Open the pull request threads on row `line` (1-based) of pane `win`.
+--- @return boolean whether the row has any
+local function show_threads_at(win, line)
+  local p = pane_of_win(win)
+  local group = p and S.thread_rows[p] and S.thread_rows[p][line - 1]
+  if not group then return false end
+  log.debug("threads on %s %s line %d", S.source.path, group.side, group.line)
+  return require("diff.review_ui").show_threads(win, line - 1, S.source, group.side, group.line)
+end
+
+--- Whether display column `col` of row `line` in `win` is on the row's
+--- sign or past the end of its text, where a thread's marks are drawn.
+local function on_thread_marks(win, line, col)
+  if not col then return false end
+  if col <= SIGN_WIDTH then return true end
+  local textoff = vim.fn.getwininfo(win)[1].textoff
+  local text = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), line - 1, line, false)[1] or ""
+  return col > textoff + vim.fn.strdisplaywidth(text)
+end
+
+--- A mouse click on row `line` of pane `win`, at display column `col`: a
+--- hunk header hiding lines expands one step, like `expand_context` on it;
+--- a click on a thread's sign or its preview opens the thread.
 --- @return boolean handled
-function M.click(win, line)
+function M.click(win, line, col)
   if not (S.layout and pane_of_win(win)) then return false end
   local item = S.layout.items[line]
-  if not (item and item.sep) then return false end
-  vim.api.nvim_set_current_win(win)
-  pcall(vim.api.nvim_win_set_cursor, win, { line, 0 })
-  M.expand("cursor")
-  return true
+  if item and item.sep then
+    vim.api.nvim_set_current_win(win)
+    pcall(vim.api.nvim_win_set_cursor, win, { line, 0 })
+    M.expand("cursor")
+    return true
+  end
+  local p = pane_of_win(win)
+  if S.thread_rows[p] and S.thread_rows[p][line - 1] and on_thread_marks(win, line, col) then
+    pcall(vim.api.nvim_win_set_cursor, win, { line, 0 })
+    return show_threads_at(win, line)
+  end
+  return false
 end
 
 local function block_at_cursor()
@@ -1608,35 +1689,44 @@ function M.goto_neighbor(dir)
   M.open(S.root, nxt, S.navigator)
 end
 
---- A note goes on the side of the first line it covers; a unified
---- selection's lines on the other side are left out of its range.
+--- The file lines under the cursor or the visual selection of pane `p`, on
+--- the side of the first line covered; a unified selection's lines on the
+--- other side are left out of its range.
+--- @param what string  what the lines are for, in the message when there are none
+--- @return string|nil side, integer[] lines, integer first_row, integer last_row
+local function selected_lines(p, what)
+  local first, last
+  local mode = vim.fn.mode()
+  if mode == "v" or mode == "V" or mode == "\22" then
+    -- Leave visual mode first: '< and '> only update when it ends.
+    vim.cmd([[execute "normal! \<Esc>"]])
+    first, last = vim.fn.getpos("'<")[2], vim.fn.getpos("'>")[2]
+  else
+    first = vim.api.nvim_win_get_cursor(0)[1]
+    last = first
+  end
+  if last < first then first, last = last, first end
+
+  local side, lines = nil, {}
+  for i = first, last do
+    local item = item_at(i)
+    side = side or side_line(p, item)
+    local old, new = lines_at(p, item)
+    local line = side == "old" and old or side == "new" and new or nil
+    if line then table.insert(lines, line) end
+  end
+  if #lines == 0 then
+    notify("cannot leave " .. what .. " on a filler or separator line", vim.log.levels.WARN)
+    return nil, lines, first, last
+  end
+  return side, lines, first, last
+end
+
 local function leave_note(p)
   return function()
     if not S.model then return end
-    local first, last
-    local mode = vim.fn.mode()
-    if mode == "v" or mode == "V" or mode == "\22" then
-      -- Leave visual mode first: '< and '> only update when it ends.
-      vim.cmd([[execute "normal! \<Esc>"]])
-      first, last = vim.fn.getpos("'<")[2], vim.fn.getpos("'>")[2]
-    else
-      first = vim.api.nvim_win_get_cursor(0)[1]
-      last = first
-    end
-    if last < first then first, last = last, first end
-
-    local side, lines = nil, {}
-    for i = first, last do
-      local item = item_at(i)
-      side = side or side_line(p, item)
-      local old, new = lines_at(p, item)
-      local line = side == "old" and old or side == "new" and new or nil
-      if line then table.insert(lines, line) end
-    end
-    if #lines == 0 then
-      notify("cannot leave a note on a filler or separator line", vim.log.levels.WARN)
-      return
-    end
+    local side, lines, first, last = selected_lines(p, "a note")
+    if not side then return end
     log.debug("note on %s %s lines %d-%d (rows %d-%d)", S.source.path, side, lines[1], lines[#lines], first, last)
     require("diff.annotations").prompt_note({
       file_path  = S.source.path,
@@ -1648,11 +1738,39 @@ local function leave_note(p)
   end
 end
 
+--- Comment on the pull request at the line under the cursor, or the
+--- selected lines.
+local function leave_comment(p)
+  return function()
+    if not S.model then return end
+    local side, lines, first, last = selected_lines(p, "a comment")
+    if not side then return end
+    log.debug("comment on %s %s lines %d-%d (rows %d-%d)", S.source.path, side, lines[1], lines[#lines], first, last)
+    require("diff.review_ui").comment(S.root, S.source, side, lines[1], lines[#lines])
+  end
+end
+
+local function show_threads_at_cursor()
+  local win = current_pane()
+  if not (S.layout and valid_win(win)) then return end
+  if not show_threads_at(win, vim.api.nvim_win_get_cursor(win)[1]) then
+    notify("no comments on this line")
+  end
+end
+
 --- Re-draw note markers after a note is added or removed.
 function M.refresh_annotations()
   if not S.layout then return end
   for _, p in ipairs(PANES) do
     if S.panes[p] and valid_buf(S.bufs[p]) then decorate_notes(p) end
+  end
+end
+
+--- Re-draw pull request thread markers after the review changed.
+local function refresh_threads()
+  if not (S.layout and S.source) then return end
+  for _, p in ipairs(PANES) do
+    if S.panes[p] and valid_buf(S.bufs[p]) then decorate_threads(p) end
   end
 end
 
@@ -1707,6 +1825,8 @@ setup_keymaps = function(buf, p)
   end
 
   map({ "n", "v" }, km.leave_note, leave_note(p), "Leave note")
+  map({ "n", "v" }, km.leave_comment, leave_comment(p), "Comment on the pull request")
+  map("n", km.show_comments, show_threads_at_cursor, "Show pull request comments on this line")
   map("n", km.toggle_notes, function() require("diff.annotations").toggle_notes(S.root) end, "Toggle notes panel")
   map("n", km.next_hunk, function() M.jump_hunk(1) end, "Next hunk")
   map("n", km.prev_hunk, function() M.jump_hunk(-1) end, "Previous hunk")
@@ -1822,6 +1942,12 @@ vim.api.nvim_create_autocmd("User", {
   callback = function()
     if S.source and S.source.kind == "worktree" then M.refresh_content() end
   end,
+})
+
+vim.api.nvim_create_autocmd("User", {
+  group = aug,
+  pattern = "DiffNvimPrChanged",
+  callback = refresh_threads,
 })
 
 return M

@@ -923,7 +923,7 @@ local function close_interface(opts)
   -- The view first, so its watchers and buffers go before the tab does.
   require("diff.diff_view").close()
   require("diff.annotations").close_panel()
-  require("diff.compose").close()
+  require("diff.review_ui").close()
   commit_panel.close_tooltip()
 
   local diff_tab = get_diff_tab()

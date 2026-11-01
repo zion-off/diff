@@ -1,0 +1,149 @@
+local H = require("helpers")
+
+-- main: a.lua with 6 lines; feature: line 3 changed and a line added after 5.
+local repo = H.repo({ ["a.lua"] = H.text(H.lines(6)) })
+H.git(repo, "branch", "-M", "main")
+H.git(repo, "checkout", "-q", "-b", "feature")
+local new_lines = H.lines(6, { [3] = "line 3 changed" })
+table.insert(new_lines, 6, "line inserted")
+H.write(repo, "a.lua", H.text(new_lines))
+H.git(repo, "commit", "-qam", "change")
+local head = vim.trim(H.git(repo, "rev-parse", "HEAD"))
+
+vim.cmd("cd " .. repo)
+require("diff").setup({})
+
+local gh = require("diff.gh")
+local github = require("diff.github")
+local pr = require("diff.pr")
+local dv = require("diff.diff_view")
+local pr_thread = require("diff.pr_thread")
+local compose = require("diff.compose")
+local clickable = require("diff.clickable")
+
+local calls = {}
+local function later(cb, ...)
+  local args = { ... }
+  vim.schedule(function() cb(unpack(args, 1, 2)) end)
+end
+
+local thread = {
+  id = "T1", path = "a.lua", side = "new", line = 3, original_line = 3, outdated = false, resolved = false,
+  pending = false, commit = head, can_reply = true, can_resolve = true, can_unresolve = false,
+  comments = { { id = "C1", author = "alice", body = "Is this right?", created_at = "2026-01-01T00:00:00Z",
+    pending = false, commit = head, can_update = false, can_delete = false } },
+}
+local function review()
+  return {
+    pr = { id = "PR_1", number = 7, head_oid = head, base_name = "main", branch = "feature" },
+    commits = { [head] = true }, pending = nil, threads = { vim.deepcopy(thread) },
+  }
+end
+
+gh.authenticated = function(_, cb) later(cb, true) end
+github.find_pull_request = function(_, _, cb) later(cb, review().pr) end
+github.fetch_review = function(_, _, cb) table.insert(calls, "fetch"); later(cb, review()) end
+github.set_resolved = function(_, id, v, cb) table.insert(calls, "resolve " .. id .. " " .. tostring(v)); later(cb, true) end
+github.start_review = function(_, _, commit, cb) table.insert(calls, "start " .. commit); later(cb, "R1") end
+github.add_thread = function(_, id, anchor, body, cb)
+  table.insert(calls, string.format("thread %s %s %s:%d %s", id, anchor.path, anchor.side, anchor.line, body))
+  later(cb, "T2")
+end
+
+local function feed(keys)
+  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, false, true), "x", false)
+end
+
+local S = dv._state
+
+--- The new pane's row (1-based) showing new-side line `n`.
+local function row_of_new(n)
+  for i, item in ipairs(S().layout.items) do
+    local r = item.row and S().model.rows[item.row]
+    if r and r.new == n and item.side ~= "old" then return i end
+  end
+end
+
+local function thread_marks(buf)
+  local ns = vim.api.nvim_create_namespace("diff_nvim_pr_threads")
+  return vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })
+end
+
+return {
+  { "the branch's changes show a thread's sign and first comment on its line", function()
+    pr.sync(repo, nil)
+    H.wait(function() return pr._state().review ~= nil end, "review loaded")
+    local old_blob = vim.trim(H.git(repo, "rev-parse", "main:a.lua"))
+    local new_blob = vim.trim(H.git(repo, "rev-parse", "HEAD:a.lua"))
+    dv.open(repo, { kind = "range", path = "a.lua", status = "modified", old_blob = old_blob,
+      new_blob = new_blob, base = "main", head = "HEAD" })
+    H.wait(function() return S().layout ~= nil end, "diff open")
+    local marks = thread_marks(S().bufs.new)
+    H.eq(#marks, 1)
+    H.eq(marks[1][2], row_of_new(3) - 1, "on new line 3")
+    H.ok(marks[1][4].virt_text[1][1]:find("alice: Is this right?", 1, true), vim.inspect(marks[1][4].virt_text))
+    H.eq(#thread_marks(S().bufs.old), 0, "the old side has none")
+  end },
+
+  { "K opens the line's thread under it", function()
+    local win = S().panes.new
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { row_of_new(3), 0 })
+    feed("K")
+    H.ok(pr_thread.is_open(), "thread float open")
+    local text = table.concat(vim.api.nvim_buf_get_lines(pr_thread._state().buf, 0, -1, false), "\n")
+    H.ok(text:find("Is this right?", 1, true), text)
+    H.ok(text:find("Resolve", 1, true), text)
+    pr_thread.close()
+  end },
+
+  { "clicking a thread's sign opens it; clicking its Resolve button resolves it", function()
+    local win = S().panes.new
+    H.eq(dv.click(win, row_of_new(4), 1), false, "a line without threads")
+    H.ok(dv.click(win, row_of_new(3), 1), "click on the sign")
+    local s = pr_thread._state()
+    local handler = clickable.get(s.win)
+    local lines = vim.api.nvim_buf_get_lines(s.buf, 0, -1, false)
+    local at
+    for i, l in ipairs(lines) do
+      local c = l:find(" Resolve ", 1, true)
+      if c then at = { i, vim.api.nvim_strwidth(l:sub(1, c)) + 1 } end
+    end
+    H.ok(at, "a Resolve button")
+    calls = {}
+    H.ok(handler.click(at[1], at[2]))
+    H.wait(function() return #calls >= 2 end, "resolve and reload")
+    H.eq(calls, { "resolve T1 true", "fetch" })
+    pr_thread.close()
+  end },
+
+  { "a comment on a line starts a review on the pull request's head", function()
+    local win = S().panes.new
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { row_of_new(6), 0 })
+    feed("\\c")
+    H.wait(function() return compose.is_open() end, "comment editor open")
+    local s = compose._state()
+    vim.api.nvim_buf_set_lines(s.editor_buf, 0, -1, false, { "Why insert this?" })
+    vim.cmd("stopinsert")
+    calls = {}
+    feed("<C-s>")
+    H.wait(function() return not compose.is_open() end, "sent")
+    H.eq(calls, { "start " .. head, "thread R1 a.lua new:6 Why insert this?", "fetch" })
+  end },
+
+  { "a working-tree diff takes no comments, and says why", function()
+    H.write(repo, "a.lua", "edited\n")
+    dv.open(repo, { kind = "worktree", path = "a.lua", status = "modified", staged = false })
+    H.wait(function() return S().source and S().source.kind == "worktree" and S().layout end, "worktree diff")
+    vim.api.nvim_set_current_win(S().panes.new)
+    local msgs = {}
+    local notify = vim.notify
+    vim.notify = function(m) table.insert(msgs, m) end
+    feed("\\c")
+    vim.wait(200, function() return #msgs > 0 end)
+    vim.notify = notify
+    H.eq(compose.is_open(), false)
+    H.ok(msgs[1] and msgs[1]:find("uncommitted"), vim.inspect(msgs))
+  end },
+}

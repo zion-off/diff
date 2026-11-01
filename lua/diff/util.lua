@@ -282,4 +282,25 @@ function M.compact_dir_chain(node)
   return display, cur
 end
 
+--- How long ago an ISO-8601 UTC time ("2026-01-01T12:00:00Z") was, as
+--- "just now", "5m ago", "3h ago", "2d ago", or the date past a month.
+--- @param iso string|nil
+--- @param now integer|nil  epoch seconds (tests)
+--- @return string
+function M.relative_time(iso, now)
+  local y, mo, d, h, mi, s = tostring(iso or ""):match("^(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)")
+  if not y then return "" end
+  now = now or os.time()
+  -- os.time() reads a table as local time; the offset turns it back to UTC.
+  -- Both tables say "no daylight saving", so the offset cancels out exactly.
+  local utc_offset = now - os.time(os.date("!*t", now))
+  local t = os.time({ year = y, month = mo, day = d, hour = h, min = mi, sec = s, isdst = false }) + utc_offset
+  local ago = math.max(0, now - t)
+  if ago < 60 then return "just now" end
+  if ago < 3600 then return math.floor(ago / 60) .. "m ago" end
+  if ago < 86400 then return math.floor(ago / 3600) .. "h ago" end
+  if ago < 30 * 86400 then return math.floor(ago / 86400) .. "d ago" end
+  return string.format("%s-%s-%s", y, mo, d)
+end
+
 return M
