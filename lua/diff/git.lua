@@ -526,6 +526,25 @@ function M.get_default_base(root, callback)
   end)
 end
 
+--- Find branch `name`, preferring the remote's copy (origin/<name>) to a
+--- local one: the remote's is what a pull request is measured against.
+--- @param callback fun(base: {ref: string, name: string}|nil)
+function M.find_branch(root, name, callback)
+  local candidates = { "refs/remotes/origin/" .. name, "refs/heads/" .. name }
+  M.run(vim.list_extend({ "for-each-ref", "--format=%(refname)" }, candidates), root, function(lines, _, code)
+    local found = {}
+    for _, line in ipairs(code == 0 and lines or {}) do found[line] = true end
+    for _, c in ipairs(candidates) do
+      if found[c] then
+        callback({ ref = c, name = name })
+        return
+      end
+    end
+    log.debug("no branch named %s", name)
+    callback(nil)
+  end)
+end
+
 --- List what `head` changed since its merge base with `base` — what a pull
 --- request's "Files changed" tab shows. One process: `--raw` supplies each
 --- file's old and new blob, which pins its content even if the branches move

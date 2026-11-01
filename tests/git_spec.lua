@@ -148,4 +148,18 @@ return {
     H.ok(ok)
     H.eq(H.git(repo, "show", ":f.txt"), "a\nb\n")
   end },
+
+  { "finds a branch, preferring the remote's copy", function()
+    local remote = vim.fn.resolve(vim.fn.tempname())
+    H.sh({ "git", "init", "-q", "--bare", remote })
+    local repo = H.repo({ ["a.txt"] = "a\n" })
+    H.git(repo, "branch", "develop")
+    H.eq(await(function(cb) git.find_branch(repo, "develop", cb) end), { ref = "refs/heads/develop", name = "develop" })
+    H.git(repo, "remote", "add", "origin", remote)
+    H.git(repo, "push", "-q", "origin", "develop")
+    H.git(repo, "fetch", "-q", "origin")
+    H.eq(await(function(cb) git.find_branch(repo, "develop", cb) end),
+      { ref = "refs/remotes/origin/develop", name = "develop" })
+    H.eq(await(function(cb) git.find_branch(repo, "nope", cb) end), nil)
+  end },
 }

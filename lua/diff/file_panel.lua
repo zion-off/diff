@@ -28,6 +28,7 @@ local function fresh_state()
     restore = nil,  -- cursor identity to restore on the next render with data
     branch  = nil,  -- { base, head, files|nil, error|nil } changes since the merge base with the base branch
     base    = nil,  -- { ref, name } of the base branch; false = none found, nil = not looked up
+    base_override = nil, -- branch name to compare with instead (the pull request's base)
     collapsed = { staged = false, unstaged = false, branch = false },
     collapsed_dirs = {}, -- "<section>:<dir path>" -> true
     line_map = {},       -- lnr -> { type, key, section, file?, dir_key? }
@@ -394,6 +395,7 @@ function M.setup(buf, win, repo_root)
     S.status, S.collapsed, S.collapsed_dirs, S.active = keep.status, keep.collapsed, keep.collapsed_dirs, keep.active
     S.branch, S.base, S.branch_mode = keep.branch, keep.base, keep.branch_mode
   end
+  S.base_override = keep.base_override
 
   local km = require("diff.config").get().keymaps or {}
   local function map(key, fn, desc, extra)
@@ -458,6 +460,19 @@ function M.forget_base()
   S.base = nil
 end
 
+--- Compare the branch with `name` (the pull request's base) rather than the
+--- configured or default base; nil goes back to those. Returns whether this
+--- changes the base, so the caller knows to refresh.
+--- @param name string|nil
+--- @return boolean
+function M.use_base(name)
+  if S.base_override == name then return false end
+  log.info("branch changes compare with %s", name or "the default base")
+  S.base_override = name
+  S.base = nil
+  return true
+end
+
 --- Fetch what `head` changed since its merge base with the base branch.
 --- The base is looked up once per entry into branch mode. The diff is only
 --- recomputed when `head` or the base point at new commits: saves and index
@@ -482,6 +497,15 @@ local function fetch_branch(head, cb)
     end)
   end
   if S.base ~= nil then return with_base(S.base or nil) end
+  if S.base_override then
+    local name = S.base_override
+    return git.find_branch(root, name, function(base)
+      -- A base the repository does not have locally is still a name git may resolve.
+      base = base or { ref = name, name = name }
+      if root == S.root then S.base = base end
+      with_base(base)
+    end)
+  end
   local configured = require("diff.config").get().base_branch
   if configured then
     S.base = { ref = configured, name = configured }

@@ -3,6 +3,7 @@ local H = require("helpers")
 -- main: a.lua with 6 lines; feature: line 3 changed and a line added after 5.
 local repo = H.repo({ ["a.lua"] = H.text(H.lines(6)) })
 H.git(repo, "branch", "-M", "main")
+H.git(repo, "branch", "develop")
 H.git(repo, "checkout", "-q", "-b", "feature")
 local new_lines = H.lines(6, { [3] = "line 3 changed" })
 table.insert(new_lines, 6, "line inserted")
@@ -35,7 +36,7 @@ local thread = {
 }
 local function review()
   return {
-    pr = { id = "PR_1", number = 7, head_oid = head, base_name = "main", branch = "feature" },
+    pr = { id = "PR_1", number = 7, head_oid = head, base_name = "develop", branch = "feature" },
     commits = { [head] = true }, pending = nil, threads = { vim.deepcopy(thread) },
   }
 end
@@ -148,6 +149,15 @@ return {
     local title = vim.api.nvim_win_get_config(compose._state().editor).title
     H.ok(vim.inspect(title):find("Review #7", 1, true), vim.inspect(title))
     compose.close()
+  end },
+
+  { "the branch's changes are measured from the pull request's base", function()
+    local sidebar = require("diff.sidebar")
+    local fp = require("diff.file_panel")
+    local row2 = vim.api.nvim_buf_get_lines(sidebar._bar_buf, 1, 2, false)[1]
+    H.ok(row2:find("Since develop", 1, true), row2)
+    sidebar.toggle_branch_mode()
+    H.wait(function() return fp.branch_base() == "develop" end, "branch mode on develop")
     require("diff").close()
   end },
 

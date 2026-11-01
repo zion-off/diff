@@ -1076,6 +1076,12 @@ end
 -- it ("Since main") before branch mode is ever entered.
 local base_lookup = { root = nil, name = nil }
 
+--- The base branch of the branch's pull request, if it has one.
+local function pr_base()
+  local p = pr.pull_request()
+  return p and p.base_name or nil
+end
+
 --- The branch's pull request for the mode bar: its number and the viewer's
 --- draft comments; nil without one.
 local function pull_request_label()
@@ -1099,7 +1105,7 @@ local function render_mode_bar()
     behind = upstream and upstream.behind,
     -- What the branch view compares with: the base in use once branch mode
     -- has loaded, else the configured or looked-up one.
-    base = (M._branch_mode and file_panel.branch_base()) or config.get().base_branch or base_lookup.name,
+    base = (M._branch_mode and file_panel.branch_base()) or pr_base() or config.get().base_branch or base_lookup.name,
     pr = pull_request_label(),
     actions = {
       pick_branch  = function() M.pick_preview_branch() end,
@@ -1172,6 +1178,7 @@ function M.refresh(opts)
     -- Only a refresh the reader asked for fetches the pull request again;
     -- otherwise it is looked up when the branch shown changes.
     pr.sync(M._repo_root, M._preview_branch, { force = opts.fetch_remote })
+    file_panel.use_base(pr_base())
   end
   refreshing = refreshing + 1
   -- The bar shows what the file panel learns: the upstream, the base branch.
@@ -1348,7 +1355,13 @@ function M.setup_auto_refresh()
     group = aug,
     pattern = "DiffNvimPrChanged",
     callback = function()
-      if M.is_open() and not M._sidebar_hidden then render_mode_bar() end
+      if not M.is_open() then return end
+      -- The branch's changes are measured as its pull request measures them.
+      if file_panel.use_base(pr_base()) and M._branch_mode then
+        M.refresh()
+      elseif not M._sidebar_hidden then
+        render_mode_bar()
+      end
     end,
   })
 
