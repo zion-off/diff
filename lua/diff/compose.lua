@@ -146,23 +146,13 @@ function M.open(opts)
   if opts.text and opts.text ~= "" then
     vim.api.nvim_buf_set_lines(editor_buf, 0, -1, false, vim.split(opts.text, "\n", { plain = true }))
   end
-  local cfg = {
-    relative = "editor", row = row, col = col, width = width, height = height,
-    style = "minimal", border = "rounded", title = " " .. opts.title .. " ", title_pos = "center",
-  }
-  local with_footer = vim.tbl_extend("force", cfg,
-    { footer = " ctrl-s " .. opts.buttons[1].label:lower() .. "   tab buttons   esc cancel ", footer_pos = "center" })
-  local ok, editor = pcall(vim.api.nvim_open_win, editor_buf, true, with_footer)
-  if not ok then ok, editor = pcall(vim.api.nvim_open_win, editor_buf, true, cfg) end
-  if not ok then
-    log.warn("cannot open the editor: %s", tostring(editor))
-    return
-  end
+  local editor = require("diff.float").open(editor_buf, true, {
+    relative = "editor", row = row, col = col, width = width, height = height, title = opts.title,
+  }, { footer = "ctrl-s " .. opts.buttons[1].label:lower() .. "   tab buttons   esc cancel" })
+  if not editor then return end
   for k, v in pairs({ wrap = true, linebreak = true, cursorline = false, spell = false }) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = editor })
   end
-  vim.wo[editor].winhighlight = "Normal:DiffNvimPickerNormal,FloatBorder:DiffNvimPickerBorder,"
-    .. "FloatTitle:DiffNvimPickerTitle,FloatFooter:DiffNvimPickerFooter"
 
   local bar_buf = scratch("compose-buttons", "diff.nvim Comment buttons")
   vim.bo[bar_buf].modifiable = false

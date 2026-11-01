@@ -210,24 +210,13 @@ function M.open(opts)
   vim.bo[buf].bufhidden = "wipe"
   vim.bo[buf].modifiable = false
   local row, col = placement(opts.win, opts.row, 6, width)
-  local cfg = {
-    relative = "editor", row = row, col = col, width = width, height = 6,
-    style = "minimal", border = "rounded", title = " Comments ", title_pos = "center",
-  }
-  -- Footers need Neovim 0.10; without one the keys go unlisted rather than
-  -- the float failing to open.
-  local ok, win = pcall(vim.api.nvim_open_win, buf, true, vim.tbl_extend("force", cfg,
-    { footer = " r reply   R resolve   e edit   x delete   q close ", footer_pos = "center" }))
-  if not ok then ok, win = pcall(vim.api.nvim_open_win, buf, true, cfg) end
-  if not ok then
-    log.warn("cannot open the comments float: %s", tostring(win))
-    return
-  end
+  local win = require("diff.float").open(buf, true, {
+    relative = "editor", row = row, col = col, width = width, height = 6, title = "Comments",
+  }, { footer = "r reply   R resolve   e edit   x delete   q close" })
+  if not win then return end
   for k, v in pairs({ wrap = false, cursorline = false }) do
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
-  vim.wo[win].winhighlight = "Normal:DiffNvimPickerNormal,FloatBorder:DiffNvimPickerBorder,"
-    .. "FloatTitle:DiffNvimPickerTitle,FloatFooter:DiffNvimPickerFooter"
 
   local s = { win = win, buf = buf, opts = opts, meta = {}, confirm = {} }
   s.target = buttons.target(buf, win)

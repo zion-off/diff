@@ -290,35 +290,16 @@ function M.open(repo_root, on_select)
     vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
     vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 
-    local win_cfg = {
-      relative  = "editor",
-      width     = width,
-      height    = height,
-      row       = row,
-      col       = col,
-      style     = "minimal",
-      border    = "rounded",
-      title     = " Preview branch ",
-      title_pos = "center",
-    }
-    -- Footers need Neovim 0.10; without one the keys are simply undocumented
-    -- rather than the window failing to open.
-    local with_footer = vim.tbl_extend("force", win_cfg, {
-      footer = " ↑↓ move   ⏎ select   esc cancel ", footer_pos = "center",
-    })
-    local ok, win = pcall(vim.api.nvim_open_win, buf, true, with_footer)
-    if not ok then ok, win = pcall(vim.api.nvim_open_win, buf, true, win_cfg) end
-    if not ok or not vim.api.nvim_win_is_valid(win) then
+    local win = require("diff.float").open(buf, true, {
+      relative = "editor", width = width, height = height, row = row, col = col, title = "Preview branch",
+    }, { footer = "↑↓ move   ⏎ select   esc cancel", winhighlight = "CursorLine:DiffNvimPickerSelected" })
+    if not win then
       pcall(vim.api.nvim_buf_delete, buf, { force = true })
       return
     end
 
     pcall(vim.api.nvim_set_option_value, "cursorline", true,  { win = win })
     pcall(vim.api.nvim_set_option_value, "wrap",       false, { win = win })
-    pcall(vim.api.nvim_set_option_value, "winhighlight",
-      "Normal:DiffNvimPickerNormal,FloatBorder:DiffNvimPickerBorder,"
-      .. "FloatTitle:DiffNvimPickerTitle,FloatFooter:DiffNvimPickerFooter,"
-      .. "CursorLine:DiffNvimPickerSelected", { win = win })
 
     M._win = win
     M._buf = buf
