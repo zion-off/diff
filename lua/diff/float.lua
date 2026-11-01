@@ -6,8 +6,46 @@ local M = {}
 local chrome = require("diff.chrome")
 local log    = require("diff.log").scope("float")
 
+local aug = vim.api.nvim_create_augroup("DiffNvimFloat", { clear = true })
+
+-- window -> { winhighlight = string, options = table|nil }: the look each float keeps.
+local kept = {}
+local watching = false
+
 local WINHIGHLIGHT = "Normal:DiffNvimPickerNormal,FloatBorder:DiffNvimPickerBorder,"
   .. "FloatTitle:DiffNvimPickerTitle,FloatFooter:DiffNvimPickerFooter"
+
+local function restore(win, look)
+  for name, value in pairs(look.options or {}) do
+    if vim.api.nvim_get_option_value(name, { win = win }) ~= value then
+      pcall(vim.api.nvim_set_option_value, name, value, { win = win })
+    end
+  end
+  if vim.api.nvim_get_option_value("winhighlight", { win = win }) ~= look.winhighlight then
+    log.debug("window %d lost its highlights to another plugin or config; restoring them", win)
+    pcall(vim.api.nvim_set_option_value, "winhighlight", look.winhighlight, { win = win })
+  end
+end
+
+--- Keep `win`'s highlights and options as they are now, against a config or
+--- plugin that rewrites them when focus moves (a "dim the inactive window"
+--- autocmd would otherwise strip a float's border and colours once it is left).
+--- @param look table  { winhighlight = string, options = table|nil }
+function M.keep_look(win, look)
+  kept[win] = look
+  if watching then return end
+  watching = true
+  vim.api.nvim_create_autocmd({ "WinEnter", "WinLeave", "BufWinEnter" }, {
+    group = aug,
+    callback = function()
+      vim.schedule(function()
+        for w, l in pairs(kept) do
+          if vim.api.nvim_win_is_valid(w) then restore(w, l) else kept[w] = nil end
+        end
+      end)
+    end,
+  })
+end
 
 --- Open `buf` in a float.
 --- @param buf   integer
@@ -31,7 +69,9 @@ function M.open(buf, enter, cfg, opts)
     log.warn("cannot open a float: %s", tostring(win))
     return nil
   end
-  vim.wo[win].winhighlight = WINHIGHLIGHT .. (opts.winhighlight and ("," .. opts.winhighlight) or "")
+  local winhighlight = WINHIGHLIGHT .. (opts.winhighlight and ("," .. opts.winhighlight) or "")
+  vim.wo[win].winhighlight = winhighlight
+  M.keep_look(win, { winhighlight = winhighlight })
   return win
 end
 

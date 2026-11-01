@@ -163,4 +163,20 @@ return {
     H.eq(vim.api.nvim_win_get_cursor(s.bar)[2], second, "wraps to the last")
     compose.close()
   end },
+
+  { "a config that rewrites window highlights on focus changes does not strip the floats' look", function()
+    local id = vim.api.nvim_create_autocmd({ "WinEnter", "WinLeave" }, {
+      callback = function() vim.wo.winhighlight = "Normal:SomeOtherGroup" vim.wo.cursorline = true end,
+    })
+    local s = open()
+    vim.cmd("stopinsert")
+    feed("<Tab>")
+    H.eq(vim.api.nvim_get_current_win(), s.bar)
+    H.wait(function()
+      return vim.wo[s.bar].winhighlight == "Normal:DiffNvimPickerNormal" and vim.wo[s.editor].winhighlight:find("FloatBorder:DiffNvimPickerBorder", 1, true)
+    end, "highlights restored")
+    H.eq(vim.wo[s.bar].cursorline, false, "no row marked in the button row")
+    vim.api.nvim_del_autocmd(id)
+    compose.close()
+  end },
 }

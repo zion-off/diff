@@ -206,7 +206,10 @@ function M.open(opts)
     pcall(vim.api.nvim_win_close, editor, true)
     return false
   end
-  vim.wo[bar].winhighlight = "Normal:DiffNvimPickerNormal"
+  local bar_look = { winhighlight = "Normal:DiffNvimPickerNormal", options = { cursorline = false } }
+  vim.wo[bar].winhighlight = bar_look.winhighlight
+  vim.wo[bar].cursorline = false
+  float.keep_look(bar, bar_look)
 
   local list
   if list_height > 0 then
