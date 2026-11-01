@@ -90,6 +90,29 @@ return {
     pr_thread.close()
   end },
 
+  { "K, which opens it, closes it, and so does leaving it", function()
+    local s = open()
+    local footer = vim.inspect(vim.api.nvim_win_get_config(s.win).footer)
+    H.ok(footer:find("q close", 1, true), footer)
+    feed("K")
+    H.eq(pr_thread.is_open(), false, "K closes")
+    local behind = vim.api.nvim_get_current_win()
+    open()
+    vim.api.nvim_set_current_win(behind)
+    H.wait(function() return not pr_thread.is_open() end, "leaving closes")
+  end },
+
+  { "the editor it opens keeps it open behind", function()
+    local s = open()
+    require("diff.compose").open({ title = "Reply", buttons = { { label = "Cancel" } } })
+    vim.wait(50)
+    H.eq(pr_thread.is_open(), true)
+    vim.cmd("stopinsert")
+    require("diff.compose").close()
+    vim.api.nvim_set_current_win(s.win)
+    pr_thread.close()
+  end },
+
   { "closes when the line has no threads left", function()
     open()
     local saved = threads

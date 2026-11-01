@@ -10,7 +10,9 @@
 --- Keys act on what the cursor is in: r replies to the thread, R resolves or
 --- reopens it, e edits the comment, x deletes it (twice: the first press asks
 --- to confirm), Enter presses the button under the cursor, Tab moves between
---- buttons, q or Esc closes. The float follows the review: when it changes,
+--- buttons, and q, Esc or K (which opened it) closes it. Moving to another
+--- window closes it too, except to the editor it opened for a reply or an
+--- edit. The border lists the keys. The float follows the review: when it changes,
 --- the threads are read again from `opts.threads()`, and the float closes when
 --- none are left.
 local M = {}
@@ -208,10 +210,15 @@ function M.open(opts)
   vim.bo[buf].bufhidden = "wipe"
   vim.bo[buf].modifiable = false
   local row, col = placement(opts.win, opts.row, 6, width)
-  local ok, win = pcall(vim.api.nvim_open_win, buf, true, {
+  local cfg = {
     relative = "editor", row = row, col = col, width = width, height = 6,
     style = "minimal", border = "rounded", title = " Comments ", title_pos = "center",
-  })
+  }
+  -- Footers need Neovim 0.10; without one the keys go unlisted rather than
+  -- the float failing to open.
+  local ok, win = pcall(vim.api.nvim_open_win, buf, true, vim.tbl_extend("force", cfg,
+    { footer = " r reply   R resolve   e edit   x delete   q close ", footer_pos = "center" }))
+  if not ok then ok, win = pcall(vim.api.nvim_open_win, buf, true, cfg) end
   if not ok then
     log.warn("cannot open the comments float: %s", tostring(win))
     return
@@ -220,7 +227,7 @@ function M.open(opts)
     pcall(vim.api.nvim_set_option_value, k, v, { win = win })
   end
   vim.wo[win].winhighlight = "Normal:DiffNvimPickerNormal,FloatBorder:DiffNvimPickerBorder,"
-    .. "FloatTitle:DiffNvimPickerTitle"
+    .. "FloatTitle:DiffNvimPickerTitle,FloatFooter:DiffNvimPickerFooter"
 
   local s = { win = win, buf = buf, opts = opts, meta = {}, confirm = {} }
   s.target = buttons.target(buf, win)
@@ -257,10 +264,24 @@ function M.open(opts)
   map("<S-Tab>", function() s.target:step(-1) end)
   map("q", M.close)
   map("<Esc>", M.close)
+  -- Unmapped, K would fall through to 'keywordprg' (man) on the word under the cursor.
+  map("K", M.close)
 
   vim.api.nvim_create_autocmd("User", {
     group = aug, pattern = "DiffNvimPrChanged",
     callback = function() if S == s and valid_win(s.win) then render(s) end end,
+  })
+  -- Focus moving elsewhere (a click outside, a window command) closes it,
+  -- unless it moved to the editor a reply or an edit opened.
+  vim.api.nvim_create_autocmd("WinLeave", {
+    group = aug, buffer = buf,
+    callback = function()
+      vim.schedule(function()
+        if S ~= s or vim.api.nvim_get_current_win() == s.win or require("diff.compose").is_open() then return end
+        log.debug("focus left the comments float; closing")
+        M.close()
+      end)
+    end,
   })
   vim.api.nvim_create_autocmd("WinClosed", {
     group = aug, pattern = tostring(win), once = true,
