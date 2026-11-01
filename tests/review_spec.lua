@@ -103,16 +103,19 @@ return {
     H.eq(dv.click(win, row_of_new(4), 1), false, "a line without threads")
     H.ok(dv.click(win, row_of_new(3), 1), "click on the sign")
     local s = pr_thread._state()
-    local handler = clickable.get(s.win)
     local lines = vim.api.nvim_buf_get_lines(s.buf, 0, -1, false)
     local at
     for i, l in ipairs(lines) do
       local c = l:find(" Resolve ", 1, true)
-      if c then at = { i, vim.api.nvim_strwidth(l:sub(1, c)) + 1 } end
+      if c then at = { i, vim.api.nvim_strwidth(l:sub(1, c - 1)) + 1, vim.api.nvim_strwidth(" Resolve ") } end
     end
     H.ok(at, "a Resolve button")
+    -- Window columns count the float's left border: the button spans
+    -- columns at+1 .. at+width, not the cell before it.
+    H.eq(clickable.item_at(s.win, at[1], at[2]), nil, "the cell before the button")
+    H.ok(clickable.item_at(s.win, at[1], at[2] + at[3]), "the button's last cell")
     calls = {}
-    H.ok(handler.click(at[1], at[2]))
+    H.ok(clickable.click(s.win, at[1], at[2] + 1))
     H.wait(function() return #calls >= 2 end, "resolve and reload")
     H.eq(calls, { "resolve T1 true", "fetch" })
     pr_thread.close()

@@ -75,20 +75,20 @@ return {
   { "buttons answer the mouse: hover tints, a click presses", function()
     local s = open()
     type_text(s, "hi")
-    local handler = H.ok(clickable.get(s.bar), "the button row is registered")
+    H.ok(clickable.has(s.bar), "the button row is registered")
     local col = col_of(s, "Add to review")
-    H.ok(handler.item_at(1, col), "a button is an item")
-    H.eq(handler.item_at(1, 200), nil, "past the buttons is not")
-    handler.hover(1, col)
+    H.ok(clickable.item_at(s.bar, 1, col), "a button is an item")
+    H.eq(clickable.item_at(s.bar, 1, 200), nil, "past the buttons is not")
+    clickable.hover(s.bar, 1, col)
     local marks = vim.api.nvim_buf_get_extmarks(s.bar_buf, -1, 0, -1, { details = true })
     local hovered = false
     for _, m in ipairs(marks) do
       if m[4].hl_group == "DiffNvimButtonHover" then hovered = true end
     end
     H.ok(hovered, "hovered button is tinted")
-    H.ok(handler.click(1, col))
+    H.ok(clickable.click(s.bar, 1, col))
     H.eq(sent, { "hi" })
-    H.eq(clickable.get(s.bar), nil, "unregistered once closed")
+    H.eq(clickable.has(s.bar), false, "unregistered once closed")
   end },
 
   { "the keyboard reaches the buttons: Tab, then l and Enter", function()
