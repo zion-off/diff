@@ -229,7 +229,7 @@ Opened with `<leader>gb` (or `:DiffNvimPreviewBranch`).
 | `<leader>gv` | Toggle split / unified, keeping the cursor on its line |
 | `<leader>n` | Leave a note on current / visual selection |
 | `<leader>c` | Comment on the pull request at the current line / visual selection |
-| `K` | Show the pull request comments on this line (elsewhere, Neovim's own `K`) |
+| `K` | Show the pull request comments on this line (on other lines, your own `K` mapping or Neovim's) |
 | `<leader>N` | Toggle notes panel |
 | `q` | Close diff view |
 

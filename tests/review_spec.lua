@@ -112,9 +112,25 @@ return {
     H.eq(vim.g.keyword_looked_up, "line")
   end },
 
+  { "K on a line without comments runs the user's own K mapping", function()
+    local win = S().panes.new
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { row_of_new(1), 0 })
+    vim.g.global_k = nil
+    vim.keymap.set("n", "K", function() vim.g.global_k = true end)
+    feed("K")
+    vim.keymap.del("n", "K")
+    H.eq(vim.g.global_k, true)
+    H.eq(pr_thread.is_open(), false)
+  end },
+
   { "clicking a thread's sign opens it; clicking its Resolve button resolves it", function()
     local win = S().panes.new
     H.eq(dv.click(win, row_of_new(4), 1), false, "a line without threads")
+    local text = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), row_of_new(3) - 1, row_of_new(3), false)[1]
+    H.eq(dv.click(win, row_of_new(3), 40, #text), false, "a click on the text")
+    H.ok(dv.click(win, row_of_new(3), 40, #text + 1), "a click past the end of the text, however it wraps")
+    pr_thread.close()
     H.ok(dv.click(win, row_of_new(3), 1), "click on the sign")
     local s = pr_thread._state()
     local lines = vim.api.nvim_buf_get_lines(s.buf, 0, -1, false)

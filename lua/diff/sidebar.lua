@@ -426,7 +426,7 @@ local function click_target(mp)
   elseif clickable.has(mp.winid) then
     item = clickable.item_at(mp.winid, line, mp.wincol)
   end
-  return { winid = mp.winid, line = line, col = mp.wincol, item = item }
+  return { winid = mp.winid, line = line, col = mp.wincol, column = mp.column, item = item }
 end
 
 local function same_target(a, b)
@@ -451,7 +451,7 @@ local function click(t)
   end
   local panel = t.winid == M._commit_win and commit_panel or t.winid == M._file_win and file_panel or nil
   if not panel then
-    require("diff.diff_view").click(t.winid, t.line, t.col)
+    require("diff.diff_view").click(t.winid, t.line, t.col, t.column)
     return
   end
   log.trace("click on %s row %d", panel == file_panel and "file panel" or "commit panel", t.line)

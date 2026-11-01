@@ -1542,21 +1542,22 @@ local function show_threads_at(win, line)
   return require("diff.review_ui").show_threads(win, line - 1, S.source, anchors)
 end
 
---- Whether display column `col` of row `line` in `win` is on the row's
---- sign or past the end of its text, where a thread's marks are drawn.
-local function on_thread_marks(win, line, col)
-  if not col then return false end
-  if col <= SIGN_WIDTH then return true end
-  local textoff = vim.fn.getwininfo(win)[1].textoff
+--- Whether a click at window column `col` and text column `column` (as
+--- getmousepos() reports them) of row `line` in `win` is on the row's sign
+--- or past the end of its text, where a thread's marks are drawn.
+local function on_thread_marks(win, line, col, column)
+  if col and col <= SIGN_WIDTH then return true end
+  if not column then return false end
   local text = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), line - 1, line, false)[1] or ""
-  return col > textoff + vim.fn.strdisplaywidth(text)
+  return column > #text
 end
 
---- A mouse click on row `line` of pane `win`, at display column `col`: a
---- hunk header hiding lines expands one step, like `expand_context` on it;
---- a click on a thread's sign or its preview opens the thread.
+--- A mouse click on row `line` of pane `win`, at window column `col` and
+--- text column `column`: a hunk header hiding lines expands one step, like
+--- `expand_context` on it; a click on a thread's sign or its preview opens
+--- the thread.
 --- @return boolean handled
-function M.click(win, line, col)
+function M.click(win, line, col, column)
   if not (S.layout and pane_of_win(win)) then return false end
   local item = S.layout.items[line]
   if item and item.sep then
@@ -1566,7 +1567,7 @@ function M.click(win, line, col)
     return true
   end
   local p = pane_of_win(win)
-  if S.thread_rows[p] and S.thread_rows[p][line - 1] and on_thread_marks(win, line, col) then
+  if S.thread_rows[p] and S.thread_rows[p][line - 1] and on_thread_marks(win, line, col, column) then
     pcall(vim.api.nvim_win_set_cursor, win, { line, 0 })
     return show_threads_at(win, line)
   end
@@ -1769,16 +1770,14 @@ function M.show_comments()
   if S.layout and valid_win(win) then show_threads_at(win, vim.api.nvim_win_get_cursor(win)[1]) end
 end
 
---- Keys for `show_comments` at the cursor: the threads when the row has
---- any, else the key itself, unmapped, so it keeps its own meaning ('keywordprg'
---- for K) where there is nothing to show.
-local function show_comments_keys(p, key)
+--- `show_comments` at the cursor: the threads when the row has any, else
+--- what the key does elsewhere (the user's own mapping, or 'keywordprg' for K).
+local function show_comments_or_fallback(p, key)
   return function()
     local rows = S.thread_rows[p]
-    if rows and rows[vim.api.nvim_win_get_cursor(0)[1] - 1] then
-      return "<Cmd>lua require('diff.diff_view').show_comments()<CR>"
-    end
-    return key
+    if rows and rows[vim.api.nvim_win_get_cursor(0)[1] - 1] then return M.show_comments() end
+    log.debug("no threads on this row; %s does what it does elsewhere", key)
+    require("diff.util").run_global_key(key)
   end
 end
 
@@ -1849,9 +1848,9 @@ setup_keymaps = function(buf, p)
   end
 
   map({ "n", "v" }, km.leave_note, leave_note(p), "Leave note")
-  map({ "n", "v" }, km.leave_comment, leave_comment(p), "Comment on the pull request")
-  map("n", km.show_comments, show_comments_keys(p, km.show_comments), "Show pull request comments on this line",
-    { expr = true })
+  -- Without nowait, so the user's longer mappings that start the same way still work.
+  map({ "n", "v" }, km.leave_comment, leave_comment(p), "Comment on the pull request", { nowait = false })
+  map("n", km.show_comments, show_comments_or_fallback(p, km.show_comments), "Show pull request comments on this line")
   map("n", km.toggle_notes, function() require("diff.annotations").toggle_notes(S.root) end, "Toggle notes panel")
   map("n", km.next_hunk, function() M.jump_hunk(1) end, "Next hunk")
   map("n", km.prev_hunk, function() M.jump_hunk(-1) end, "Previous hunk")

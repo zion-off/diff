@@ -314,4 +314,33 @@ function M.relative_time(iso, now)
   return string.format("%s-%s-%s", y, mo, d)
 end
 
+--- Do what normal-mode `key` does outside the plugin's buffers: run the
+--- global mapping of it, or else Vim's own command (K looks the word up with
+--- 'keywordprg'). A leader key without a global mapping does nothing, rather
+--- than replaying the leader's own motion.
+--- @param key string  as written in a mapping ("K", "<leader>k")
+function M.run_global_key(key)
+  local lhs = key:gsub("<[Ll]eader>", vim.g.mapleader or "\\")
+  local raw = vim.api.nvim_replace_termcodes(lhs, true, true, true)
+  local function feed(keys, remap)
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, true, true), remap and "m" or "n", false)
+  end
+  for _, m in ipairs(vim.api.nvim_get_keymap("n")) do
+    if (m.lhsraw or vim.api.nvim_replace_termcodes(m.lhs, true, true, true)) == raw then
+      local remap = m.noremap ~= 1
+      if m.callback then
+        local out = m.callback()
+        if m.expr == 1 and type(out) == "string" then feed(out, remap) end
+      elseif m.expr == 1 then
+        feed(vim.api.nvim_eval(m.rhs), remap)
+      else
+        feed(m.rhs, remap)
+      end
+      return
+    end
+  end
+  if key:lower():find("^<leader>") then return end
+  feed((vim.v.count > 0 and tostring(vim.v.count) or "") .. key, false)
+end
+
 return M
