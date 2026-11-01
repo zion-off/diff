@@ -152,7 +152,7 @@ return {
       pr.add_comment({ pr_id = "PR_1", commit = head }, { path = "a.lua", side = "new", line = 1 }, "hi", cb)
     end)
     H.eq(err, "Line could not be resolved")
-    H.eq(log, { "start " .. head, "thread R_new", "delete R_new" })
+    H.eq(log, { "start " .. head, "thread R_new", "delete R_new", "fetch" }, "and the review is read again")
   end },
 
   { "an empty draft review on another commit is replaced", function()
@@ -236,6 +236,59 @@ return {
     local _, why = await(function(cb) pr.comment_target(repo, { kind = "commit", hash = head, path = "a.lua" }, "new", cb) end)
     H.ok(why:find("did not load"), why)
     github.fetch_review = function(_, _, cb) table.insert(log, "fetch"); later(cb, vim.deepcopy(review)) end
+  end },
+
+  { "a discarded draft review stays gone even while GitHub still lists it", function()
+    local function with_drafts()
+      local r = fake_review()
+      r.pending = { id = "R_draft", commit = head, count = 1 }
+      table.insert(r.threads, { id = "TD", path = "a.lua", side = "new", line = 4, outdated = false, pending = true,
+        commit = head, comments = { { id = "CD", pending = true, body = "draft" } } })
+      table.insert(r.threads[1].comments, { id = "CR", pending = true, body = "draft reply" })
+      return r
+    end
+    review = with_drafts()
+    synced(nil, { head = "drafts", force = true })
+    H.eq(#pr.drafts(), 2)
+    -- GitHub keeps answering with the draft review after deleting it.
+    github.delete_review = function(_, id, cb) table.insert(log, "delete " .. id); later(cb, true) end
+    local err, gone = await(function(cb) pr.discard(cb) end)
+    H.eq({ err, gone }, {})
+    H.eq(pr.pending(), nil)
+    H.eq(pr.drafts(), {})
+    for _, t in ipairs(pr._state().review.threads) do
+      H.ok(t.id ~= "TD", "a thread of drafts only is gone")
+      for _, c in ipairs(t.comments) do H.ok(c.id ~= "CR", "a draft reply is gone") end
+    end
+  end },
+
+  { "a submitted draft review's comments stop being drafts even while GitHub still lists it", function()
+    local r = fake_review()
+    r.pending = { id = "R_sub", commit = head, count = 1 }
+    table.insert(r.threads, { id = "TS", path = "a.lua", side = "new", line = 5, outdated = false, pending = true,
+      commit = head, comments = { { id = "CS", pending = true, body = "draft" } } })
+    review = r
+    synced(nil, { head = "submit", force = true })
+    github.submit_review = function(_, _, _, _, cb) later(cb, "COMMENTED") end
+    H.eq(await(function(cb) pr.submit("comment", "", cb) end), nil)
+    H.eq(pr.pending(), nil)
+    H.eq(pr.drafts(), {})
+    local kept
+    for _, t in ipairs(pr._state().review.threads) do if t.id == "TS" then kept = t end end
+    H.ok(kept and not kept.pending and not kept.comments[1].pending, "kept, as submitted")
+  end },
+
+  { "discarding drafts that are already gone on GitHub says so", function()
+    local r = fake_review()
+    r.pending = { id = "R_stale", commit = head, count = 1 }
+    review = r
+    synced(nil, { head = "stale", force = true })
+    review = fake_review()
+    github.delete_review = function(_, id, cb) later(cb, nil, "Could not resolve to a node with the global id of '" .. id .. "'") end
+    local err, gone = await(function(cb) pr.discard(cb) end)
+    H.eq({ err, gone }, { nil, true })
+    H.eq(pr.pending(), nil, "caught up with GitHub")
+    github.delete_review = function(_, id, cb) table.insert(log, "delete " .. id); later(cb, true) end
   end },
 
   { "clearing forgets the pull request", function()

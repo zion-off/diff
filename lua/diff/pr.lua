@@ -31,6 +31,7 @@ local function fresh_state()
     local_oid = nil, -- the commit the branch shown is at locally
     pr = nil, review = nil,
     gen = 0,         -- bumps on every sync, so stale responses are dropped
+    settled = {},    -- draft review id -> "submitted" | "discarded", once done here
   }
 end
 
@@ -107,8 +108,36 @@ local function find_pr(root, branch, gen, callback)
   end)
 end
 
+--- Correct a fetched review for draft reviews already submitted or
+--- discarded here, which GitHub can still list as drafts just afterwards:
+--- discarded comments go, submitted ones are no longer drafts.
+local function without_settled(review)
+  local how = review.pending and S.settled[review.pending.id]
+  if not how then return review end
+  log.debug("GitHub still lists the %s draft review %s; correcting", how, review.pending.id)
+  review.pending = nil
+  local threads = {}
+  for _, t in ipairs(review.threads) do
+    local comments = {}
+    for _, c in ipairs(t.comments) do
+      if not c.pending then
+        table.insert(comments, c)
+      elseif how == "submitted" then
+        c.pending = false
+        table.insert(comments, c)
+      end
+    end
+    if #comments > 0 then
+      t.comments, t.pending = comments, false
+      table.insert(threads, t)
+    end
+  end
+  review.threads = threads
+  return review
+end
+
 local function set_review(review)
-  S.review = review
+  S.review = review and without_settled(review)
   S.pr = review and review.pr or S.pr
 end
 
@@ -372,11 +401,14 @@ end
 -- the review has been fetched again.
 -- ---------------------------------------------------------------------------
 
+--- The review is fetched again either way: a failure often means it changed
+--- on GitHub (submitted or discarded in the browser, say), and what is shown
+--- must catch up rather than keep offering what no longer exists.
 local function finish(action, callback)
   return function(_, err)
     if err then
       log.warn("%s failed: %s", action, err)
-      callback(err)
+      M.reload(function() callback(err) end)
       return
     end
     log.info("%s done", action)
@@ -453,18 +485,32 @@ function M.submit(event, body, callback)
   body = body ~= "" and body or nil
   log.info("submit review of #%d as %s (%s)", pr.number, gh_event, pending and "draft review" or "no drafts")
   if pending then
-    github.submit_review(S.root, pending.id, gh_event, body, finish("submit review", callback))
+    github.submit_review(S.root, pending.id, gh_event, body, function(state, err)
+      if not err then S.settled[pending.id] = "submitted" end
+      finish("submit review", callback)(state, err)
+    end)
   else
     github.post_review(S.root, pr.id, pr.head_oid, gh_event, body, finish("submit review", callback))
   end
 end
 
 --- Throw the draft review away.
+--- @param callback fun(err: string|nil, gone: boolean|nil)  gone: there was
+---   no draft review left on GitHub to discard
 function M.discard(callback)
   local pending = M.pending()
-  if not pending then return callback(nil) end
+  if not pending then return callback(nil, true) end
   log.info("discard draft review %s", pending.id)
-  github.delete_review(S.root, pending.id, finish("discard review", callback))
+  github.delete_review(S.root, pending.id, function(id, delete_err)
+    if not delete_err then S.settled[pending.id] = "discarded" end
+    finish("discard review", function(err)
+      if err and not M.pending() then
+        log.info("draft review %s was already gone on GitHub", pending.id)
+        return callback(nil, true)
+      end
+      callback(err)
+    end)(id, delete_err)
+  end)
 end
 
 --- Open the pull request in the browser.

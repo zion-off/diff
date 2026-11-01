@@ -173,7 +173,17 @@ function M.open_review()
   }
   if pending then
     table.insert(items, { label = "Discard drafts", style = "danger", confirm = "Confirm discard", allow_empty = true,
-      run = bound_to_shown_pr(function(_, done) pr.discard(done) end) })
+      run = bound_to_shown_pr(function(_, done)
+        pr.discard(function(err, gone)
+          if gone then
+            notify("there were no draft comments left on GitHub: they were submitted or discarded elsewhere",
+              vim.log.levels.WARN)
+          elseif not err then
+            notify("draft comments discarded")
+          end
+          done(err)
+        end)
+      end) })
   end
   table.insert(items, { label = "Open on GitHub", allow_empty = true, run = bound_to_shown_pr(function(_, done)
     pr.open_in_browser()
