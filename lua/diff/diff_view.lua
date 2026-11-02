@@ -69,6 +69,7 @@ local function fresh_state()
     thread_rows = {},           -- pane -> { [row] = { { side, line, threads } } } of pull request threads
     hover = nil,                -- layout row under the mouse pointer
     wrap_widths = {},           -- side -> pane width the wrap padding was computed for
+    wrap_cache = {},            -- side -> wrap signature -> wrap measurements (see wrap_measures)
     synced_view = nil,          -- view both split panes were last left showing
     watcher = nil, watch_timer = nil,
     -- open_gen counts opens, refresh_gen counts in-place refreshes. They are
@@ -812,13 +813,46 @@ local function wrap_indent(win, r, width)
   return indent + (sbr == "NONE" and 0 or vim.fn.strdisplaywidth(sbr))
 end
 
+-- Stands for a filler's text in the wrap measurements: a filler pads with
+-- its pattern, so it measures apart from an empty line.
+local FILLER_TEXT = {}
+
+--- Everything besides a line's text that decides how `side`'s pane wraps it
+--- at text width `width`.
+local function wrap_signature(side, width)
+  local wo, bo = vim.wo[S.panes[side]], vim.bo[S.bufs[side]]
+  local parts = {
+    width, wo.showbreak, tostring(wo.breakindent), wo.breakindentopt, tostring(wo.linebreak),
+    bo.tabstop, bo.vartabstop, vim.o.breakat, vim.o.ambiwidth, tostring(vim.o.emoji), vim.o.cpoptions,
+  }
+  local ok, cells = pcall(vim.fn.getcellwidths)
+  for _, range in ipairs(ok and cells or {}) do
+    table.insert(parts, table.concat(range, ","))
+  end
+  return table.concat(parts, "\31")
+end
+
+--- The wrap measurements of `side`'s lines at text width `width`:
+---   heights[text]          screen lines the text wraps onto
+---   pads[target][text]     padding that brings it to `target` lines
+--- Both depend only on the text and how the pane wraps it, so they are kept
+--- while the file stays open: expanding context, returning to a width seen
+--- before or a live refresh measures only the lines not measured yet.
+local function wrap_measures(side, width)
+  local by_layout = S.wrap_cache[side] or {}
+  S.wrap_cache[side] = by_layout
+  local key = wrap_signature(side, width)
+  by_layout[key] = by_layout[key] or { heights = {}, pads = {} }
+  return by_layout[key]
+end
+
 --- Pad item row `r` of `side` with inline virtual text so it wraps onto
 --- exactly `target` screen lines, filling the last one so the band reaches
 --- the edge. Neovim draws every wrapped line of the padding indented but
 --- measures it as if none were, so only the room left on the row's own last
 --- line is measured (keeping 'linebreak' exact); each further line holds the
 --- text width less the indent.
---- @param pads table  cache: "side:line:width:target" -> padding found before
+--- @param pads table  the side's pads, as wrap_measures keeps them
 local function pad_to_height(side, r, row, target, width, pads)
   local win, buf = S.panes[side], S.bufs[side]
   local line = row[side] and S.model[side].lines[row[side]] or ""
@@ -841,9 +875,11 @@ local function pad_to_height(side, r, row, target, width, pads)
     place(n)
     return vim.api.nvim_win_text_height(win, { start_row = r, end_row = r }).all
   end
-  local key = side .. ":" .. (row[side] or "-") .. ":" .. width .. ":" .. target
-  if pads[key] then
-    place(pads[key])
+  pads[target] = pads[target] or {}
+  local known = pads[target]
+  local key = row[side] and line or FILLER_TEXT
+  if known[key] then
+    place(known[key])
     return
   end
   local own = height_with(0)
@@ -859,7 +895,7 @@ local function pad_to_height(side, r, row, target, width, pads)
     -- Drawn right, but Neovim's own scrolling will count this row short.
     log.debug("%s row %d: a pad drawn on %d lines measures %d", side, r, target, measured)
   end
-  pads[key] = n
+  known[key] = n
 end
 
 --- Keep wrapped split panes row-aligned. The scroll sync pairs buffer lines,
@@ -901,12 +937,8 @@ local function align_wrapped()
     return
   end
 
-  -- Measurements depend only on a line's text and the text width, so they
-  -- are kept with the model: expanding context, or returning to a width
-  -- seen before, measures only rows not measured yet.
-  local m, padded = S.model, 0
-  m._wrap = m._wrap or { heights = {}, pads = {} }
-  local heights, pads = m._wrap.heights, m._wrap.pads
+  local m, padded, measured = S.model, 0, 0
+  local measures = { old = wrap_measures("old", text_width.old), new = wrap_measures("new", text_width.new) }
   for i, item in ipairs(S.layout.items) do
     local row = row_of_item(item)
     if row then
@@ -918,24 +950,25 @@ local function align_wrapped()
         if #line <= text_width[side] and not line:find("\t", 1, true) then
           height[side] = 1
         else
-          local key = side .. ":" .. row[side] .. ":" .. text_width[side]
-          height[side] = heights[key]
+          local heights = measures[side].heights
+          height[side] = heights[line]
           if not height[side] then
             height[side] = vim.api.nvim_win_text_height(wins[side], { start_row = i - 1, end_row = i - 1 }).all
-            heights[key] = height[side]
+            heights[line] = height[side]
+            measured = measured + 1
           end
         end
       end
       if height.old ~= height.new then
         local short = height.old < height.new and "old" or "new"
-        pad_to_height(short, i - 1, row, math.max(height.old, height.new), text_width[short], pads)
+        pad_to_height(short, i - 1, row, math.max(height.old, height.new), text_width[short], measures[short].pads)
         padded = padded + 1
       end
     end
   end
-  S.align_ms = elapsed()
-  log.debug("wrap alignment %s: %d rows padded at widths %d/%d in %.1f ms",
-    S.source.path, padded, text_width.old, text_width.new, S.align_ms)
+  S.align_ms, S.wrap_measured = elapsed(), measured
+  log.debug("wrap alignment %s: %d rows padded, %d lines measured at widths %d/%d in %.1f ms",
+    S.source.path, padded, measured, text_width.old, text_width.new, S.align_ms)
 end
 
 --- Bind each visible pane to the syntax sources of the sides it shows.
@@ -1347,6 +1380,7 @@ local function show(root, source, navigator, old, new)
   S.ctx     = config.get().context_lines
   S.reveals = {}
   S.words   = {}
+  S.wrap_cache = {}
   S.lnum_width = #tostring(math.max(#old.lines, #new.lines, 1))
   name_buffers()
   local sources = make_sources(old, new)

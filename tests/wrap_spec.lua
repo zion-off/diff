@@ -227,6 +227,61 @@ return {
     scroll("gg")
   end },
 
+  { "a live edit measures only the lines it changed, and the panes stay aligned", function()
+    local before = H.read(repo, "big.lua")
+    local lines = vim.split(before, "\n", { plain = true })
+    lines[40] = "local t = '" .. string.rep("sit amet consectetur ", 18) .. "'"
+    H.write(repo, "big.lua", table.concat(lines, "\n"))
+
+    local measured, orig = {}, vim.api.nvim_win_text_height
+    vim.api.nvim_win_text_height = function(win, opts)
+      -- Whole-row measurements; the scroll sync measures part of a row.
+      if opts.end_vcol == nil then measured[opts.start_row] = true end
+      return orig(win, opts)
+    end
+    local model = S().model
+    local ok, err = pcall(function()
+      dv.refresh_content()
+      H.wait(function() return S().model ~= model end, "live refresh")
+    end)
+    vim.api.nvim_win_text_height = orig
+    if not ok then error(err, 0) end
+
+    local edited_row
+    for i, item in ipairs(S().layout.items) do
+      local row = item.row and S().model.rows[item.row]
+      if row and row.new == 40 then edited_row = i - 1 end
+    end
+    H.eq(measured, { [edited_row] = true }, "only the edited row is measured")
+    assert_aligned()
+    assert_same_screen()
+
+    H.write(repo, "big.lua", before)
+    model = S().model
+    dv.refresh_content()
+    H.wait(function() return S().model ~= model end, "refresh back")
+    assert_aligned()
+  end },
+
+  { "a change to how lines wrap is measured afresh", function()
+    local old, new = pane("old"), pane("new")
+    local function rerender()
+      dv.expand("reset")
+      local measured = S().wrap_measured
+      dv.expand("all")
+      return measured + S().wrap_measured
+    end
+    rerender()
+    H.eq(rerender(), 0, "nothing changed: every line measured before")
+    vim.wo[old].showbreak, vim.wo[new].showbreak = ">>>>>>>>>> ", ">>>>>>>>>> "
+    H.ok(rerender() > 0, "lines are measured again under the new 'showbreak'")
+    assert_aligned()
+    vim.wo[old].showbreak, vim.wo[new].showbreak = "", ""
+    H.eq(rerender(), 0, "back to measurements already taken")
+    assert_aligned()
+    dv.expand("reset")
+  end },
+
   { "padding that wraps under 'breakindent' is drawn as tall as the row beside it", function()
     open_file("indent.lua")
     local old, new = pane("old"), pane("new")
