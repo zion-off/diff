@@ -4,6 +4,14 @@ local M = {}
 -- String truncation helpers (multibyte / display-width safe)
 -- ---------------------------------------------------------------------------
 
+--- Whether every character of `s` is one byte and one cell wide, as every
+--- ASCII character but NUL is to nvim_strwidth (it counts a control
+--- character, <Tab> included, as one cell, and stops at a NUL). Such a string
+--- is cut by byte, without asking Vimscript for character positions and widths.
+local function single_cells(s)
+  return not s:find("[%z\128-\255]")
+end
+
 --- Truncate a string to `max_len` display columns, appending "…" if truncated.
 --- Keeps the head of the string. Handles multibyte characters correctly.
 --- @param s       string
@@ -11,6 +19,9 @@ local M = {}
 --- @return string
 function M.trunc(s, max_len)
   if max_len <= 0 then return "" end
+  if single_cells(s) then
+    return #s <= max_len and s or s:sub(1, max_len - 1) .. "…"
+  end
   local display_w = vim.api.nvim_strwidth(s)
   if display_w <= max_len then return s end
   local result = vim.fn.strcharpart(s, 0, max_len - 1)
@@ -38,6 +49,9 @@ function M.trunc_middle(s, max_len)
   -- Favor the tail slightly (extensions live there).
   local head_budget = math.floor(budget / 2)
   local tail_budget = budget - head_budget
+  if single_cells(s) then
+    return s:sub(1, head_budget) .. "…" .. s:sub(#s - tail_budget + 1)
+  end
 
   -- Build the head up to head_budget display columns.
   local head = vim.fn.strcharpart(s, 0, head_budget)
