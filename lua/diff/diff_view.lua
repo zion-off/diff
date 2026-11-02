@@ -1444,7 +1444,9 @@ function M.refresh_content()
   if not (source and S.model) or S.opening then return end
   S.refresh_gen = S.refresh_gen + 1
   local gen, open_gen = S.refresh_gen, S.open_gen
+  local elapsed = require("diff.log").timer()
   content.load(root, source, function(old, new)
+    local load_ms = elapsed()
     if gen ~= S.refresh_gen or open_gen ~= S.open_gen or S.source ~= source then
       log.debug("dropping superseded refresh of %s", source.path)
       return
@@ -1462,13 +1464,16 @@ function M.refresh_content()
     end
     local focus = vim.api.nvim_get_current_win()
     local anchor, offset = capture_anchor(pane_of_win(focus) and focus or nil)
-    -- Carry the cursor line and expanded ranges over to the new content.
-    if anchor then
-      anchor.line = engine.line_mapper(S.model[anchor.side].lines, (anchor.side == "old" and old or new).lines)(anchor.line)
+    -- Carry the cursor line and expanded ranges over to the new content,
+    -- diffing each side at most once.
+    local mappers = {}
+    local function map(side, line)
+      mappers[side] = mappers[side] or engine.line_mapper(S.model[side].lines, (side == "old" and old or new).lines)
+      return mappers[side](line)
     end
-    local map_new = engine.line_mapper(S.model.new.lines, new.lines)
+    if anchor then anchor.line = map(anchor.side, anchor.line) end
     for _, range in ipairs(S.reveals) do
-      range[1], range[2] = map_new(range[1]), map_new(range[2])
+      range[1], range[2] = map("new", range[1]), map("new", range[2])
     end
     S.model = engine.compute(old, new)
     S.words = {}
@@ -1476,7 +1481,7 @@ function M.refresh_content()
     if S.sources.old and changed.old then S.sources.old:update(old.lines) end
     if S.sources.new and changed.new then S.sources.new:update(new.lines) end
     render(anchor, offset)
-    log.debug("refreshed %s in place", source.path)
+    log.debug("refreshed %s in place in %.1f ms (load %.1f ms)", source.path, elapsed(), load_ms)
   end)
 end
 

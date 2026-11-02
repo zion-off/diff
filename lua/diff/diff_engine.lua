@@ -374,6 +374,9 @@ end
 --- @param after  string[]
 --- @return fun(line: integer): integer
 function M.line_mapper(before, after)
+  if vim.deep_equal(before, after) then
+    return function(line) return math.max(1, line) end
+  end
   local hunks = vim.diff(join(before), join(after), { result_type = "indices", algorithm = "histogram" }) or {}
   return function(line)
     local shift = 0

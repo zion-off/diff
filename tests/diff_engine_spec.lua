@@ -200,6 +200,15 @@ return {
     H.eq({ map(2), map(3) }, { 2, 3 })
   end },
 
+  { "line mapper maps unchanged content to itself without diffing it", function()
+    local diffs, orig = 0, vim.diff
+    vim.diff = function(...) diffs = diffs + 1 return orig(...) end
+    local map = engine.line_mapper(H.lines(10), H.lines(10))
+    vim.diff = orig
+    H.eq(diffs, 0)
+    H.eq({ map(0), map(1), map(10), map(12) }, { 1, 1, 10, 12 })
+  end },
+
   { "identical files show everything", function()
     local m = compute(H.lines(10), H.lines(10))
     H.eq(#m.blocks, 0)
