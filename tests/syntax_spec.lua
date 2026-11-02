@@ -107,18 +107,86 @@ return {
   end },
 
   { "panes are drawn through the decoration provider", function()
-    local src = syntax.source("x.lua", LUA)
+    local chunk = syntax.CAPTURE_CHUNK
+    local lines = {}
+    for i = 1, 3 * chunk do lines[i] = LUA[(i - 1) % #LUA + 1] end
+    local src = syntax.source("x.lua", lines)
     src:parse()
     H.wait(function() return src.ready end, "parse")
     local pane = vim.api.nvim_create_buf(false, true)
-    -- The pane shows only source rows 6–7 behind a separator row.
-    vim.api.nvim_buf_set_lines(pane, 0, -1, false, { "", LUA[6], LUA[7] })
-    syntax.bind(pane, { src }, function(row) return ({ [1] = 5, [2] = 6 })[row] end)
+    -- The pane shows two source rows of the middle chunk behind a separator row.
+    local a, b = chunk + 5, chunk + 6
+    vim.api.nvim_buf_set_lines(pane, 0, -1, false, { "", lines[a + 1], lines[b + 1] })
+    syntax.bind(pane, { src }, function(row) return ({ [1] = a, [2] = b })[row] end)
     vim.api.nvim_win_set_buf(0, pane)
     vim.cmd("redraw")
-    H.ok(src.cache[5] and src.cache[6], "visible rows should have been queried")
-    H.eq(src.cache[0], nil, "rows not on screen must not be queried")
+    H.ok(src.cache[a] and src.cache[b], "visible rows should have been queried")
+    H.eq(src.cache[0], nil, "rows of chunks not on screen must not be queried")
+    H.eq(src.cache[2 * chunk], nil, "rows of chunks not on screen must not be queried")
     syntax.unbind(pane)
     src:destroy()
+  end },
+
+  { "captures queried a chunk at a time are those a query of each row finds", function()
+    local SKIP = { spell = true, nospell = true, conceal = true }
+    local prio_default = (vim.hl or vim.highlight).priorities.treesitter
+    local function row_by_row(src, row)
+      local out, text = {}, src.lines[row + 1] or ""
+      for _, t in ipairs(src.trees) do
+        local tsr, _, ter = t.root:range()
+        if row >= tsr and row <= ter then
+          for id, node, metadata in t.query:iter_captures(t.root, src.buf, row, row + 1) do
+            local name = t.query.captures[id]
+            if name:sub(1, 1) ~= "_" and not SKIP[name] then
+              local sr, sc, er, ec = node:range()
+              local ends_before = er < row or (er == row and ec == 0 and sr < row)
+              if sr <= row and not ends_before then
+                local scol = sr < row and 0 or sc
+                local ecol = er > row and #text or ec
+                if ecol > scol then
+                  local prio = tonumber(metadata.priority or (metadata[id] and metadata[id].priority))
+                  table.insert(out, { scol, ecol, "@" .. name .. "." .. t.lang, prio or prio_default })
+                end
+              end
+            end
+          end
+        end
+      end
+      return out
+    end
+    -- Overlapping captures of equal priority may come in another order.
+    local function sorted(caps)
+      local out = vim.deepcopy(caps)
+      table.sort(out, function(x, y)
+        for k = 1, 4 do
+          if x[k] ~= y[k] then return tostring(x[k]) < tostring(y[k]) end
+        end
+        return false
+      end)
+      return out
+    end
+    local function check(src, label)
+      for row = 0, #src.lines - 1 do
+        H.eq(sorted(src:captures(row)), sorted(row_by_row(src, row)), string.format("%s row %d", label, row))
+      end
+    end
+    -- The plugin's own sources: block comments, long strings and vim.cmd
+    -- strings (an injected language) spanning chunk boundaries.
+    local files = vim.api.nvim_get_runtime_file("lua/diff/*.lua", true)
+    H.ok(#files > 10, "plugin sources found")
+    for _, path in ipairs(files) do
+      local src = syntax.source(path, vim.fn.readfile(path))
+      src:parse()
+      H.wait(function() return src.ready end, "parse " .. path)
+      check(src, path)
+      local edited = vim.deepcopy(src.lines)
+      table.insert(edited, math.floor(#edited / 2), "--[[ opened")
+      table.insert(edited, math.floor(#edited / 2) + 40, "]]")
+      src.ready = false
+      src:update(edited)
+      H.wait(function() return src.ready end, "reparse " .. path)
+      check(src, path .. " (edited)")
+      src:destroy()
+    end
   end },
 }

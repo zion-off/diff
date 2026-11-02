@@ -185,36 +185,57 @@ function Source:parse()
   end
 end
 
---- Captures intersecting 0-based source row `row`, clipped to that row.
---- @return table[]  { start_col, end_col, hl_group, priority }
-function Source:captures(row)
-  local hit = self.cache[row]
-  if hit then return hit end
+-- Captures are collected for a whole chunk of rows at a time: a query run
+-- over one row costs nearly as much as one over sixty, since each run walks
+-- down from the root to its range. Chunks are aligned, so what a row gets
+-- never depends on which row was asked for first. Where two captures of
+-- equal priority overlap, the query may yield them in another order than a
+-- query over the row alone would, as Neovim's own highlighter's queries over
+-- the window do.
+M.CAPTURE_CHUNK = 64
 
-  local out = {}
-  local text = self.lines[row + 1] or ""
+--- Collect the captures of 0-based rows `first` to `last` into the cache,
+--- each clipped to its row, tree by tree in the order the query yields them.
+function Source:_collect_captures(first, last)
+  local cache = self.cache
+  for row = first, last do cache[row] = {} end
   for _, t in ipairs(self.trees) do
     local tsr, _, ter = t.root:range()
-    if row >= tsr and row <= ter then
-      for id, node, metadata in t.query:iter_captures(t.root, self.buf, row, row + 1) do
+    local lo, hi = math.max(first, tsr), math.min(last, ter)
+    if lo <= hi then
+      for id, node, metadata in t.query:iter_captures(t.root, self.buf, lo, hi + 1) do
         local name = t.query.captures[id]
         if name:sub(1, 1) ~= "_" and not SKIP_CAPTURE[name] then
           local sr, sc, er, ec = node:range()
-          local ends_before = er < row or (er == row and ec == 0 and sr < row)
-          if sr <= row and not ends_before then
-            local scol = sr < row and 0 or sc
-            local ecol = er > row and #text or ec
-            if ecol > scol then
-              local prio = tonumber(metadata.priority or (metadata[id] and metadata[id].priority))
-              table.insert(out, { scol, ecol, "@" .. name .. "." .. t.lang, prio or TS_PRIORITY })
+          local prio = tonumber(metadata.priority or (metadata[id] and metadata[id].priority)) or TS_PRIORITY
+          local hl = "@" .. name .. "." .. t.lang
+          for row = math.max(sr, lo), math.min(er, hi) do
+            -- A node ending at the start of a row does not reach into it.
+            if not (er == row and ec == 0 and sr < row) then
+              local scol = sr < row and 0 or sc
+              local ecol = er > row and #(self.lines[row + 1] or "") or ec
+              if ecol > scol then
+                local out = cache[row]
+                out[#out + 1] = { scol, ecol, hl, prio }
+              end
             end
           end
         end
       end
     end
   end
-  self.cache[row] = out
-  return out
+end
+
+--- Captures intersecting 0-based source row `row`, clipped to that row.
+--- @return table[]  { start_col, end_col, hl_group, priority }
+function Source:captures(row)
+  local hit = self.cache[row]
+  if hit then return hit end
+  local first = row - row % M.CAPTURE_CHUNK
+  local elapsed = require("diff.log").timer()
+  self:_collect_captures(first, first + M.CAPTURE_CHUNK - 1)
+  log.trace("captures of %s rows %d-%d in %.1f ms", self.lang, first, first + M.CAPTURE_CHUNK - 1, elapsed())
+  return self.cache[row]
 end
 
 -- Node-type substrings that qualify as a "section heading" (function, class,
