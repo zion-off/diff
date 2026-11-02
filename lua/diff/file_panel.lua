@@ -270,6 +270,19 @@ function M.render()
   apply_hover()
 end
 
+--- Draw `status` as the panel's working-tree changes, unless the panel
+--- already shows exactly that at its current width (most refreshes find
+--- nothing new, and on a large change list a render is not free).
+--- @return boolean drawn
+local function show_status(status)
+  local unchanged = not S.restore and valid() and S.width == vim.api.nvim_win_get_width(S.win)
+    and vim.deep_equal(status, S.status)
+  S.status = status
+  if unchanged then return false end
+  M.render()
+  return true
+end
+
 --- The mouse pointer is over row `lnr` (nil: not over this panel).
 function M.hover(lnr)
   if lnr == S.hover then return end
@@ -602,9 +615,9 @@ function M.refresh(preview, branch_mode, on_done)
         f.stat = stats and stats[section][f.path] or nil
       end
     end
-    S.status = status
-    M.render()
-    log.debug("refreshed: %d staged, %d unstaged in %.1f ms", #status.staged, #status.unstaged, elapsed())
+    local drawn = show_status(status)
+    log.debug("refreshed: %d staged, %d unstaged in %.1f ms%s", #status.staged, #status.unstaged, elapsed(),
+      drawn and "" or " (unchanged, not redrawn)")
     finish()
   end
 

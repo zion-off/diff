@@ -655,6 +655,34 @@ return {
     H.ok(#calls <= 8, #calls .. " git processes: " .. vim.inspect(calls))
   end },
 
+  { "a refresh that finds the same changes leaves the file panel as it is", function()
+    vim.wait(300)
+    local writes, watching = 0, true
+    vim.api.nvim_buf_attach(sidebar._file_buf, false, {
+      on_lines = function()
+        if not watching then return true end
+        writes = writes + 1
+      end,
+    })
+    local function refresh()
+      local done = false
+      fp.refresh(nil, false, function() done = true end)
+      H.wait(function() return done end, "file panel refresh")
+    end
+    refresh()
+    H.eq(writes, 0, "nothing changed, nothing redrawn")
+
+    -- Only a diffstat moves: still a change to show.
+    H.write(repo, "src/b.lua", "return 2\nreturn 3\n")
+    refresh()
+    watching = false
+    H.ok(writes > 0, "a changed diffstat is redrawn")
+    H.ok(vim.api.nvim_buf_get_lines(sidebar._file_buf, panel_row("b%.lua") - 1, panel_row("b%.lua"), false)[1]:find("+2", 1, true),
+      "b.lua shows its new stat")
+    H.write(repo, "src/b.lua", "return 2\n")
+    refresh()
+  end },
+
   { "the plugin's windows leave a global status line's fill characters alone", function()
     -- OptionSet is not fired during startup, which is when the specs run.
     local function laststatus(n)
