@@ -75,6 +75,19 @@ return {
     src:destroy()
   end },
 
+  { "the enclosing declaration follows an edit to the source", function()
+    local src = syntax.source("x.lua", LUA)
+    src:parse()
+    H.wait(function() return src.ready end, "parse")
+    H.eq(src:enclosing_decl(7), "local function greet(name)")
+    H.eq(src:enclosing_decl(7), "local function greet(name)", "asked again")
+    local edited = vim.deepcopy(LUA)
+    edited[5] = "local function welcome(name, place)"
+    src:update(edited)
+    H.wait(function() return src:enclosing_decl(7) == "local function welcome(name, place)" end, "renamed after the reparse")
+    src:destroy()
+  end },
+
   { "content-dependent filetypes are detected from the source", function()
     local src = syntax.source("scripts/run", { "#!/usr/bin/env python3", "print(1)" })
     H.eq(src.ft, "python")

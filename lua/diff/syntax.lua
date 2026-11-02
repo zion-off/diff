@@ -69,9 +69,10 @@ function M.source(path, lines, ft)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
 
   local self = setmetatable({
-    buf = buf, lines = lines, cache = {}, trees = {},
+    buf = buf, lines = lines, trees = {},
     ready = false, gen = 0, listeners = {},
   }, Source)
+  self:_forget_rows()
   self.ft = ft or detect_ft(path, buf)
 
   if self.ft ~= "" then
@@ -105,8 +106,8 @@ function Source:update(lines)
   local hunks = vim.diff(join(self.lines), join(lines), { result_type = "indices" }) or {}
   if #hunks == 0 then return end
   self.lines = lines
-  -- Rows below an edit move: drop captures cached by row.
-  self.cache = {}
+  -- Rows below an edit move.
+  self:_forget_rows()
   if #hunks > MAX_INCREMENTAL_HUNKS then
     vim.api.nvim_buf_set_lines(self.buf, 0, -1, false, lines)
   else
@@ -128,8 +129,14 @@ function Source:on_ready(fn)
   table.insert(self.listeners, fn)
 end
 
+--- Drop everything cached by row: captures and enclosing declarations.
+function Source:_forget_rows()
+  self.cache, self.decls = {}, {}
+end
+
 function Source:_collect()
-  self.trees, self.cache, self.root = {}, {}, nil
+  self.trees, self.root = {}, nil
+  self:_forget_rows()
   local main = self.parser:trees()[1]
   self.root = main and main:root() or nil
   self.parser:for_each_tree(function(tstree, ltree)
@@ -231,10 +238,7 @@ local function node_is_decl(t)
   return false
 end
 
---- The signature line of the declaration enclosing 1-based `line`, or nil.
---- @return string|nil
-function Source:enclosing_decl(line)
-  if not (self.ready and self.root and line) then return nil end
+local function find_decl(self, line)
   local ok, node = pcall(self.root.descendant_for_range, self.root, line - 1, 0, line - 1, 0)
   if not ok then return nil end
   while node do
@@ -245,6 +249,20 @@ function Source:enclosing_decl(line)
     node = node:parent()
   end
   return nil
+end
+
+--- The signature line of the declaration enclosing 1-based `line`, or nil.
+--- Remembered until the content or its parse changes: every redraw of the
+--- hunk headers asks again.
+--- @return string|nil
+function Source:enclosing_decl(line)
+  if not (self.ready and self.root and line) then return nil end
+  local hit = self.decls[line]
+  if hit == nil then
+    hit = find_decl(self, line) or false
+    self.decls[line] = hit
+  end
+  return hit or nil
 end
 
 function Source:destroy()
