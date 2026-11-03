@@ -15,12 +15,12 @@ A NeoVim plugin that replicates the Git source-control UX of VSCode's SCM sideba
 | **Mode bar** | A strip above the sidebar shows the branch you're looking at and the file panel's mode; click to switch either |
 | **Branch changes** | Press `<leader>gB` to see everything the branch changed since it left `main`, like a pull request's "Files changed" tab |
 | **Branch preview** | Browse another branch's commits without checking it out — pick from a floating list with `<leader>gb` |
-| **Split Diff View** | Side-by-side old/new diff computed in-process with Neovim's built-in xdiff — no `git diff` subprocess |
+| **Split Diff View** | Side-by-side old/new diff computed in-process with Neovim's built-in xdiff — no `git diff` subprocess. An edited line sits beside its new version; a rewrite, or a line split over several, reads as removed lines beside added ones, top-aligned as on GitHub |
 | **Unified Diff View** | GitHub-style single column: old and new line numbers, removed lines above added ones; toggle with `<leader>gv` |
 | **Hunk headers** | Each run of lines is headed by its `@@ -12,7 +12,9 @@` range and the function it is in, as on GitHub; click one to reveal the lines hidden above it |
 | **Accurate syntax highlighting** | Tree-sitter parses each whole file once (asynchronously on 0.11+), so collapsed context never breaks highlighting |
 | **Line-level colours** | Subtle red for removed, green for added — layered on top of syntax colours |
-| **Word-level highlights** | Darker red/green marks the exact tokens that changed within a line |
+| **Word-level highlights** | Darker red/green marks the exact tokens that changed within a line, when the two lines are mostly alike (between different lines they would mark nearly everything) |
 | **Filler lines** | Grey visual-only placeholders, across the gutter too, keep both panes aligned |
 | **Real line numbers** | The gutter shows file line numbers, not pane row numbers |
 | **Scroll sync** | Split panes stay locked together, whether you scroll with the keyboard, the mouse wheel over either pane, or with `smoothscroll` on |

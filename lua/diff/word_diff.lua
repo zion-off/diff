@@ -6,39 +6,34 @@ local TOKEN_CAP = 300 -- max tokens per side before capping LCS work
 -- Tokenize
 -- ---------------------------------------------------------------------------
 
---- Split a string into tokens: word-char runs, whitespace runs, or single chars.
---- @param  s      string
---- @return string[]
---- @param max integer|nil  stop after this many tokens
-function M.tokenize(s, max)
+--- Split `s` into tokens: runs matching `word`, whitespace runs, or single
+--- other characters, stopping after `max` tokens.
+local function split(s, max, word)
   local tokens = {}
   local i = 1
   local len = #s
   max = max or math.huge
 
   while i <= len and #tokens < max do
-    -- Word characters
-    local w_start, w_end = s:find("^%w+", i)
-    if w_start then
-      table.insert(tokens, s:sub(w_start, w_end))
-      i = w_end + 1
-
-    else
-      -- Whitespace run
-      local sp_start, sp_end = s:find("^%s+", i)
-      if sp_start then
-        table.insert(tokens, s:sub(sp_start, sp_end))
-        i = sp_end + 1
-
-      else
-        -- Single character (punctuation, etc.)
-        table.insert(tokens, s:sub(i, i))
-        i = i + 1
-      end
-    end
+    local _, e = s:find(word, i)
+    if not e then _, e = s:find("^%s+", i) end
+    e = e or i -- a single character (punctuation, etc.)
+    tokens[#tokens + 1] = s:sub(i, e)
+    i = e + 1
   end
 
   return tokens
+end
+
+--- Split a string into tokens: identifiers (letters, digits and underscores)
+--- whole, whitespace runs, or single characters. A changed identifier is
+--- marked whole, snake_case or camelCase alike. Bytes of non-ASCII
+--- characters count as letters, so a mark never cuts a character in two.
+--- @param  s      string
+--- @param  max    integer|nil  stop after this many tokens
+--- @return string[]
+function M.tokenize(s, max)
+  return split(s, max, "^[%w_\128-\255]+")
 end
 
 -- ---------------------------------------------------------------------------
@@ -128,6 +123,153 @@ local function backtrack(t, old, new, m, n, width)
 end
 
 -- ---------------------------------------------------------------------------
+-- similar
+-- ---------------------------------------------------------------------------
+
+-- Two lines are alike when at least this share of the longer one, in
+-- non-whitespace bytes, is unchanged.
+M.SIMILARITY = 0.5
+
+--- Non-whitespace bytes of a token.
+local function weight(tok)
+  return tok:find("^%s") and 0 or #tok
+end
+
+--- Non-whitespace bytes in `tokens`.
+local function solid_bytes(tokens)
+  local n = 0
+  for _, tok in ipairs(tokens) do n = n + weight(tok) end
+  return n
+end
+
+--- Non-whitespace bytes of the longest common subsequence of two token
+--- lists. A shared start and end are part of it and are counted without the
+--- table, which keeps two rows over only what lies between.
+local function common_bytes(x, y)
+  local total, first, mx, my = 0, 1, #x, #y
+  while first <= mx and first <= my and x[first] == y[first] do
+    total = total + weight(x[first])
+    first = first + 1
+  end
+  while mx >= first and my >= first and x[mx] == y[my] do
+    total = total + weight(x[mx])
+    mx, my = mx - 1, my - 1
+  end
+  if mx < first or my < first then return total end
+
+  local prev, cur = {}, {}
+  for j = first - 1, my do prev[j] = 0 end
+  cur[first - 1] = 0
+  for i = first, mx do
+    local tok = x[i]
+    local w = weight(tok)
+    for j = first, my do
+      if tok == y[j] then
+        cur[j] = prev[j - 1] + w
+      else
+        local up, left = prev[j], cur[j - 1]
+        cur[j] = up > left and up or left
+      end
+    end
+    prev, cur = cur, prev
+  end
+  return total + prev[my]
+end
+
+--- The non-whitespace tokens of a list, counted.
+local function bag_of(tokens)
+  local bag = {}
+  for _, tok in ipairs(tokens) do
+    if weight(tok) > 0 then bag[tok] = (bag[tok] or 0) + 1 end
+  end
+  return bag
+end
+
+--- Take the tokens of `tokens` found in `bag` out of it; returns their bytes.
+local function take(bag, tokens)
+  local n = 0
+  for _, tok in ipairs(tokens) do
+    local c = bag[tok]
+    if c and c > 0 then
+      bag[tok] = c - 1
+      n = n + #tok
+    end
+  end
+  return n
+end
+
+--- An upper bound on common_bytes, in one pass: the non-whitespace tokens the
+--- lists share, in any order. Different lines fail on it without the table.
+local function shared_bytes(x, y)
+  return take(bag_of(x), y)
+end
+
+--- Tokens for measuring likeness: split at underscores too, so `user_id` ->
+--- `user_name` keeps its `user_`.
+local function measure_tokens(s)
+  return split(s, TOKEN_CAP, "^[%w\128-\255]+")
+end
+
+--- Whether two token lists are alike (see M.similar).
+local function alike(old, new)
+  local lo, ln = solid_bytes(old), solid_bytes(new)
+  local need = M.SIMILARITY * math.max(lo, ln)
+  if need == 0 then return true end
+  -- The common part is no longer than the shorter line, nor than what the
+  -- two share in any order.
+  if math.min(lo, ln) < need or shared_bytes(old, new) < need then return false end
+  return common_bytes(old, new) >= need
+end
+
+--- Whether two lines are versions of one line rather than different lines:
+--- at least M.SIMILARITY of the longer one is unchanged.
+--- @param  old_line string
+--- @param  new_line string
+--- @return boolean
+function M.similar(old_line, new_line)
+  return alike(measure_tokens(old_line), measure_tokens(new_line))
+end
+
+-- A line is one piece of a longer one when the lines around it, each made
+-- at least this much of what it lacks of the longer line, hold at least
+-- this much of that.
+M.PIECE = 0.5
+
+--- Whether `old_line` became `new_line`, so that the two belong on one row:
+--- they are alike, and the shorter is not one piece of the longer. A line
+--- split over several (or several joined into one) is alike to its largest
+--- piece, but the lines around that piece are made of the rest of it:
+--- `process(` and `)` around the arguments of a call opened up. The lines
+--- around an edited line are not, though they may share a `,` or a name.
+--- Tokens are counted in any order.
+--- @param old_around {before: string|nil, after: string|nil}  lines next to old_line
+--- @param new_around {before: string|nil, after: string|nil}  lines next to new_line
+--- @return boolean
+function M.same_line(old_line, new_line, old_around, new_around)
+  local old, new = measure_tokens(old_line), measure_tokens(new_line)
+  if not alike(old, new) then return false end
+  local whole, piece, around = old, new, new_around
+  if solid_bytes(new) > solid_bytes(old) then
+    whole, piece, around = new, old, old_around
+  end
+  -- What of `whole` the piece lacks.
+  local rest = bag_of(whole)
+  local lacking = solid_bytes(whole) - take(rest, piece)
+  if lacking == 0 then return true end
+  local found = 0
+  for _, line in ipairs({ around.before or "", around.after or "" }) do
+    local tokens = measure_tokens(line)
+    local trial = {}
+    for tok, c in pairs(rest) do trial[tok] = c end
+    local n = take(trial, tokens)
+    if n > 0 and n >= M.PIECE * solid_bytes(tokens) then
+      found, rest = found + n, trial
+    end
+  end
+  return found < M.PIECE * lacking
+end
+
+-- ---------------------------------------------------------------------------
 -- compute
 -- ---------------------------------------------------------------------------
 
@@ -152,12 +294,16 @@ end
 --- Compute word-level diff between two strings.
 --- Returns two lists of {start_col, end_col} (0-indexed byte offsets) marking
 --- the non-whitespace tokens that differ on each side; changed tokens with
---- only whitespace between them form one range.
+--- only whitespace between them form one range. Lines that are not alike
+--- (see M.similar) get no marks: between different lines they would mark
+--- nearly everything, and the few tokens left unmarked match by chance.
 ---
 --- @param  old_line string
 --- @param  new_line string
 --- @return table[], table[]   old_ranges, new_ranges
 function M.compute(old_line, new_line)
+  if not M.similar(old_line, new_line) then return {}, {} end
+
   -- Capped to keep the O(m*n) LCS bounded; tokenizing stops there too.
   local old_capped = M.tokenize(old_line, TOKEN_CAP)
   local new_capped = M.tokenize(new_line, TOKEN_CAP)

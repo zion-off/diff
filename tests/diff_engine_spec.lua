@@ -58,7 +58,7 @@ local function git_hunks(a, b, ctx)
   vim.fn.mkdir(dir, "p")
   H.write(dir, "a", H.text(a))
   H.write(dir, "b", H.text(b))
-  local out = vim.fn.systemlist({ "git", "-C", dir, "diff", "--no-index", "--histogram",
+  local out = vim.fn.systemlist({ "git", "-C", dir, "diff", "--no-index", "--no-ext-diff", "--histogram",
     "--indent-heuristic", "-U" .. ctx, "--", "a", "b" })
   local hunks, started = {}, false
   for _, l in ipairs(out) do
@@ -122,6 +122,108 @@ return {
       end
     end
     H.eq(pairs_found, 2)
+  end },
+
+  { "a rewrite reads as removed lines beside added ones, top-aligned", function()
+    -- One call split over several lines: no old line is a version of a new
+    -- one, so none is paired by likeness and the filler gathers at the bottom.
+    local a = {
+      "    validate(config)",
+      "    store = Store(conn)",
+      "    item = store.save(",
+      "        alpha, beta, payload.to_dict(skip_empty=True), session.owner",
+      "    )",
+    }
+    local b = {
+      "    validate(config)",
+      "    item = Saver(conn).save_item(",
+      "        alpha,",
+      "        beta,",
+      "        payload.to_dict(skip_empty=True),",
+      "        session.owner,",
+      "        extra=extra,",
+      "    )",
+    }
+    local m = compute(a, b)
+    check_invariants(m)
+    local pairs = {}
+    for _, row in ipairs(m.rows) do table.insert(pairs, { row.old or 0, row.new or 0 }) end
+    H.eq(pairs, { { 1, 1 }, { 2, 2 }, { 3, 3 }, { 4, 4 }, { 0, 5 }, { 0, 6 }, { 0, 7 }, { 5, 8 } })
+    H.eq(#m.blocks, 1)
+
+    -- The other way round, the lines are joined into one: the same layout,
+    -- with the filler on the left.
+    m = compute(b, a)
+    check_invariants(m)
+    pairs = {}
+    for _, row in ipairs(m.rows) do table.insert(pairs, { row.old or 0, row.new or 0 }) end
+    H.eq(pairs, { { 1, 1 }, { 2, 2 }, { 3, 3 }, { 4, 4 }, { 5, 0 }, { 6, 0 }, { 7, 0 }, { 8, 5 } })
+    local word_diff = require("diff.word_diff")
+    for r = 2, 4 do
+      H.eq({ word_diff.compute(a[r], b[r]) }, { {}, {} }, "row " .. r .. " pairs unlike lines: no marks")
+    end
+  end },
+
+  { "lines alike keep their rows; the unlike ones between pair by position", function()
+    local m = compute(
+      { "  foo(a, b)", "  x = completely()", "  bar(x)" },
+      { "  foo(a, b, c)", "  inserted()", "  another(1)", "  bar(x, y)" })
+    check_invariants(m)
+    local pairs = {}
+    for _, row in ipairs(m.rows) do table.insert(pairs, { row.old or 0, row.new or 0 }) end
+    H.eq(pairs, { { 1, 1 }, { 2, 2 }, { 0, 3 }, { 3, 4 } })
+  end },
+
+  { "a call or literal opened up around its contents reads top-aligned", function()
+    local function rows_of(m)
+      local pairs = {}
+      for _, row in ipairs(m.rows) do table.insert(pairs, { row.old or 0, row.new or 0 }) end
+      return pairs
+    end
+    for _, case in ipairs({
+      { "    process(alpha_value, beta_value, gamma_value, delta_value)",
+        { "    process(", "        alpha_value, beta_value, gamma_value, delta_value", "    )" } },
+      { '    config = {"name": user_name, "email": user_email, "active": True}',
+        { "    config = {", '        "name": user_name, "email": user_email, "active": True', "    }" } },
+    }) do
+      local a = { "start()", case[1], "finish()" }
+      local b = { "start()", case[2][1], case[2][2], case[2][3], "finish()" }
+      local m = compute(a, b)
+      check_invariants(m)
+      H.eq(rows_of(m), { { 1, 1 }, { 2, 2 }, { 0, 3 }, { 0, 4 }, { 3, 5 } }, case[1])
+      m = compute(b, a)
+      check_invariants(m)
+      H.eq(rows_of(m), { { 1, 1 }, { 2, 2 }, { 3, 0 }, { 4, 0 }, { 5, 3 } }, "joined: " .. case[1])
+    end
+  end },
+
+  { "a region at the top of the file keeps an inserted first line in place", function()
+    local m = compute({ "  foo(a, b)", "  bar(x)" }, { "  fresh()", "  foo(a, b, c)", "  bar(x, y)" })
+    check_invariants(m)
+    local pairs = {}
+    for _, row in ipairs(m.rows) do table.insert(pairs, { row.old or 0, row.new or 0 }) end
+    H.eq(pairs, { { 0, 1 }, { 1, 2 }, { 2, 3 } })
+  end },
+
+  { "a one-for-one rewrite measures no pairs", function()
+    -- Pairs at their own place need no measuring: this is what keeps the
+    -- check off the cost of ordinary diffs.
+    local word_diff = require("diff.word_diff")
+    local real, calls = word_diff.same_line, 0
+    word_diff.same_line = function(...) calls = calls + 1 return real(...) end
+    local a, b = {}, {}
+    for i = 1, 2000 do
+      a[#a + 1] = "  local value_" .. i .. " = compute(alpha, beta, gamma, " .. i .. ")"
+      a[#a + 1] = "  result_" .. i .. " = transform(value_" .. i .. ", options)"
+      b[#b + 1] = "  local value_" .. i .. " = calc(alpha, beta, gamma, delta, " .. i .. ")"
+      b[#b + 1] = "  output_" .. i .. " = reshape(value_" .. i .. ", settings, extra)"
+      a[#a + 1] = "  -- " .. i
+      b[#b + 1] = "  -- " .. i
+    end
+    local ok, err = pcall(function() check_invariants(compute(a, b)) end)
+    word_diff.same_line = real
+    assert(ok, err)
+    H.eq(calls, 0)
   end },
 
   { "layout collapses distant context and reveal expands one gap only", function()
@@ -319,10 +421,54 @@ return {
 
   { "word diff marks a changed phrase as one range, not word by word", function()
     local word_diff = require("diff.word_diff")
-    local old, new = word_diff.compute("call(alpha beta, 1)", "call(gamma delta, 1)")
+    local old, new = word_diff.compute("call(alpha beta, first, second)", "call(gamma delta, first, second)")
     H.eq(old, { { start_col = 5, end_col = 15 } })
     H.eq(new, { { start_col = 5, end_col = 16 } })
     old = word_diff.compute("a = 1", "a = 2")
     H.eq(old, { { start_col = 4, end_col = 5 } }, "separate changes stay separate")
+  end },
+
+  { "word diff marks whole identifiers, and only between lines alike", function()
+    local word_diff = require("diff.word_diff")
+    local old, new = word_diff.compute("x = user_id + 1", "x = user_name + 1")
+    H.eq(old, { { start_col = 4, end_col = 11 } }, "snake_case is one token")
+    H.eq(new, { { start_col = 4, end_col = 13 } })
+    -- `user` must not match inside `user_id`.
+    old, new = word_diff.compute("f(user, other_arg)", "f(user_id, other_arg)")
+    H.eq(old, { { start_col = 2, end_col = 6 } })
+    H.eq(new, { { start_col = 2, end_col = 9 } })
+
+    H.ok(word_diff.similar("local a = 1", "local a = 10"))
+    H.ok(word_diff.similar("user_id = 1", "user_name = 1"), "likeness reads inside identifiers")
+    H.ok(word_diff.similar("    foo", "foo"), "indentation alone is alike")
+    H.ok(word_diff.similar("", "  "), "blank lines are alike")
+    H.ok(not word_diff.similar("", "foo"))
+    H.ok(not word_diff.similar("return nil", "log.debug(msg)"))
+    H.ok(not word_diff.similar("    item = store.save(", "        item_id,"))
+    H.eq({ word_diff.compute("return nil", "log.debug(msg)") }, { {}, {} })
+
+    -- A split line is alike to its largest piece, but its other pieces sit
+    -- around that one; an edited line's neighbours add nothing of it.
+    local whole = "    alpha, beta, payload.to_dict(skip_empty=True), session.owner"
+    local piece = "        payload.to_dict(skip_empty=True),"
+    H.ok(word_diff.similar(whole, piece))
+    H.ok(not word_diff.same_line(whole, piece, {}, { before = "        beta,", after = "        session.owner," }))
+    H.ok(not word_diff.same_line(piece, whole, { before = "        beta,", after = "        session.owner," }, {}),
+      "a join is a split read backwards")
+    H.ok(word_diff.same_line(whole, piece, {}, {}), "with nothing around it, the piece is the line")
+    H.ok(word_diff.same_line("  foo(a, b)", "  foo(a, b, c)", { after = "  x = completely()" },
+      { before = "  first()", after = "  inserted()" }))
+    -- Neighbours that share a stray `,` or name with an edited line do not
+    -- make it a piece.
+    H.ok(word_diff.same_line("  call(a, b)", "  call(a, b, d)", { after = "  call(a, c)" }, {}))
+    H.ok(word_diff.same_line("  foo(a, b)", "  foo(a, b, c)", { after = "  bar(x, y)" }, {}))
+    H.ok(word_diff.same_line("", "    ", {}, { before = "  foo()" }), "blank lines stay together")
+
+    -- Non-ASCII words are whole tokens: unrelated comments are not alike, and
+    -- a mark never cuts a character in two.
+    H.ok(not word_diff.similar("// проверить настройки", "// вернуть результат"))
+    old, new = word_diff.compute("x = 'café' .. name", "x = 'thé' .. name")
+    H.eq(old, { { start_col = 5, end_col = 10 } })
+    H.eq(new, { { start_col = 5, end_col = 9 } })
   end },
 }

@@ -1,9 +1,9 @@
 --- diff.nvim — diff model and display layout.
 ---
 --- The model is computed in-process with Neovim's built-in xdiff (vim.diff),
---- so opening a diff needs no `git diff` subprocess and no Lua similarity
---- matching. linematch pairs the lines of a changed region so that modified
---- lines sit side by side.
+--- so opening a diff needs no `git diff` subprocess. linematch pairs the
+--- lines of a changed region so that modified lines sit side by side; only
+--- its pairs of one line edited are kept (see keep_edited_pairs).
 ---
 --- Model:
 ---   rows   — one entry per display row of the fully expanded diff:
@@ -14,6 +14,8 @@
 ---            { first, last, old_first, old_count, new_first, new_count }
 ---            first/last are row indices; *_first is the first line of the
 ---            block on that side (for an empty side, the line it would occupy).
+local word_diff = require("diff.word_diff")
+
 local M = {}
 
 -- linematch is quadratic in the size of a region: measured at ~3 ms for an
@@ -26,6 +28,11 @@ M.LINEMATCH_MAX = 80
 -- regions are paired by position: a diff with hundreds of rewritten regions
 -- should open promptly rather than pair every one of them perfectly.
 M.LINEMATCH_BUDGET = 40000
+
+-- Total work allowed per diff for telling which of linematch's pairs are one
+-- line edited, in old×new bytes summed over the pairs measured (two 80-byte
+-- lines cost 6400). Past it linematch's pairs are kept as it made them.
+M.LIKENESS_BUDGET = 4000000
 
 -- Hidden runs shorter than this are shown rather than collapsed: between two
 -- runs, showing them takes no more rows than the hunk header that would hide
@@ -49,8 +56,88 @@ end
 --- size (1.3 s for 5000 one-line edits in 20k lines); on the region's own
 --- lines it costs only the region. A one-line-for-one-line region needs no
 --- pairing.
+---
+--- linematch pairs every line it can, alike or not, and leaves a filler
+--- inside the block wherever that pairing needs one. Only the pairs that are
+--- one line edited (word_diff.same_line) are kept: alike, and not a line
+--- paired with one piece of itself after a split or join. The lines between
+--- them are paired by position, top-aligned with any filler at the bottom, as
+--- GitHub lays out a rewrite. A rewritten region with no such pair reads as
+--- one block of removed lines beside one block of added lines.
+---
+--- @param h      integer[]   the region, as vim.diff reports it
+--- @param sub    integer[][] linematch's hunks within it, in file lines
+--- @param budget {left: integer}  measuring left for the diff (LIKENESS_BUDGET)
+--- @return integer[][]   hunks covering the region
+local function keep_edited_pairs(h, sub, a, b, budget)
+  local old_first = h[2] > 0 and h[1] or h[1] + 1
+  local new_first = h[4] > 0 and h[3] or h[3] + 1
+  local old_end, new_end = old_first + h[2], new_first + h[4]
+
+  -- Lines that stay on one row: edited pairs, and lines the region's own diff
+  -- found equal (they fall between linematch's hunks and stay context).
+  -- A pair as far from the last anchor on both sides lands on one row when
+  -- the lines after that anchor are paired by position, kept or not: only
+  -- the pairs off that diagonal need measuring, and in most edits there are
+  -- none. Measuring is charged to `budget`; once it runs out, linematch's
+  -- pairs are kept as it made them.
+  local anchors = {}
+  local o, n = old_first, new_first
+  local last_o, last_n = old_first - 1, new_first - 1
+  local function anchor(i, j, equal)
+    anchors[#anchors + 1] = { i, j, equal }
+    last_o, last_n = i, j
+  end
+  local function equal_until(old_stop)
+    while o < old_stop do
+      anchor(o, n, true)
+      o, n = o + 1, n + 1
+    end
+  end
+  for _, s in ipairs(sub) do
+    local so = s[2] > 0 and s[1] or s[1] + 1
+    local sn = s[4] > 0 and s[3] or s[3] + 1
+    equal_until(so)
+    for k = 0, math.min(s[2], s[4]) - 1 do
+      local i, j = so + k, sn + k
+      if i - last_o ~= j - last_n then
+        local cost = #a[i] * #b[j]
+        if cost > budget.left then
+          anchor(i, j, false)
+        else
+          budget.left = budget.left - cost
+          local old_around = { before = i > old_first and a[i - 1] or nil, after = i + 1 < old_end and a[i + 1] or nil }
+          local new_around = { before = j > new_first and b[j - 1] or nil, after = j + 1 < new_end and b[j + 1] or nil }
+          if word_diff.same_line(a[i], b[j], old_around, new_around) then anchor(i, j, false) end
+        end
+      end
+    end
+    o, n = so + s[2], sn + s[4]
+  end
+  equal_until(old_end)
+
+  local out = {}
+  o, n = old_first, new_first
+  -- The lines before (old_stop, new_stop) not yet covered, as one hunk.
+  local function rest_until(old_stop, new_stop)
+    local oc, nc = old_stop - o, new_stop - n
+    if oc > 0 or nc > 0 then
+      out[#out + 1] = { oc > 0 and o or o - 1, oc, nc > 0 and n or n - 1, nc }
+    end
+  end
+  for _, anchor in ipairs(anchors) do
+    local ao, an, equal = anchor[1], anchor[2], anchor[3]
+    rest_until(ao, an)
+    if not equal then out[#out + 1] = { ao, 1, an, 1 } end
+    o, n = ao + 1, an + 1
+  end
+  rest_until(old_end, new_end)
+  return out
+end
+
 local function linematch_regions(raw, a, b)
   local out, budget = {}, M.LINEMATCH_BUDGET
+  local likeness = { left = M.LIKENESS_BUDGET }
   for _, h in ipairs(raw) do
     local oc, nc = h[2], h[4]
     local work = oc * nc
@@ -63,8 +150,11 @@ local function linematch_regions(raw, a, b)
       }) or {}
       -- Back to file line numbers (an empty side still names the line before
       -- its gap, possibly the line before the region).
-      for _, s in ipairs(sub) do
-        table.insert(out, { s[1] + h[1] - 1, s[2], s[3] + h[3] - 1, s[4] })
+      for i, s in ipairs(sub) do
+        sub[i] = { s[1] + h[1] - 1, s[2], s[3] + h[3] - 1, s[4] }
+      end
+      for _, kept in ipairs(keep_edited_pairs(h, sub, a, b, likeness)) do
+        table.insert(out, kept)
       end
     else
       table.insert(out, h)
