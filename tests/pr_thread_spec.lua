@@ -90,10 +90,13 @@ return {
     pr_thread.close()
   end },
 
-  { "K, which opens it, closes it, and so does leaving it", function()
+  { "the key that opens it closes it, as do K and leaving it", function()
     local s = open()
     local footer = vim.inspect(vim.api.nvim_win_get_config(s.win).footer)
     H.ok(footer:find("q close", 1, true), footer)
+    feed("<leader>C")
+    H.eq(pr_thread.is_open(), false, "<leader>C closes")
+    open()
     feed("K")
     H.eq(pr_thread.is_open(), false, "K closes")
     local behind = vim.api.nvim_get_current_win()

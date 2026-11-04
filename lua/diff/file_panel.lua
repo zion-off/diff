@@ -324,9 +324,17 @@ local function to_source(file, section)
   }
 end
 
+local function section_of(source)
+  return source.kind == "range" and "branch" or source.staged and "staged" or "unstaged"
+end
+
+--- The files the diff view moves between: the panel section of the file it
+--- shows (see diff_view.open).
+M.navigator = {}
+
 --- Next/previous file in display order within the same section.
-function M.navigator(source, dir)
-  local section = source.kind == "range" and "branch" or source.staged and "staged" or "unstaged"
+function M.navigator.step(source, dir)
+  local section = section_of(source)
   local files = ordered_files(section)
   for i, f in ipairs(files) do
     if f.path == source.path then
@@ -335,6 +343,19 @@ function M.navigator(source, dir)
   end
   -- The current file has left this section (e.g. it was fully staged).
   return files[1] and to_source(files[1], section) or nil
+end
+
+--- The file at repo-relative `path` among the changes `source` is one of:
+--- its own section, else, for working-tree changes, the other one.
+function M.navigator.find(source, path)
+  local section = section_of(source)
+  local sections = { section }
+  if section ~= "branch" then table.insert(sections, section == "staged" and "unstaged" or "staged") end
+  for _, s in ipairs(sections) do
+    for _, f in ipairs(section_files(s)) do
+      if f.path == path then return to_source(f, s) end
+    end
+  end
 end
 
 -- ---------------------------------------------------------------------------

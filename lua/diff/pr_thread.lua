@@ -10,7 +10,7 @@
 --- Keys act on what the cursor is in: r replies to the thread, R resolves or
 --- reopens it, e edits the comment, x deletes it (twice: the first press asks
 --- to confirm), Enter presses the button under the cursor, Tab moves between
---- buttons, and q, Esc or K (which opened it) closes it. Moving to another
+--- buttons, and q, Esc, K or the key that opened it closes it. Moving to another
 --- window closes it too, except to the editor it opened for a reply or an
 --- edit. The border lists the keys. The float follows the review: when it changes,
 --- the threads are read again from `opts.threads()`, and the float closes when
@@ -249,6 +249,9 @@ function M.open(opts)
   map("<S-Tab>", function() s.target:step(-1) end)
   map("q", M.close)
   map("<Esc>", M.close)
+  -- The key that opens it closes it.
+  local show_key = require("diff.config").get().keymaps.show_comments
+  if show_key and show_key ~= "" then map(show_key, M.close) end
   -- Unmapped, K would fall through to 'keywordprg' (man) on the word under the cursor.
   map("K", M.close)
 

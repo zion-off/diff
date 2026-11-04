@@ -29,6 +29,7 @@ A NeoVim plugin that replicates the Git source-control UX of VSCode's SCM sideba
 | **Hunk staging** | Stage or unstage the change under the cursor straight from the diff |
 | **Live updates** | Panels follow `git` activity from anywhere (CLI, other tools); the open diff follows edits on disk, keeping your place |
 | **Fast navigation** | `]f` / `[f` move between files, `gf` jumps to the real file at the same line |
+| **Go to definition, hover** | `gd` asks your language server and stays in the review: the definition's line in this diff, the diff of another changed file, or a preview of an unchanged one; `<C-o>` comes back. `K` shows what the symbol is (see [Go to Definition and Hover](#go-to-definition-and-hover)) |
 | **Annotation notes** | Select lines, press `<leader>n`, type a note — saved to an XDG Markdown file |
 | **Notes panel** | Toggle with `<leader>N`; `dd` deletes a note, `q` closes |
 | **Pull request review** | With `gh` logged in, read and write review comments on the branch's pull request, reply, resolve, and submit the review (see [Pull Request Review](#pull-request-review)) |
@@ -137,12 +138,15 @@ require("diff").setup({
     next_file            = "]f",
     prev_file            = "[f",
     goto_file            = "gf",
+    goto_definition      = "gd",
+    hover                = "K",
+    jump_back            = "<C-o>",  -- back from a definition jump; elsewhere what <C-o> does anyway
     stage_hunk           = "s",
     unstage_hunk         = "u",
     leave_note           = "<leader>n",
     leave_comment        = "<leader>c",
     submit_comment       = "<CR>",   -- in the comment editor, normal mode
-    show_comments        = "K",
+    show_comments        = "<leader>C",
     open_review          = "<leader>gr",
     toggle_notes         = "<leader>N",
     preview_branch       = "<leader>gb",
@@ -221,6 +225,9 @@ Opened with `<leader>gb` (or `:DiffNvimPreviewBranch`).
 | `]c` / `[c` | Next / previous change |
 | `]f` / `[f` | Next / previous file (same panel section, or same commit) |
 | `gf` | Open the real file at this line, in the window the interface was opened from |
+| `gd` | Go to the definition of the symbol under the cursor (see [Go to Definition and Hover](#go-to-definition-and-hover)) |
+| `K` | Show what the symbol under the cursor is, from your language server; `K` again moves into the float |
+| `<C-o>` | Back to where the last `gd` left from; with none, Neovim's own `<C-o>` |
 | `s` | Stage the change under the cursor (unstaged working-tree diffs) |
 | `u` | Unstage the change under the cursor (staged diffs) |
 | `l` / `zo` | Reveal 10 more lines at each edge of the lines hidden above the `@@` header under the cursor (`zo` uses the nearest one) |
@@ -229,7 +236,7 @@ Opened with `<leader>gb` (or `:DiffNvimPreviewBranch`).
 | `<leader>gv` | Toggle split / unified, keeping the cursor on its line |
 | `<leader>n` | Leave a note on current / visual selection |
 | `<leader>c` | Comment on the pull request at the current line / visual selection |
-| `K` | Show the pull request comments on this line (on other lines, your own `K` mapping or Neovim's) |
+| `<leader>C` | Show the pull request comments on this line |
 | `<leader>N` | Toggle notes panel |
 | `q` | Close diff view |
 
@@ -247,6 +254,23 @@ Hunk staging uses zero-context patches. A change directly next to a final line w
 | `q` | Close panel |
 
 ---
+
+## Go to Definition and Hover
+
+`gd` in the diff view goes to the definition of the symbol under the cursor without leaving the review:
+
+- **In this file:** the cursor moves to the definition, revealing it first if it is in collapsed context.
+- **In another file the diff covers** (same panel section, or same commit): the diff view opens that file at the definition.
+- **In a file the diff does not cover:** a float previews it. `<CR>` opens the file in the editor; `q` or `<Esc>` closes the float.
+- **Several definitions:** you pick one from a list.
+
+`<C-o>` goes back to where each jump left from, across files.
+
+Your language server answers about the file as the editor has it, so the line under the cursor is matched to its line in that file first. The first `gd` in a file loads it in the background, which starts your language server for it as opening it would. Nothing is loaded before then. At most 10 files loaded this way stay loaded, the least recently asked about going first, and the rest are unloaded when the diff view closes. A file you opened yourself in the meantime is never unloaded.
+
+`K` shows what the symbol under the cursor is, as your language server describes it, in a float under the cursor; `K` again moves into the float. It asks the same way `gd` does, so the first `K` in a file loads it too.
+
+Some lines have no matching line in the file the language server knows: a removed or rewritten line, or any line while you [preview another branch](#branch-preview). For those lines, `K` says why it has no answer, and `gd` searches the text of that side of the diff instead. It uses tree-sitter's scopes where the language has them, and Vim's own `gd` search otherwise, and the message says a text search was used. The search is also used when no language server attaches to the file within 5 seconds, or when the server does not answer within 10 seconds. After a file type has gone without a server once, its lookups use the search at once, until a server attaches to a file of that type.
 
 ## User Commands
 
@@ -344,11 +368,11 @@ never handles a token.
   points at the pull request's own repository, not the fork's `origin`.
 - **Comment threads** show on their lines in the diff: a sign (`●` open, `◆`
   your draft, a dimmed `●` when resolved or outdated) and the first comment at
-  the end of the line. Press `K` on the line to open the thread in a float
-  under it.
+  the end of the line. Press `<leader>C` on the line (or click the sign) to open
+  the thread in a float under it.
 - **In the thread float**, the keys are `r` reply, `R` resolve or unresolve, `e` edit your comment, `x` delete it
   (press twice to confirm), `<Tab>` move between buttons, `<CR>` press the one
-  under the cursor, `q` close.
+  under the cursor, `q` or `<leader>C` close.
 - **To comment**, press `<leader>c` on a line or a visual selection. A float
   opens to write the comment in Markdown. Press `<Esc>`, then `<CR>` to add it
   (`keymaps.submit_comment`) or `<Esc>` again to cancel; `<Tab>` moves to the

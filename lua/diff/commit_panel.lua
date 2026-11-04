@@ -407,7 +407,11 @@ local function to_source(hash, f)
   return { kind = "commit", hash = hash, path = f.path, old_path = f.old_path, status = f.status }
 end
 
-function M.navigator(source, dir)
+--- The files the diff view moves between: those of the commit it shows (see
+--- diff_view.open).
+M.navigator = {}
+
+function M.navigator.step(source, dir)
   local d = S.details[source.hash]
   if not d then return nil end
   local files = {}
@@ -423,6 +427,14 @@ function M.navigator(source, dir)
     end
   end
   return nil
+end
+
+--- The file at repo-relative `path` among those the commit changed.
+function M.navigator.find(source, path)
+  local d = S.details[source.hash]
+  for _, f in ipairs(d and d.files or {}) do
+    if f.path == path then return to_source(source.hash, f) end
+  end
 end
 
 -- ---------------------------------------------------------------------------

@@ -89,11 +89,11 @@ return {
     H.eq(#thread_marks(S().bufs.old), 0, "the old side has none")
   end },
 
-  { "K opens the line's thread under it", function()
+  { "<leader>C opens the line's thread under it", function()
     local win = S().panes.new
     vim.api.nvim_set_current_win(win)
     vim.api.nvim_win_set_cursor(win, { row_of_new(3), 0 })
-    feed("K")
+    feed("<leader>C")
     H.ok(pr_thread.is_open(), "thread float open")
     local text = table.concat(vim.api.nvim_buf_get_lines(pr_thread._state().buf, 0, -1, false), "\n")
     H.ok(text:find("Is this right?", 1, true), text)
@@ -101,27 +101,28 @@ return {
     pr_thread.close()
   end },
 
-  { "K on a line without comments keeps its own meaning", function()
+  { "<leader>C on a line without comments says so", function()
     local win = S().panes.new
     vim.api.nvim_set_current_win(win)
     vim.api.nvim_win_set_cursor(win, { row_of_new(1), 0 })
-    vim.api.nvim_create_user_command("ReviewSpecKeyword", function(o) vim.g.keyword_looked_up = o.args end, { nargs = "*" })
-    vim.o.keywordprg = ":ReviewSpecKeyword"
-    feed("K")
+    local notify, said = vim.notify, nil
+    vim.notify = function(msg) said = msg end
+    feed("<leader>C")
+    vim.notify = notify
     H.eq(pr_thread.is_open(), false)
-    H.eq(vim.g.keyword_looked_up, "line")
+    H.eq(said, "diff.nvim: no pull request comments on this line")
   end },
 
-  { "K on a line without comments runs the user's own K mapping", function()
+  { "K on a line with comments asks for hover, not the thread", function()
     local win = S().panes.new
     vim.api.nvim_set_current_win(win)
-    vim.api.nvim_win_set_cursor(win, { row_of_new(1), 0 })
-    vim.g.global_k = nil
-    vim.keymap.set("n", "K", function() vim.g.global_k = true end)
+    vim.api.nvim_win_set_cursor(win, { row_of_new(3), 0 })
+    local notify, said = vim.notify, nil
+    vim.notify = function(msg) said = msg end
     feed("K")
-    vim.keymap.del("n", "K")
-    H.eq(vim.g.global_k, true)
+    vim.notify = notify
     H.eq(pr_thread.is_open(), false)
+    H.ok(said and said:find("no hover information", 1, true), tostring(said))
   end },
 
   { "clicking a thread's sign opens it; clicking its Resolve button resolves it", function()

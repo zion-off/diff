@@ -1270,6 +1270,12 @@ function M.set_preview_branch(branch, worktree)
   M.refresh()
 end
 
+--- The branch being previewed (its files are not the ones on disk), or nil.
+--- @return string|nil
+function M.preview_branch()
+  return M._preview_branch
+end
+
 function M.pick_preview_branch()
   if not M.is_open() or not M._repo_root then return end
   require("diff.branch_picker").open(M._repo_root, M.set_preview_branch)

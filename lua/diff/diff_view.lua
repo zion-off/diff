@@ -21,6 +21,8 @@ local syntax  = require("diff.syntax")
 local word_diff = require("diff.word_diff")
 local chrome  = require("diff.chrome")
 local util    = require("diff.util")
+local lsp     = require("diff.lsp")
+local peek    = require("diff.peek")
 
 local NS       = vim.api.nvim_create_namespace("diff_nvim_diff")
 local NS_WORDS = vim.api.nvim_create_namespace("diff_nvim_words")
@@ -78,6 +80,8 @@ local function fresh_state()
     -- refresh still in flight.
     open_gen = 0, refresh_gen = 0,
     opening = false,
+    ask_gen = 0,                -- counts language server questions; an answer to an older one is dropped
+    trail = {},                 -- where definition jumps left from, most recent last
   }
 end
 
@@ -1369,7 +1373,15 @@ local function show_binary(root, source, navigator)
   fire_view_changed()
 end
 
-local function show(root, source, navigator, old, new)
+--- Where an open puts the cursor: opts.anchor (see resolve_anchor), or a
+--- function of the loaded sides returning one; the first change otherwise.
+local function opening_anchor(opts, old, new)
+  local anchor = opts and opts.anchor
+  if type(anchor) == "function" then anchor = anchor(old, new) end
+  return anchor or { block = 1 }
+end
+
+local function show(root, source, navigator, old, new, opts)
   S.root, S.source, S.navigator = root, source, navigator
   local mode = ensure_layout(mode_for(source))
   if not mode then
@@ -1384,7 +1396,7 @@ local function show(root, source, navigator, old, new)
   S.lnum_width = #tostring(math.max(#old.lines, #new.lines, 1))
   name_buffers()
   local sources = make_sources(old, new)
-  render({ block = 1 })
+  render(opening_anchor(opts, old, new))
   -- The parse runs in slices queued back to back, and nothing is drawn until
   -- the queue is empty: paint the finished view first, highlighted after.
   vim.cmd("redraw")
@@ -1396,14 +1408,21 @@ local function show(root, source, navigator, old, new)
     stop_watcher()
   end
   pcall(vim.api.nvim_set_current_win, focus_pane())
+  if opts and opts.col then
+    pcall(vim.api.nvim_win_set_cursor, focus_pane(), { vim.api.nvim_win_get_cursor(focus_pane())[1], opts.col })
+  end
   fire_view_changed()
 end
 
 --- Open a diff.
 --- @param root      string
 --- @param source    table  see content.lua
---- @param navigator fun(source: table, dir: integer): table|nil  supplies ]f / [f targets
-function M.open(root, source, navigator)
+--- @param navigator table  the files the view moves between:
+---   step(source, dir): table|nil  the next (1) or previous (-1) file, for ]f / [f
+---   find(source, path): table|nil  the file at repo-relative `path`, if it is one of them
+--- @param opts      table|nil  { anchor = table|fun(old, new): table (see resolve_anchor),
+---   col = integer|nil }  where the cursor goes; the first change by default
+function M.open(root, source, navigator, opts)
   S.open_gen = S.open_gen + 1
   S.opening = true
   local gen = S.open_gen
@@ -1422,7 +1441,7 @@ function M.open(root, source, navigator)
       if content.looks_binary(old) or content.looks_binary(new) then
         show_binary(root, source, navigator)
       else
-        show(root, source, navigator, old, new)
+        show(root, source, navigator, old, new, opts)
       end
     end, debug.traceback)
     if not ok then
@@ -1734,12 +1753,278 @@ end
 
 function M.goto_neighbor(dir)
   if not (S.source and S.navigator) then return end
-  local nxt = S.navigator(S.source, dir)
+  local nxt = S.navigator.step(S.source, dir)
   if not nxt then
     vim.api.nvim_echo({ { dir > 0 and "diff.nvim: last file" or "diff.nvim: first file", "WarningMsg" } }, false, {})
     return
   end
   M.open(S.root, nxt, S.navigator)
+end
+
+-- ---------------------------------------------------------------------------
+-- Go to definition, hover
+--
+-- The language server is asked about the symbol under the cursor in the file
+-- as the editor has it (see lsp.lua). A definition is shown in the review
+-- where it can be: in this diff, or in the diff of another changed file; one
+-- in a file the review does not cover is previewed in a float. Every jump
+-- remembers where it left from, for jump_back.
+-- ---------------------------------------------------------------------------
+
+local TRAIL_MAX = 100
+
+-- Why the language server gave no answer: the question's status, or a
+-- branch preview, where it is not asked at all.
+local UNANSWERED = {
+  unmapped  = "this line is not in the current file",
+  no_server = "no language server for this file",
+  timeout   = "the language server did not answer in time",
+  error     = "the language server failed",
+  preview   = "the previewed branch is not on disk",
+}
+
+local function same_file(a, b)
+  return a ~= nil and b ~= nil and a.kind == b.kind and a.path == b.path and a.staged == b.staged
+    and a.hash == b.hash and a.base == b.base
+end
+
+--- Where the cursor is now, to come back to.
+local function here()
+  local win, p = current_pane()
+  local anchor = capture_anchor(win)
+  return {
+    root = S.root, source = S.source, navigator = S.navigator, anchor = anchor, pane = p,
+    col = valid_win(win) and vim.api.nvim_win_get_cursor(win)[2] or 0,
+  }
+end
+
+local function leave_trail(origin)
+  table.insert(S.trail, origin)
+  if #S.trail > TRAIL_MAX then table.remove(S.trail, 1) end
+end
+
+--- `abs` relative to the repository, or nil when it is outside it.
+local function repo_relative(abs)
+  local root = S.root .. "/"
+  if abs:sub(1, #root) == root then return abs:sub(#root + 1) end
+  local resolved = vim.fn.resolve(abs)
+  if resolved:sub(1, #root) == root then return resolved:sub(#root + 1) end
+end
+
+--- Put the cursor on `line` of `side`, at byte `col`, in the pane showing
+--- that side, revealing the line first when it is in collapsed context.
+--- @return boolean whether the line is in this diff and on screen
+local function show_line(side, line, col)
+  local win = S.panes[side] or S.panes.unified
+  if not valid_win(win) then return false end
+  local target
+  for r, row in ipairs(S.model.rows) do
+    if row[side] == line then target = r break end
+  end
+  if not target then return false end
+  if not engine.item_of(S.layout, target, side) then
+    local new = S.model.rows[target].new
+    if not new then return false end
+    local ctx = S.ctx or 0
+    log.debug("revealing %s line %d for a definition", side, line)
+    table.insert(S.reveals, { math.max(1, new - ctx), new + ctx })
+    render({ side = side, line = line })
+  end
+  local idx = engine.item_of(S.layout, target, side)
+  if not idx then return false end
+  vim.api.nvim_set_current_win(win)
+  place_cursor(idx)
+  pcall(vim.api.nvim_win_set_cursor, win, { idx, col or 0 })
+  return true
+end
+
+--- Preview `loc`, a definition outside the review, in a float.
+local function preview(loc, rel)
+  local lines = lsp.file_lines(loc.path)
+  if not lines then
+    notify("cannot read " .. loc.path, vim.log.levels.WARN)
+    return
+  end
+  log.info("previewing the definition at %s:%d", loc.path, loc.line)
+  peek.open({
+    path = loc.path, title = rel or vim.fn.fnamemodify(loc.path, ":~"), lines = lines,
+    line = loc.line, col = loc.col,
+    open = function() sidebar().open_in_editor(loc.path, loc.line) end,
+  })
+end
+
+--- Show definition `loc` (a line of the file as the editor has it) in the
+--- review: in this diff, in another changed file's diff, else in a preview.
+--- The line of `new` (one version of the file at `path`) that is line
+--- `line` of the file as the editor has it; nil when that version does not
+--- have it (it was added since, in a staged, commit or branch diff).
+local function line_in_version(path, line, new)
+  local lines = lsp.file_lines(path)
+  return lines and engine.exact_line_mapper(lines, new)(line)
+end
+
+local function go_to(loc, origin)
+  local rel = repo_relative(loc.path)
+  if rel and rel == S.source.path then
+    local line = line_in_version(loc.path, loc.line, S.model.new.lines)
+    if line and show_line("new", line, loc.col) then
+      log.info("definition in this file at line %d", line)
+      leave_trail(origin)
+      return
+    end
+    log.info("definition at %s:%d is not in the version shown; previewing it", rel, loc.line)
+    return preview(loc, rel)
+  end
+  local target = rel and S.navigator and S.navigator.find(S.source, rel)
+  if target then
+    log.info("definition in changed file %s at line %d", rel, loc.line)
+    leave_trail(origin)
+    M.open(S.root, target, S.navigator, {
+      anchor = function(_, new)
+        local line = line_in_version(loc.path, loc.line, new.lines)
+        if line then return { side = "new", line = line } end
+        log.info("definition at %s:%d is not in the version shown; showing the nearest line", rel, loc.line)
+        vim.schedule(function()
+          notify(string.format("line %d of %s is not in the version this diff shows; this is the nearest line",
+            loc.line, rel))
+        end)
+        local lines = lsp.file_lines(loc.path)
+        return { side = "new", line = lines and engine.line_mapper(lines, new.lines)(loc.line) or loc.line }
+      end,
+      col = loc.col,
+    })
+    return
+  end
+  preview(loc, rel)
+end
+
+--- Pick one of several definitions, then show it.
+local function choose(locations, origin, still_current)
+  if #locations == 1 then return go_to(locations[1], origin) end
+  vim.ui.select(locations, {
+    prompt = "Definitions",
+    format_item = function(loc)
+      return string.format("%s:%d", repo_relative(loc.path) or vim.fn.fnamemodify(loc.path, ":~"), loc.line)
+    end,
+  }, function(loc)
+    if loc and still_current() then go_to(loc, origin) end
+  end)
+end
+
+--- Find the declaration in this side's own text, for when the language
+--- server cannot be asked; `reason` says why it was not.
+local function search_side(side, line, col, origin, reason)
+  local src = S.sources[side]
+  local r, c
+  if src then r, c = src:local_definition(line - 1, col) end
+  if r and show_line(side, r + 1, c) then
+    leave_trail(origin)
+    vim.api.nvim_echo({ { "diff.nvim: " .. reason .. "; found by a text search", "Comment" } }, false, {})
+    return
+  end
+  notify("no definition found (" .. reason .. ", and a text search found nothing)")
+end
+
+--- The symbol under the cursor, to ask the language server about: the
+--- pane's window, the side and line it shows, the byte column, and the
+--- file's absolute path; nil (having said why) on a row with no code. Asking
+--- supersedes any question still waiting for its answer.
+local function symbol_at_cursor()
+  if not (S.model and S.layout) then return nil end
+  local win, p = current_pane()
+  if not valid_win(win) then return nil end
+  local cursor = vim.api.nvim_win_get_cursor(win)
+  local side, line = side_line(p, item_at(cursor[1]))
+  if not line then
+    notify("no code under the cursor")
+    return nil
+  end
+  local src = S.source
+  local path = side == "old" and (src.old_path or src.path) or src.path
+  S.ask_gen = S.ask_gen + 1
+  local gen = S.ask_gen
+  return {
+    win = win, side = side, line = line, col = cursor[2], path = path,
+    query = { path = S.root .. "/" .. path, lines = S.model[side].lines, line = line, col = cursor[2] },
+    --- Whether the answer still applies: no newer question, the same file
+    --- shown. A refresh may have replaced the source with an equal one.
+    current = function() return gen == S.ask_gen and same_file(S.source, src) and S.model ~= nil end,
+  }
+end
+
+local function unanswered_reason(res)
+  local reason = UNANSWERED[res.status] or res.status
+  if res.message then reason = reason .. " (" .. res.message .. ")" end
+  return reason
+end
+
+--- Go to the definition of the symbol under the cursor.
+function M.goto_definition()
+  local at = symbol_at_cursor()
+  if not at then return end
+  local origin = here()
+  log.debug("definition at %s %s:%d:%d", at.side, at.path, at.line, at.col)
+  if sidebar().preview_branch() then
+    return search_side(at.side, at.line, at.col, origin, UNANSWERED.preview)
+  end
+  lsp.definition(at.query, function(res)
+    -- Focus may have moved on (a comment being written, the sidebar): a
+    -- late answer must not pull it back.
+    if not (at.current() and pane_of_win(vim.api.nvim_get_current_win())) then
+      log.debug("dropping a definition answer: the view or focus moved on")
+      return
+    end
+    if res.status == "found" then return choose(res.locations, origin, at.current) end
+    if res.status == "none" then return notify("no definition found") end
+    search_side(at.side, at.line, at.col, origin, unanswered_reason(res))
+  end)
+end
+
+--- Show what the symbol under the cursor is, as the language server
+--- describes it, in a float under the cursor. Asked again while the float
+--- is open, it moves into the float, as Neovim's own hover does.
+function M.hover_symbol()
+  local at = symbol_at_cursor()
+  if not at then return end
+  log.debug("hover at %s %s:%d:%d", at.side, at.path, at.line, at.col)
+  if sidebar().preview_branch() then
+    return notify("no hover information (" .. UNANSWERED.preview .. ")")
+  end
+  lsp.hover(at.query, function(res)
+    if not (at.current() and vim.api.nvim_get_current_win() == at.win) then
+      log.debug("dropping a hover answer: the view or the cursor moved on")
+      return
+    end
+    if res.status == "none" then return notify("no hover information for this symbol") end
+    if res.status ~= "found" then return notify("no hover information (" .. unanswered_reason(res) .. ")") end
+    vim.lsp.util.open_floating_preview(res.lines, "markdown", {
+      focus_id = "diff_nvim_hover", border = "rounded", max_width = 100, max_height = 25,
+    })
+  end)
+end
+
+--- Go back to where the last definition jump left from; with none to go
+--- back to, `key` does what it does elsewhere.
+function M.jump_back(key)
+  local entry = table.remove(S.trail)
+  if not entry then
+    log.debug("no definition jump to go back from; %s does what it does elsewhere", key)
+    util.run_global_key(key)
+    return
+  end
+  S.ask_gen = S.ask_gen + 1
+  peek.close()
+  if same_file(entry.source, S.source) and S.model then
+    log.debug("back to %s:%s", entry.source.path, entry.anchor and tostring(entry.anchor.line) or "?")
+    local win = valid_win(S.panes[entry.pane]) and S.panes[entry.pane] or current_pane()
+    vim.api.nvim_set_current_win(win)
+    local idx = resolve_anchor(entry.anchor)
+    place_cursor(idx)
+    pcall(vim.api.nvim_win_set_cursor, win, { idx, entry.col })
+    return
+  end
+  log.info("back to %s", entry.source.path)
+  M.open(entry.root, entry.source, entry.navigator, { anchor = entry.anchor, col = entry.col })
 end
 
 --- The file lines under the cursor or the visual selection of pane `p`, on
@@ -1806,17 +2091,9 @@ end
 --- Open the pull request threads on the cursor's row.
 function M.show_comments()
   local win = current_pane()
-  if S.layout and valid_win(win) then show_threads_at(win, vim.api.nvim_win_get_cursor(win)[1]) end
-end
-
---- `show_comments` at the cursor: the threads when the row has any, else
---- what the key does elsewhere (the user's own mapping, or 'keywordprg' for K).
-local function show_comments_or_fallback(p, key)
-  return function()
-    local rows = S.thread_rows[p]
-    if rows and rows[vim.api.nvim_win_get_cursor(0)[1] - 1] then return M.show_comments() end
-    log.debug("no threads on this row; %s does what it does elsewhere", key)
-    require("diff.util").run_global_key(key)
+  if not (S.layout and valid_win(win)) then return end
+  if not show_threads_at(win, vim.api.nvim_win_get_cursor(win)[1]) then
+    notify("no pull request comments on this line")
   end
 end
 
@@ -1889,13 +2166,21 @@ setup_keymaps = function(buf, p)
   map({ "n", "v" }, km.leave_note, leave_note(p), "Leave note")
   -- Without nowait, so the user's longer mappings that start the same way still work.
   map({ "n", "v" }, km.leave_comment, leave_comment(p), "Comment on the pull request", { nowait = false })
-  map("n", km.show_comments, show_comments_or_fallback(p, km.show_comments), "Show pull request comments on this line")
+  -- Without nowait, so the user's longer mappings that start the same way still work.
+  map("n", km.show_comments, M.show_comments, "Show pull request comments on this line", { nowait = false })
+  if km.hover ~= km.show_comments then
+    map("n", km.hover, M.hover_symbol, "Show what the symbol under the cursor is")
+  else
+    log.warn("keymaps.hover and keymaps.show_comments are both %s; it shows pull request comments", tostring(km.hover))
+  end
   map("n", km.toggle_notes, function() require("diff.annotations").toggle_notes(S.root) end, "Toggle notes panel")
   map("n", km.next_hunk, function() M.jump_hunk(1) end, "Next hunk")
   map("n", km.prev_hunk, function() M.jump_hunk(-1) end, "Previous hunk")
   map("n", km.next_file, function() M.goto_neighbor(1) end, "Next file")
   map("n", km.prev_file, function() M.goto_neighbor(-1) end, "Previous file")
   map("n", km.goto_file, M.goto_file, "Open file at this line")
+  map("n", km.goto_definition, M.goto_definition, "Go to definition")
+  map("n", km.jump_back, function() M.jump_back(km.jump_back) end, "Back from a definition jump")
   map("n", km.stage_hunk, function() M.stage_hunk(false) end, "Stage hunk")
   map("n", km.unstage_hunk, function() M.stage_hunk(true) end, "Unstage hunk")
   map("n", km.expand_context, function() M.expand("cursor") end, "Expand context here")
@@ -1945,6 +2230,8 @@ function M.close()
   local had_view = S.source ~= nil
   stop_watcher()
   destroy_sources()
+  peek.close()
+  lsp.release()
   if valid_win(S.header_win) then pcall(vim.api.nvim_win_close, S.header_win, true) end
   if valid_win(S.extra_win) then pcall(vim.api.nvim_win_close, S.extra_win, true) end
   local host = sidebar().get_main_win()
