@@ -484,6 +484,35 @@ function M.line_mapper(before, after)
   end
 end
 
+--- Like line_mapper, but only for lines that are unchanged between the two
+--- versions: a line inside a changed region has no counterpart, and maps to
+--- nil. For asking about a line's content in the other version, where a
+--- nearby line would be a different question.
+--- @param before string[]
+--- @param after  string[]
+--- @return fun(line: integer): integer|nil
+function M.exact_line_mapper(before, after)
+  if vim.deep_equal(before, after) then
+    return function(line)
+      if line >= 1 and line <= #after then return line end
+    end
+  end
+  local hunks = vim.diff(join(before), join(after), { result_type = "indices", algorithm = "histogram" }) or {}
+  return function(line)
+    if line < 1 or line > #before then return nil end
+    local shift = 0
+    for _, h in ipairs(hunks) do
+      local sa, ca, sb, cb = h[1], h[2], h[3], h[4]
+      local a_first = ca > 0 and sa or sa + 1
+      local b_first = cb > 0 and sb or sb + 1
+      if line < a_first then break end
+      if line < a_first + ca then return nil end
+      shift = (b_first + cb) - (a_first + ca)
+    end
+    return line + shift
+  end
+end
+
 --- Build a zero-context patch that applies `block` (old side -> new side).
 --- Returns nil and a reason when the block cannot be expressed safely.
 --- @param model table

@@ -419,6 +419,17 @@ return {
     H.ok(not same[1].hunk)
   end },
 
+  { "the exact line mapper maps unchanged lines only", function()
+    local map = engine.exact_line_mapper(H.lines(10), { "new", "line 1", "line 2", "X", "line 4", "line 5",
+      "line 6", "line 9", "line 10" })
+    H.eq({ map(1), map(2), map(4), map(6) }, { 2, 3, 5, 7 })
+    H.eq({ map(3), map(7), map(8) }, { nil, nil, nil }, "changed and removed lines have no counterpart")
+    H.eq({ map(9), map(10), map(11), map(0) }, { 8, 9, nil, nil })
+
+    map = engine.exact_line_mapper(H.lines(3), H.lines(3))
+    H.eq({ map(1), map(3), map(4) }, { 1, 3, nil })
+  end },
+
   { "word diff marks a changed phrase as one range, not word by word", function()
     local word_diff = require("diff.word_diff")
     local old, new = word_diff.compute("call(alpha beta, first, second)", "call(gamma delta, first, second)")
