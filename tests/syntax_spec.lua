@@ -189,4 +189,32 @@ return {
       src:destroy()
     end
   end },
+
+  { "a local definition follows scopes: the innermost visible declaration wins", function()
+    local src = syntax.source("x.lua", {
+      "local name = 1",             -- 1
+      "local function f()",         -- 2
+      "  local name = 2",           -- 3
+      "  return name",              -- 4
+      "end",                        -- 5
+      "local function g() return name end", -- 6
+      "return f, g",                -- 7
+    })
+    src:parse()
+    H.wait(function() return src.ready end, "parse")
+    H.eq({ src:local_definition(3, 9) }, { 2, 8 }, "the shadowing local inside f")
+    H.eq({ src:local_definition(5, 26) }, { 0, 6 }, "the file's own outside f")
+    H.eq({ src:local_definition(6, 7) }, { 1, 15 }, "a function is visible after its body")
+    src:destroy()
+  end },
+
+  { "without scopes, a local definition is searched for as Vim's gd does", function()
+    local src = syntax.source("notes.txt", { "alpha = 1", "", "beta = alpha + 1" })
+    H.eq(src:has_parser(), false)
+    local search = vim.fn.getreg("/")
+    H.eq({ src:local_definition(2, 7) }, { 0, 0 })
+    H.eq(vim.fn.getreg("/"), search, "the search pattern is left alone")
+    H.eq({ src:local_definition(2, 0) }, {}, "a name used first right here has no declaration to find")
+    src:destroy()
+  end },
 }

@@ -286,6 +286,132 @@ function Source:enclosing_decl(line)
   return hit or nil
 end
 
+-- ---------------------------------------------------------------------------
+-- Local definitions: where a name is declared, found in this side's text
+-- alone, for when no language server can answer.
+-- ---------------------------------------------------------------------------
+
+local locals_cache = {}
+local function locals_query(lang)
+  if locals_cache[lang] == nil then
+    local ok, q = pcall(vim.treesitter.query.get, lang, "locals")
+    locals_cache[lang] = (ok and q) or false
+  end
+  return locals_cache[lang] or nil
+end
+
+--- "def", "scope" or nil for a locals capture. Queries name these
+--- `local.definition.*` and `local.scope`, or `definition.*` and `scope`
+--- in the older convention.
+local function locals_kind(capture)
+  if capture:find("^local%.definition") or capture:find("^definition") then return "def" end
+  if capture == "local.scope" or capture == "scope" then return "scope" end
+end
+
+-- A function, type or the like is visible in the scope around its own
+-- body, not only inside it.
+local HOISTED = { "function", "method", "type", "macro", "associated", "class" }
+
+local function hoisted(capture)
+  for _, kind in ipairs(HOISTED) do
+    if capture:find(kind, 1, true) then return true end
+  end
+  return false
+end
+
+--- The innermost scope around `node` (one further out when `hoist`), and how
+--- deep it is; nil and 0 for the file itself.
+local function scope_of(node, scopes, hoist)
+  local scope, n = nil, node:parent()
+  while n do
+    if scopes[n:id()] then
+      if not hoist then scope = n break end
+      hoist = false
+    end
+    n = n:parent()
+  end
+  local depth = 0
+  local p = scope
+  while p do depth, p = depth + 1, p:parent() end
+  return scope, depth
+end
+
+--- Tree-sitter's answer: the declaration of the name at 0-based (`row`,
+--- `col`) visible there, preferring the innermost scope, then the nearest
+--- declaration above the cursor.
+function Source:_scoped_definition(row, col)
+  local query = self.ready and self.root and self.lang and locals_query(self.lang)
+  if not query then return nil end
+  local target = self.root:named_descendant_for_range(row, col, row, col)
+  if not target or target:named_child_count() > 0 then return nil end
+  local name = vim.treesitter.get_node_text(target, self.buf)
+  local defs, scopes = {}, {}
+  for id, node in query:iter_captures(self.root, self.buf, 0, -1) do
+    local capture = query.captures[id]
+    local kind = locals_kind(capture)
+    if kind == "scope" then
+      scopes[node:id()] = true
+    elseif kind == "def" and vim.treesitter.get_node_text(node, self.buf) == name then
+      table.insert(defs, { node = node, hoist = hoisted(capture) })
+    end
+  end
+  local best, best_depth, best_above
+  for _, def in ipairs(defs) do
+    local scope, depth = scope_of(def.node, scopes, def.hoist)
+    if not scope or vim.treesitter.is_in_node_range(scope, row, col) then
+      local r, c = def.node:start()
+      local above = r < row or (r == row and c <= col)
+      local better = not best or depth > best_depth
+        or (depth == best_depth and above and (not best_above or r > best:start()))
+      if better then best, best_depth, best_above = def.node, depth, above end
+    end
+  end
+  if best then return best:start() end
+end
+
+--- Vim's own `gd` on this side's text: the first use of the word in the
+--- function around it (or the file), found by searching. It leaves the
+--- user's search pattern and jump list alone.
+function Source:_searched_definition(row, col)
+  local pos
+  vim.api.nvim_buf_call(self.buf, function()
+    local win = vim.api.nvim_get_current_win()
+    local saved = vim.api.nvim_win_get_cursor(win)
+    pcall(vim.api.nvim_win_set_cursor, win, { row + 1, col })
+    if pcall(vim.cmd, "keepjumps keeppatterns normal! gd") then
+      local cur = vim.api.nvim_win_get_cursor(win)
+      -- Staying on the word searched from finds nothing: it is the first use
+      -- of the name, not a declaration.
+      local start = vim.fn.matchstrpos(vim.api.nvim_buf_get_lines(self.buf, row, row + 1, false)[1] or "",
+        "\\k*\\%" .. (col + 1) .. "c\\k*")[2]
+      if cur[1] - 1 ~= row or cur[2] ~= start then pos = { cur[1] - 1, cur[2] } end
+    end
+    pcall(vim.api.nvim_win_set_cursor, win, saved)
+  end)
+  if pos then return pos[1], pos[2] end
+end
+
+--- Where the name at 0-based (`row`, `col`) is declared in this side, from
+--- its text alone: tree-sitter's scopes where the language has them, else a
+--- search. Both 0-based; nil when neither finds it.
+--- @return integer|nil row, integer|nil col
+function Source:local_definition(row, col)
+  local elapsed = require("diff.log").timer()
+  local how = "scopes"
+  local ok, r, c = pcall(self._scoped_definition, self, row, col)
+  if not ok then
+    log.warn("scoped definition lookup failed: %s", tostring(r))
+    r = nil
+  end
+  if not r then
+    how = "search"
+    r, c = self:_searched_definition(row, col)
+  end
+  log.debug("local definition at %d:%d (%s) -> %s by %s in %.1f ms",
+    row + 1, col, tostring(self.lang), r and string.format("%d:%d", r + 1, c) or "none", how, elapsed())
+  return r, c
+end
+
 function Source:destroy()
   self.dead = true
   self.listeners = {}
